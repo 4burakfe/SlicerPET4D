@@ -149,8 +149,13 @@ def test_missing_slices_inside_and_at_end():
     assert [ds is None for ds in layout["slots"][1]] == [False, False, True, False, False, False]
     assert layout["slots"][0][5] is None
     assert any("slice(s) missing" in w for w in layout["warnings"])
-    array = ps.frameArray(layout["slots"][1])
-    assert array.shape[0] == 6 and np.all(array[2] == 0) and np.allclose(array[3], 2000.0)
+    assert any("interpolated" in w and "left empty" in w for w in layout["warnings"])
+    array = ps.frameArray(layout["slots"][1])                    # the hole is interpolated
+    assert array.shape[0] == 6 and np.allclose(array[2], 2000.0) and np.allclose(array[3], 2000.0)
+    assert np.all(ps.frameArray(layout["slots"][1], interpolate=False)[2] == 0)
+    assert np.all(ps.frameArray(layout["slots"][0])[5] == 0)     # nothing above the top gap
+    assert list(ps.interpolatedSlices(layout["slots"][1])) == [False, False, True, False, False, False]
+    assert not ps.interpolatedSlices(layout["slots"][0]).any()
     origin, spacing, _ = ps.gridGeometry(layout["slots"][1], layout["grid"])
     assert abs(spacing[2] - 3.27) < 1e-6 and abs(origin[2] + 100.0) < 1e-6
     rows = ps.frameTiming(layout["frames"], numbers=layout["numbers"])
@@ -165,6 +170,31 @@ def test_missing_slice_in_every_frame_keeps_spacing():
     layout = ps.arrangeFrames(datasets)
     assert len(layout["grid"]) == 8 and all(slots[3] is None for slots in layout["slots"])
     assert any("every gate" in w for w in layout["warnings"])
+
+
+def test_fill_slice_gaps_is_linear():
+    array = np.zeros((7, 2, 2))
+    array[0], array[4] = 10.0, 50.0
+    present = np.array([True, False, False, False, True, False, False])
+    filled = ps.fillSliceGaps(array, present)
+    assert [float(v) for v in filled[:, 0, 0]] == [10.0, 20.0, 30.0, 40.0, 50.0, 0.0, 0.0]
+    assert np.all(array[1] == 0)                                  # input left alone
+
+
+def test_slice_wise_mean_prefers_real_slices():
+    a, b = np.full((3, 1, 1), 10.0), np.full((3, 1, 1), 30.0)
+    a[1] = 999.0                                                  # interpolated value in gate a
+    b[2] = 999.0                                                  # interpolated value in gate b
+    slotsA, slotsB = [1, None, 1], [1, 1, None]
+    mean = ps.SliceWiseMean()
+    mean.add(a, slotsA)
+    mean.add(b, slotsB)
+    assert [float(v) for v in mean.mean()[:, 0, 0]] == [20.0, 30.0, 10.0]
+    # a slice no gate has: from the interpolated ones, duration weighted
+    mean = ps.SliceWiseMean()
+    mean.add(np.full((3, 1, 1), 10.0), [1, None, 1], 1.0)
+    mean.add(np.full((3, 1, 1), 40.0), [1, None, 1], 2.0)
+    assert np.allclose(mean.mean()[:, 0, 0], 30.0)
 
 
 def test_examine_warning():

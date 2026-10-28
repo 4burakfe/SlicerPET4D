@@ -301,14 +301,12 @@ class DICOMGatedDynamicPETPluginClass(DICOMPlugin):
 
     def _loadGated(self, name, layout, scales, ijkToRas, units, prefix, common, loadable, summed=True):
         gates, method, numbers = layout["frames"], layout["method"], layout["numbers"]
-        nodes, total, counts, upper = [], None, None, 0.0
+        nodes, upper, summer = [], 0.0, petseries.SliceWiseMean()
         gateName = name if " gated " in f" {name} " else f"{name} gated"
         for i, (gate, slots, g) in enumerate(zip(gates, layout["slots"], numbers)):
             array = petseries.frameArray(slots, scales[i])
             upper = max(upper, float(np.percentile(array, 99.9)))
-            present = petseries.presentSlices(slots).astype(np.float64)
-            total = array.astype(np.float64) if total is None else total + array
-            counts = present if counts is None else counts + present
+            summer.add(array, slots)
             node = self._volume(f"{gateName} G{g}", array, ijkToRas, units, prefix, common, gate, addToScene=False)
             node.SetAttribute(prefix + "Gate", str(g))
             trigger, duration = petseries.gateTiming(gate)
@@ -331,7 +329,7 @@ class DICOMGatedDynamicPETPluginClass(DICOMPlugin):
         # Static image of the acquisition: mean of the gates (each gate is a full concentration image); a
         # slice missing in some gates is the mean of the gates that have it
         meanName = name.replace(" gated ", " mean ", 1) if " gated " in name else f"{name} mean"
-        mean = total / np.maximum(counts, 1.0)[:, None, None]
+        mean = summer.mean()
         meanNode = self._volume(meanName, mean.astype(np.float32), ijkToRas, units, prefix, common, gates[0])
         meanNode.SetAttribute(prefix + "StaticFrom", f"mean of {len(gates)} gates")
         meanNode.SetAttribute("MPI.SummedFromGates", str(len(gates)))
@@ -349,17 +347,14 @@ class DICOMGatedDynamicPETPluginClass(DICOMPlugin):
         timing = petseries.frameTiming(frames, numbers=layout["numbers"])
         durations = [row["DurationS"] for row in timing]
         weighted = all(d and d > 0 for d in durations)
-        nodes, upper, total, weights = [], 0.0, None, None
+        nodes, upper, summer = [], 0.0, petseries.SliceWiseMean()
         for f, (slots, frame, row) in enumerate(zip(layout["slots"], frames, timing)):
             array = petseries.frameArray(slots, scales[f])
             upper = max(upper, float(np.percentile(array, 99.9)))
             if summed:
                 # summed acquisition = duration weighted mean of the concentrations, slice by slice over the
                 # frames that have the slice
-                weight = petseries.presentSlices(slots).astype(np.float64) * (durations[f] if weighted else 1.0)
-                part = array.astype(np.float64) * weight[:, None, None]
-                total = part if total is None else total + part
-                weights = weight if weights is None else weights + weight
+                summer.add(array, slots, durations[f] if weighted else 1.0)
             node = self._volume(f"{name} F{row['Frame']}", array, ijkToRas, units, prefix, common, frame,
                                 addToScene=False)
             node.SetAttribute(prefix + "Frame", str(row["Frame"]))
@@ -385,7 +380,7 @@ class DICOMGatedDynamicPETPluginClass(DICOMPlugin):
         summedNode = None
         if summed:
             summedName = name.replace(" dynamic ", " summed ", 1) if " dynamic " in name else f"{name} summed"
-            array = (total / np.maximum(weights, 1e-12)[:, None, None]).astype(np.float32)
+            array = summer.mean()
             summedNode = self._volume(summedName, array, ijkToRas, units, prefix, common, frames[0])
             summedNode.SetAttribute(prefix + "StaticFrom", f"{len(frames)} frames summed, "
                                     + ("duration weighted" if weighted else "frame durations unknown, plain mean"))
@@ -605,12 +600,14 @@ class DICOMGatedDynamicPETTest(ScriptedLoadableModuleTest):
         self.assertEqual([sequence.GetNthIndexValue(i) for i in range(3)], ["1", "2", "4"])
         second = slicer.util.arrayFromVolume(sequence.GetNthDataNode(1))
         self.assertEqual(second.shape[0], 6)
-        self.assertTrue(np.all(second[3] == 0))
+        # the hole is interpolated from slices 3 and 5 of that gate
+        np.testing.assert_allclose(second[3], 0.5 * (expected[1][2] + expected[1][4]), rtol=1e-4)
         meanArray = slicer.util.arrayFromVolume(mean)
         np.testing.assert_allclose(meanArray[3], np.mean([expected[0][3], expected[3][3]], axis=0), rtol=1e-4)
         np.testing.assert_allclose(meanArray[0], np.mean([expected[0][0], expected[1][0], expected[3][0]], axis=0),
                                    rtol=1e-4)
         self.assertIn("gate 3", mean.GetAttribute("GatedPET.LoadWarnings"))
+        self.assertIn("interpolated", mean.GetAttribute("GatedPET.LoadWarnings"))
         self.delayDisplay("Incomplete gated PET loaded with warnings")
 
     def test_LoadWithoutSummedVolumes(self):

@@ -43,9 +43,12 @@ warned (a message after loading, the Python log, and the `LoadWarnings` attribut
   header announces (frames x Number of Slices).
 - A **missing gate or time frame** is left out. The others keep their own numbers (gates *1, 2, 4*), so
   gate attributes and frame timing stay right.
-- A **missing slice** is left empty (0) in its frame, at its place on the slice grid shared by all frames,
-  so the frames keep the same geometry. The mean of the gates averages each slice over the gates that have
-  it.
+- A **missing slice** keeps its place on the slice grid shared by all frames, so the frames keep the same
+  geometry. When the frame has slices before and after it, it is linearly interpolated from the nearest
+  ones along the slice axis (the same result as hardening Slicer's acquisition geometry regularization
+  transform for a scalar volume with a gap). Missing slices at the top or bottom of the stack are left
+  empty (0). The mean of the gates and the dynamic summed volume take each slice from the frames that
+  really have it, and use the interpolated slices only where no frame has it.
 - Duplicate images at one slice position are skipped. With uneven slice spacing the volume is built with
   the median spacing.
 

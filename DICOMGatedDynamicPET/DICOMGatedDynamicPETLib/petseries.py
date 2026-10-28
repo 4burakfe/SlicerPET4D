@@ -415,8 +415,16 @@ def arrangeFrames(datasets, kind=None):
         examples = "; ".join(f"{word} {n}: slice {_listText(e, 6)}" if kind != STATIC else f"slice {_listText(e, 6)}"
                              for n, e in list(gaps.items())[:4])
         more = f"; {len(gaps) - 4} more {noun}" if len(gaps) > 4 else ""
-        warnings.append(f"{sum(len(e) for e in gaps.values())} slice(s) missing in {where} ({examples}{more}); "
-                        "missing slices are left empty (0)")
+        inner = sum(int(interpolatedSlices(row).sum()) for row in slots)
+        total = sum(len(e) for e in gaps.values())
+        if inner == total:
+            fate = "interpolated from the slices before and after"
+        elif inner:
+            fate = (f"{inner} between present slices interpolated from the slices before and after, "
+                    f"{total - inner} at the ends of the stack left empty (0)")
+        else:
+            fate = "they are at the ends of the stack and left empty (0)"
+        warnings.append(f"{total} slice(s) missing in {where} ({examples}{more}); {fate}")
     announced = int(_float(_value(datasets[0], "NumberOfSlices"), 0) or 0)
     if announced > len(grid):
         warnings.append(f"{len(grid)} slice positions found, the header says {announced} (slices missing at "
@@ -494,13 +502,17 @@ def rescaled(ds):
     return pixels * slope + intercept
 
 
-def frameArray(sortedSlices, scale=1.0):
+def frameArray(sortedSlices, scale=1.0, interpolate=True):
     """Frame volume as a float32 array (slices, rows, columns) times scale. Missing slices (None, see the
-    slots of arrangeFrames) are left 0."""
+    slots of arrangeFrames) between two present slices are linearly interpolated along the slice axis when
+    interpolate is set (see interpolatedSlices); the others are left 0."""
     reference = next(ds for ds in sortedSlices if ds is not None)
     shape = (int(reference.Rows), int(reference.Columns))
     planes = [rescaled(ds) if ds is not None else np.zeros(shape) for ds in sortedSlices]
-    return (np.stack(planes) * scale).astype(np.float32)
+    array = np.stack(planes).astype(np.float64)
+    if interpolate:
+        array = fillSliceGaps(array, presentSlices(sortedSlices))
+    return (array * scale).astype(np.float32)
 
 
 def presentSlices(slots):
@@ -508,7 +520,60 @@ def presentSlices(slots):
     return np.array([ds is not None for ds in slots])
 
 
+def interpolatedSlices(slots):
+    """Boolean array (slices,) of the missing slots that have a present slice on both sides, i.e. the ones
+    frameArray interpolates."""
+    present = presentSlices(slots)
+    if not present.any():
+        return np.zeros_like(present)
+    indices = np.flatnonzero(present)
+    inside = np.zeros_like(present)
+    inside[indices[0]:indices[-1] + 1] = True
+    return inside & ~present
+
+
+def fillSliceGaps(array, present):
+    """Copy of array (slices, rows, columns) with the missing slices between present ones linearly
+    interpolated from the nearest present slice below and above, weighted by distance on the slice grid.
+    This is what hardening Slicer's acquisition geometry regularization transform does for a gap in a
+    scalar volume (linear resampling across it). Missing slices at the ends of the stack stay as they are."""
+    array = np.array(array, dtype=np.float64, copy=True)
+    indices = np.flatnonzero(present)
+    for below, above in zip(indices[:-1], indices[1:]):
+        for k in range(below + 1, above):
+            w = (k - below) / float(above - below)
+            array[k] = (1.0 - w) * array[below] + w * array[above]
+    return array
+
+
 gateArray = frameArray
+
+
+class SliceWiseMean:
+    """Weighted mean of frame arrays, slice by slice. A slice comes from the frames that really have it; only
+    where no frame has it are the interpolated slices of the frames used (and where none has those either,
+    the result is 0)."""
+
+    def __init__(self):
+        self.total = self.weights = self.filledTotal = self.filledWeights = None
+
+    def add(self, array, slots, weight=1.0):
+        array = np.asarray(array, dtype=np.float64)
+        present = presentSlices(slots).astype(np.float64) * weight
+        filled = (presentSlices(slots) | interpolatedSlices(slots)).astype(np.float64) * weight
+        parts = (array * present[:, None, None], present, array * filled[:, None, None], filled)
+        if self.total is None:
+            self.total, self.weights, self.filledTotal, self.filledWeights = parts
+        else:
+            self.total += parts[0]
+            self.weights += parts[1]
+            self.filledTotal += parts[2]
+            self.filledWeights += parts[3]
+
+    def mean(self):
+        real = self.total / np.maximum(self.weights, 1e-12)[:, None, None]
+        filled = self.filledTotal / np.maximum(self.filledWeights, 1e-12)[:, None, None]
+        return np.where((self.weights > 0)[:, None, None], real, filled).astype(np.float32)
 
 
 def durationWeightedMean(arrays, durations):
