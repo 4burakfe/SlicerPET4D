@@ -164,6 +164,9 @@ class DICOMGatedDynamicPETPluginClass(DICOMPlugin):
                 warnings.append(suvNote)
             if suvProblems and not available[suvUnits]:
                 warnings.append("SUV not available: " + ", ".join(suvProblems))
+            if kind == petseries.DYNAMIC and not petseries.isDecayCorrected(header):
+                warnings.append("Frames are not decay corrected (Decay Correction NONE); loading asks whether to "
+                                "decay correct them to the first frame start")
             if warnings:
                 for loadable in loadables:
                     loadable.warning = "\n".join(warnings)
@@ -189,10 +192,12 @@ class DICOMGatedDynamicPETPluginClass(DICOMPlugin):
             return None
 
     # --- loading -------------------------------------------------------------------------------
-    def loadSeries(self, files, name, units=None, kind=None, loadable=None, summed=None):
+    def loadSeries(self, files, name, units=None, kind=None, loadable=None, summed=None, decayCorrect=None):
         """Load a PET series in units (Bq/ml, SUVbw, SUVlbm or SUVbsa; from the name when None); returns the
         node to show (static volume, gated mean or dynamic summed volume, else the sequence proxy). summed:
-        make the static image of a gated / dynamic series (None: the setting)."""
+        make the static image of a gated / dynamic series (None: the setting). decayCorrect: decay correct the
+        frames of a dynamic series that is not decay corrected (Decay Correction NONE) to the first frame
+        start (None: ask)."""
         import pydicom
         progress = slicer.util.createProgressDialog(labelText="Reading PET images...", maximum=len(files) + 1)
         datasets = []
@@ -212,8 +217,22 @@ class DICOMGatedDynamicPETPluginClass(DICOMPlugin):
             summed = kind == petseries.STATIC or petsettings.summedVolume(kind)
         layout = petseries.arrangeFrames(datasets, kind)
         frames, slots, method = layout["frames"], layout["slots"], layout["method"]
-        frameStarts = petseries.frameStartTimes(frames) if kind == petseries.DYNAMIC else None
-        suv = petseries.suvInfo(datasets, frameStarts)
+        frameStarts = petseries.frameStartTimes(frames, datasets) if kind == petseries.DYNAMIC else None
+        decayReference, decayFactors, decayNote = None, None, None
+        if kind == petseries.DYNAMIC:
+            layout["warnings"] += petseries.frameStartWarnings(frames, layout["numbers"], datasets)
+            if not petseries.isDecayCorrected(datasets[0]):
+                decayReference, factors, problem = petseries.decayCorrectionFactors(frames, datasets)
+                if problem:
+                    layout["warnings"].append(f"Frames are not decay corrected and cannot be corrected ({problem})")
+                    decayNote = f"none (not possible: {problem})"
+                elif decayCorrect if decayCorrect is not None else _askDecayCorrection(name, decayReference):
+                    decayFactors = layout["decayFactors"] = factors
+                    decayNote = ("frames decay corrected by the loader to the first frame start "
+                                 f"({decayReference.isoformat()})")
+                else:
+                    decayNote = "none (declined at load)"
+        suv = petseries.suvInfo(datasets, frameStarts, decayReference if decayFactors else None)
         suvExtra = {}
         if petseries.isSuvUnits(units):
             suvScale, frameScales, suvExtra, problems = petseries.suvScales(suv, petseries.suvMethodOf(units))
@@ -222,6 +241,8 @@ class DICOMGatedDynamicPETPluginClass(DICOMPlugin):
             scales, problems = [suv["activityScale"]] * len(frames), suv["problems"]
         if scales[0] is None:
             raise ValueError(f"{units} not available: " + ", ".join(problems or ["unknown units"]))
+        if decayFactors:
+            scales = [scale * factor for scale, factor in zip(scales, decayFactors)]
 
         origin, spacing, direction = petseries.gridGeometry(slots[0], layout["grid"])
         ijkToRas = vtk.vtkMatrix4x4()
@@ -232,7 +253,9 @@ class DICOMGatedDynamicPETPluginClass(DICOMPlugin):
         common = {"Kind": kind, "Units": units, "FrameOrdering": method, "Frames": str(len(frames))}
         if layout["warnings"]:
             common["LoadWarnings"] = " | ".join(layout["warnings"])
-        if suv["frameSuvScales"] and petseries.isSuvUnits(units):
+        if decayNote:
+            common["LoaderDecayCorrection"] = decayNote
+        if decayFactors or (suv["frameSuvScales"] and petseries.isSuvUnits(units)):
             common["Scale"] = "per frame"
         else:
             common["Scale"] = f"{scales[0]:.8g}"
@@ -345,6 +368,8 @@ class DICOMGatedDynamicPETPluginClass(DICOMPlugin):
     def _loadDynamic(self, name, layout, scales, ijkToRas, units, prefix, common, loadable, summed=True):
         frames, method = layout["frames"], layout["method"]
         timing = petseries.frameTiming(frames, numbers=layout["numbers"])
+        for row, factor in zip(timing, layout.get("decayFactors") or []):
+            row["LoaderDecayFactor"] = round(factor, 6)
         durations = [row["DurationS"] for row in timing]
         weighted = all(d and d > 0 for d in durations)
         nodes, upper, summer = [], 0.0, petseries.SliceWiseMean()
@@ -360,6 +385,8 @@ class DICOMGatedDynamicPETPluginClass(DICOMPlugin):
             node.SetAttribute(prefix + "Frame", str(row["Frame"]))
             if common.get("Scale") == "per frame":
                 node.SetAttribute(prefix + "FrameScale", f"{scales[f]:.8g}")
+            if layout.get("decayFactors"):
+                node.SetAttribute(prefix + "LoaderDecayFactor", f"{layout['decayFactors'][f]:.8g}")
             for key, value in row.items():
                 if key != "Frame" and value is not None:
                     node.SetAttribute(prefix + key, str(value))
@@ -442,19 +469,22 @@ def frameIndexValues(timing):
     return [f"{v:.3f}".rstrip("0").rstrip(".") for v in values]
 
 
+TEXT_TIMING_COLUMNS = ("StartDateTime", "StartSource")
+
+
 def frameTimingTable(name, timing):
     """Table node with one row per time frame and the columns of petseries.FRAME_TIMING_COLUMNS."""
     tableNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLTableNode", slicer.mrmlScene.GenerateUniqueName(name))
     table = tableNode.GetTable()
     for key, description in petseries.FRAME_TIMING_COLUMNS:
-        column = vtk.vtkStringArray() if key == "StartDateTime" else vtk.vtkDoubleArray()
+        column = vtk.vtkStringArray() if key in TEXT_TIMING_COLUMNS else vtk.vtkDoubleArray()
         column.SetName(key)
         table.AddColumn(column)
     table.SetNumberOfRows(len(timing))
     for r, row in enumerate(timing):
         for c, (key, _) in enumerate(petseries.FRAME_TIMING_COLUMNS):
             value = row.get(key)
-            if key == "StartDateTime":
+            if key in TEXT_TIMING_COLUMNS:
                 table.GetColumn(c).SetValue(r, value or "")
             else:
                 table.GetColumn(c).SetValue(r, float("nan") if value is None else float(value))
@@ -484,6 +514,21 @@ def _setPetDisplay(volumeNode, lower, upper):
     displayNode.AutoWindowLevelOff()
     displayNode.SetWindowLevelMinMax(lower, upper if upper > lower else lower + 1.0)
     displayNode.SetInterpolate(True)
+
+
+def _askDecayCorrection(name, reference):
+    """Ask whether to decay correct a dynamic series that is not decay corrected; yes without asking in tests."""
+    if slicer.app.testingEnabled():
+        return True
+    answer = qt.QMessageBox.question(
+        slicer.util.mainWindow(), "Dynamic PET not decay corrected",
+        f"The frames of '{name}' are not decay corrected (Decay Correction NONE).\n\n"
+        f"Decay correct them to the start of the first frame ({reference.strftime('%H:%M:%S')})? Frame to frame "
+        "values (time activity curves, kinetic modelling, the summed volume) need decay corrected frames.\n\n"
+        "Yes: each frame is multiplied by the decay from the first frame start and during the frame.\n"
+        "No: the frames are loaded as stored.",
+        qt.QMessageBox.Yes | qt.QMessageBox.No, qt.QMessageBox.Yes)
+    return answer == qt.QMessageBox.Yes
 
 
 def _warnUser(name, warnings):
@@ -523,6 +568,8 @@ class DICOMGatedDynamicPETTest(ScriptedLoadableModuleTest):
         self.test_LoadGated()
         self.setUp()
         self.test_LoadDynamic()
+        self.setUp()
+        self.test_LoadDynamicNotDecayCorrected()
         self.setUp()
         self.test_LoadGatedIncomplete()
         self.setUp()
@@ -582,6 +629,33 @@ class DICOMGatedDynamicPETTest(ScriptedLoadableModuleTest):
         table = slicer.mrmlScene.GetNodeByID(sequence.GetAttribute("DynamicPET.FrameTimingTableID"))
         self.assertEqual(table.GetNumberOfRows(), 4)
         self.delayDisplay("Dynamic PET loaded")
+
+    def test_LoadDynamicNotDecayCorrected(self):
+        durations = [60.0, 600.0, 1200.0]
+        files, _ = self._write(petseries.DYNAMIC, frames=3, frameDurationsS=durations, decayCorrection="NONE")
+        plugin = DICOMGatedDynamicPETPluginClass()
+        summed = plugin.loadSeries(files, "Decay dynamic Bq/ml", petseries.UNITS_ACTIVITY, decayCorrect=True)
+        sequence = slicer.mrmlScene.GetNodeByID(summed.GetAttribute("DynamicPET.DynamicSequence"))
+        halfLife = 6586.2
+        rate = np.log(2.0) / halfLife
+        starts = [0.0, 60.0, 660.0]
+        factors = [2.0 ** (t / halfLife) * rate * d / -np.expm1(-rate * d) for t, d in zip(starts, durations)]
+        for f in range(3):
+            node = sequence.GetNthDataNode(f)
+            np.testing.assert_allclose(slicer.util.arrayFromVolume(node), 1000.0 * (f + 1) * factors[f], rtol=1e-4)
+            self.assertAlmostEqual(float(node.GetAttribute("DynamicPET.LoaderDecayFactor")), factors[f], places=6)
+        self.assertIn("decay corrected by the loader", summed.GetAttribute("DynamicPET.LoaderDecayCorrection"))
+        # SUV of the corrected frames: one scale, the dose at the first frame start (= injection here)
+        summed = plugin.loadSeries(files, "Decay dynamic SUVbw", petseries.UNITS_SUV, decayCorrect=True)
+        sequence = slicer.mrmlScene.GetNodeByID(summed.GetAttribute("DynamicPET.DynamicSequence"))
+        np.testing.assert_allclose(slicer.util.arrayFromVolume(sequence.GetNthDataNode(2)),
+                                   3000.0 * factors[2] * 70.0 * 1000.0 / 370e6, rtol=1e-4)
+        # declined: the frames stay as stored
+        summed = plugin.loadSeries(files, "Raw dynamic Bq/ml", petseries.UNITS_ACTIVITY, decayCorrect=False)
+        sequence = slicer.mrmlScene.GetNodeByID(summed.GetAttribute("DynamicPET.DynamicSequence"))
+        np.testing.assert_allclose(slicer.util.arrayFromVolume(sequence.GetNthDataNode(2)), 3000.0, rtol=1e-4)
+        self.assertIn("declined", summed.GetAttribute("DynamicPET.LoaderDecayCorrection"))
+        self.delayDisplay("Not decay corrected dynamic PET loaded")
 
     def test_LoadGatedIncomplete(self):
         import pydicom

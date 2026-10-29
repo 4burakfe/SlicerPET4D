@@ -24,6 +24,9 @@ The series shows up in the DICOM browser with one loadable per unit; the first o
 | Dynamic | Series Type `DYNAMIC\IMAGE`, or Number of Time Slices (0054,0101) > 1 | *dynamic Bq/ml*, *dynamic SUVbw* | sequence of time frames (index *Time*, s) + **frame timing table** |
 | Static | any other PT series | *SUVbw*, *Bq/ml* | one volume |
 
+An explicit Series Type wins over the frame counts (a `DYNAMIC` series with Number of Time Slots > 1 stays
+dynamic); the counts decide only when the Series Type is missing or unknown.
+
 - Images are split into frames by Image Index (0054,1330), else Trigger Time (gated) or Frame Reference
   Time / acquisition time (dynamic), else repeated slice positions, and sorted along the slice normal.
   Every image keeps its own rescale slope.
@@ -115,8 +118,17 @@ place of the weight (`SUVMethod`, `LeanBodyMassKg`, `BodySurfaceAreaM2` are stor
 - *Decay Correction START*: the dose is decayed to the series time (or GE's scan start when the series time
   is later than the acquisition, else the first acquisition time); one scale for every frame.
 - *ADMIN*: no decay.
-- *NONE* (frames not decay corrected): the dose is decayed to **each frame's own start**, one scale per
-  frame.
+- *NONE* (frames not decay corrected): a dynamic series is **decay corrected on request**. The DICOM browser
+  warns about it, and loading asks whether to correct the frames to the start of the first frame, like a
+  START series (time activity curves and kinetic modelling need it). Frame *f* is multiplied by
+  2^((start_f - start_1) / T1/2) x λd / (1 - e^(-λd)): the decay from the first frame start plus the decay
+  during the frame (what the DICOM Decay Factor of a decay corrected frame holds). SUV then uses one
+  scale, the dose decayed to the first frame start. The factor is stored per frame
+  (`DynamicPET.LoaderDecayFactor`, timing column `LoaderDecayFactor`) and the choice in
+  `DynamicPET.LoaderDecayCorrection`. When the frames are left as stored, Bq/ml stays uncorrected and SUV
+  decays the dose to **each frame's own start**, one scale per frame. The starts are the same as in the
+  frame timing table; when a frame's start is unknown, SUV is not offered rather than using another
+  frame's time.
 - Philips counts images use the Philips SUV and activity scale factors; GML images are already in SUVbw.
 - When SUV cannot be computed (no weight, dose or times) only Bq/ml is offered, and the reason is in the
   tooltip.
@@ -135,7 +147,7 @@ Node attributes, with the prefix `StaticPET.`, `GatedPET.` or `DynamicPET.`. Eve
 | Scanner and reconstruction | `Manufacturer`, `ScannerModel`, `ReconstructionMethod`, `ConvolutionKernel` |
 | SUV inputs | `WeightKg`, `InjectedDoseBq`, `DecayedDoseBq`, `HalfLifeS`, `SUVSource`, `SUVProblems`; also `PatientWeightKg`, `PatientHeightCm`, `PatientSex` |
 | Gates | `Gate`, `TriggerTimeMs`, `FrameDurationMs`, and the ECG gating fields (`GatingLowRRMs`, `GatingHighRRMs`, `GatingHeartRateBpm`, beats acquired / rejected, ...) named like the DICOM SPECT Recon gating attributes |
-| Time frames | `Frame`, `StartDateTime` (clock), `StartFromInjectionS`, `StartFromStudyStartS`, `StartFromScanStartS`, `DurationS`, `DurationMs`, `MidFromInjectionS`, `MidFromScanStartS`, `EndFromInjectionS`, `FrameReferenceTimeMs`, `DecayFactor` |
+| Time frames | `Frame`, `StartDateTime` (clock), `StartFromInjectionS`, `StartFromStudyStartS`, `StartFromScanStartS`, `DurationS`, `DurationMs`, `MidFromInjectionS`, `MidFromScanStartS`, `EndFromInjectionS`, `FrameReferenceTimeMs`, `DecayFactor`, `StartSource`, `LoaderDecayFactor` |
 
 The **study start** of the frame timing is the start of the first PET frame, so frame 1 starts at 0 from the
 study start. The DICOM Study Time is often the registration or the CT, not the PET; it stays in `StudyStart`. The
@@ -144,7 +156,10 @@ dynamic sequence carries the first frame's start as `DynamicPET.StudyStartDateTi
 The dynamic sequence node also carries each timing column as a JSON list (`DynamicPET.FrameDurationS`,
 `DynamicPET.FrameMidFromInjectionS`, ...). The table *"<series> frame timing"* holds the same values, one
 row per frame, for kinetic modelling or export. A frame starts at the earliest acquisition time of its
-slices. When those times are missing, the starts are accumulated from the frame durations.
+slices; when a frame has none, it starts where the previous frame ends (previous start + Actual Frame
+Duration), and the first frame at the scan start. `StartSource` says which. Frame Reference Time is not used
+for the start, since the standard does not say whether it is the frame's start or middle. The loader warns
+about frames whose start was estimated, and about frames that start before the previous one ends.
 
 ## Static PET
 

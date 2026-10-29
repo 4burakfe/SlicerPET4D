@@ -22,6 +22,12 @@ def test_kinds():
     assert ps.seriesKind("PT", "", timeSlots="8") == ps.GATED
     assert ps.seriesKind("PT", "", timeSlices="20") == ps.DYNAMIC
     assert ps.seriesKind("CT", "STATIC") is None
+    # an explicit Series Type wins over conflicting frame counts
+    assert ps.seriesKind("PT", "DYNAMIC\\IMAGE", timeSlots="8", timeSlices="20") == ps.DYNAMIC
+    assert ps.seriesKind("PT", "DYNAMIC\\IMAGE", timeSlots="2") == ps.DYNAMIC
+    assert ps.seriesKind("PT", "GATED\\IMAGE", timeSlices="20") == ps.GATED
+    assert ps.seriesKind("PT", "STATIC\\IMAGE", timeSlots="8") == ps.STATIC
+    assert ps.seriesKind("PT", "", timeSlots="8", timeSlices="20") == ps.GATED   # counts only: gates first
 
 
 def test_static():
@@ -87,6 +93,92 @@ def test_dynamic_not_decay_corrected():
     for f, frame in enumerate(frames):
         np.testing.assert_allclose(ps.frameArray(frame, suv["frameSuvScales"][f]), expected[f], rtol=1e-4)
     assert suv["frameSuvScales"][2] > suv["frameSuvScales"][0]   # later frames: less activity left
+
+
+def _noAcquisitionTime(datasets, frameIndex):
+    frames, _ = ps.groupFrames(datasets)
+    for ds in frames[frameIndex]:
+        del ds.AcquisitionTime
+    return frames
+
+
+def test_not_decay_corrected_frame_without_acquisition_time():
+    """Decay Correction NONE: a frame without acquisition time gets the start of the timing table (end of the
+    previous frame), not the first frame's time; SUV and timing agree."""
+    durations = [600.0, 600.0, 600.0]
+    files, expected = ps.writeSyntheticSeries(tempfile.mkdtemp(), kind=ps.DYNAMIC, frames=3,
+                                              frameDurationsS=durations, decayCorrection="NONE", shuffle=False)
+    reference = ps.frameStartTimes(ps.groupFrames(_read(files))[0])
+    datasets = _read(files)
+    frames = _noAcquisitionTime(datasets, 2)
+    starts = ps.frameStarts(frames)
+    assert [source for _, source in starts] == [ps.START_FROM_ACQUISITION] * 2 + [ps.START_FROM_PREVIOUS]
+    assert [start for start, _ in starts] == reference              # back to back frames: same start
+    suv = ps.suvInfo(datasets, ps.frameStartTimes(frames))
+    for f, frame in enumerate(frames):
+        np.testing.assert_allclose(ps.frameArray(frame, suv["frameSuvScales"][f]), expected[f], rtol=1e-4)
+    rows = ps.frameTiming(frames)
+    assert [r["StartFromStudyStartS"] for r in rows] == [0, 600, 1200]
+    assert rows[2]["StartSource"] == ps.START_FROM_PREVIOUS
+    warnings = ps.frameStartWarnings(frames)
+    assert len(warnings) == 1 and "frame 3" in warnings[0]
+
+
+def test_not_decay_corrected_frame_without_any_start():
+    """Without a start for a frame (no acquisition time and no duration before it), SUV is not offered
+    instead of borrowing the first frame's time."""
+    files, _ = ps.writeSyntheticSeries(tempfile.mkdtemp(), kind=ps.DYNAMIC, frames=3,
+                                       frameDurationsS=[600.0] * 3, decayCorrection="NONE", shuffle=False)
+    datasets = _read(files)
+    frames = _noAcquisitionTime(datasets, 2)
+    for ds in frames[1]:
+        del ds.ActualFrameDuration
+    assert ps.frameStartTimes(frames)[2] is None
+    suv = ps.suvInfo(datasets, ps.frameStartTimes(frames))
+    assert suv["frameSuvScales"] is None and suv["suvScale"] is None
+    assert any("frame 3" in p for p in suv["problems"])
+    assert "no start at all" in ps.frameStartWarnings(frames)[0]
+
+
+def test_overlapping_frames_are_reported():
+    files, _ = ps.writeSyntheticSeries(tempfile.mkdtemp(), kind=ps.DYNAMIC, frames=3, frameDurationsS=[600.0] * 3)
+    datasets = _read(files)
+    frames, _ = ps.groupFrames(datasets)
+    for ds in frames[0]:
+        ds.ActualFrameDuration = 900000          # 15 min, but frame 2 starts after 10 min
+    warnings = ps.frameStartWarnings(frames)
+    assert len(warnings) == 1 and "Frame 2 starts before" in warnings[0]
+    assert ps.frameStartWarnings(ps.groupFrames(_read(files))[0]) == []
+
+
+def test_decay_correction_of_not_decay_corrected_frames():
+    """NONE: frame f is corrected to the first frame start by 2^(dt/T) x lambda d / (1 - exp(-lambda d)); with
+    the frames corrected, one SUV scale (the dose decayed to the first frame start) holds for all frames."""
+    durations = [60.0, 600.0, 1200.0]
+    files, _ = ps.writeSyntheticSeries(tempfile.mkdtemp(), kind=ps.DYNAMIC, frames=3, frameDurationsS=durations,
+                                       decayCorrection="NONE", shuffle=False)
+    datasets = _read(files)
+    frames, _ = ps.groupFrames(datasets)
+    assert not ps.isDecayCorrected(datasets[0])
+    reference, factors, problem = ps.decayCorrectionFactors(frames)
+    assert problem is None and reference == ps.frameStartTimes(frames)[0]
+    halfLife, rate = 6586.2, np.log(2.0) / 6586.2
+    starts = [0.0, 60.0, 660.0]
+    for factor, start, d in zip(factors, starts, durations):
+        assert abs(factor - 2.0 ** (start / halfLife) * rate * d / (1.0 - np.exp(-rate * d))) < 1e-9
+    # the first frame only has the decay during the frame: the same as the Decay Factor (0054,1321) a GE
+    # SIGNA PET/MR wrote for a 30 s C-11 frame at the scan start (1.00852)
+    x = np.log(2.0) / 1223.1 * 30.0
+    assert abs(x / -np.expm1(-x) - 1.00852) < 1e-5
+    suv = ps.suvInfo(datasets, ps.frameStartTimes(frames), decayCorrectedTo=reference)
+    assert suv["frameSuvScales"] is None and "decay corrected by the loader" in suv["DecayReference"]
+    assert abs(suv["suvScale"] - 70.0 * 1000.0 / 370e6) < 1e-12   # injection at the first frame start
+    # without a duration the frames cannot be corrected
+    del frames[1][0].ActualFrameDuration
+    assert ps.decayCorrectionFactors(frames)[1] is None
+    # START series are decay corrected already
+    started = _read(ps.writeSyntheticSeries(tempfile.mkdtemp(), kind=ps.DYNAMIC, frames=2)[0])
+    assert ps.isDecayCorrected(started[0])
 
 
 def test_dynamic_without_image_index():

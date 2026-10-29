@@ -2,7 +2,8 @@
 tracer, decay correction, frame timing and ECG gating (pydicom and numpy only, no Slicer dependency; the
 DICOM plugin is DICOMGatedDynamicPET.py).
 
-Kind of series (Series Type (0054,1000) first value, else the frame counts of the header):
+Kind of series (Series Type (0054,1000) first value; only when it is missing or unknown the frame counts of
+the header, gates first):
     GATED     GATED\\IMAGE, or Number of Time Slots (0054,0071) > 1: one frame per cardiac gate
     DYNAMIC   DYNAMIC\\IMAGE, or Number of Time Slices (0054,0101) > 1: one frame per time frame
     STATIC    anything else (STATIC, WHOLE BODY): one volume
@@ -25,7 +26,8 @@ SUVbw follows the QIBA vendor-neutral pseudo-code (also what Slicer's PET SUV pl
                  (one scale for the whole series);
                  ADMIN -> no decay;
                  NONE  -> images are not decay corrected: the dose is decayed to each frame's own
-                 acquisition start (one scale per frame).
+                 start (one scale per frame), the same frame starts as the frame timing table
+                 (frameStarts: acquisition time, else the end of the previous frame).
     Units CNTS   Philips: SUV scale factor (7053,1000), Bq/ml from the activity concentration scale
                  factor (7053,1009).
     Units GML    already SUVbw.
@@ -145,7 +147,13 @@ def parseDateTime(dateText, timeText=None):
 
 
 def _acquisitionStart(ds):
-    return parseDateTime(_value(ds, "AcquisitionDate") or _value(ds, "SeriesDate"), _value(ds, "AcquisitionTime"))
+    """Acquisition Date + Time of an image, else its Acquisition DateTime; None without an acquisition time
+    (a date alone would read as midnight)."""
+    time = _value(ds, "AcquisitionTime")
+    if time is not None and str(time).strip():
+        return parseDateTime(_value(ds, "AcquisitionDate") or _value(ds, "SeriesDate"), time)
+    stamp = str(_value(ds, "AcquisitionDateTime", "") or "").strip()
+    return parseDateTime(stamp) if len(stamp) > 8 else None
 
 
 def _seconds(later, earlier):
@@ -173,9 +181,13 @@ def seriesKind(modality, seriesType, timeSlots=None, timeSlices=None):
         return None
     types = _textList(seriesType)
     first = types[0] if types else ""
-    if first == GATED or (_float(timeSlots, 0) or 0) > 1:
+    if first in (GATED, DYNAMIC):   # an explicit Series Type wins over the frame counts
+        return first
+    if first in ("STATIC", "WHOLE BODY"):
+        return STATIC
+    if (_float(timeSlots, 0) or 0) > 1:
         return GATED
-    if first == DYNAMIC or (_float(timeSlices, 0) or 0) > 1:
+    if (_float(timeSlices, 0) or 0) > 1:
         return DYNAMIC
     return STATIC
 
@@ -706,12 +718,14 @@ def scanStart(datasets):
 # ---------------------------------------------------------------------------
 # SUV
 # ---------------------------------------------------------------------------
-def suvInfo(datasets, frameStarts=None):
+def suvInfo(datasets, frameStarts=None, decayCorrectedTo=None):
     """SUVbw conversion of a PET series: a dict with
         activityScale   factor from rescaled pixel values to Bq/ml (None when not possible)
         suvScale        factor from rescaled pixel values to SUVbw (None when not possible)
         frameSuvScales  for Decay Correction NONE with frameStarts given: one SUV factor per frame (the dose
                         decayed to each frame's start), else None (suvScale holds for every frame)
+                        decayCorrectedTo: the frames of a NONE series are decay corrected to this time by the
+                        loader (decayCorrectionFactors), so one scale with the dose decayed to it
         units           DICOM Units (0054,1001)
         and the inputs (WeightKg, InjectedDoseBq, DecayedDoseBq, InjectionTime, ScanStart, HalfLifeS,
         DecayCorrection, DecayReference, SUVSource) for the node attributes,
@@ -774,7 +788,10 @@ def suvInfo(datasets, frameStarts=None):
             decayed, reference = dose, "ADMIN (none)"
             info["ScanStart"] = ""
         else:
-            if decayCorrection == "NONE":
+            if decayCorrection == "NONE" and decayCorrectedTo is not None:
+                start, reference = decayCorrectedTo, "first frame start (frames decay corrected by the loader)"
+                frameStarts = None
+            elif decayCorrection == "NONE":
                 stamps = [a for a in (_acquisitionStart(ds) for ds in datasets) if a is not None]
                 start, reference = (min(stamps) if stamps else None), "first acquisition date/time"
                 if frameStarts and len(frameStarts) > 1:
@@ -792,8 +809,13 @@ def suvInfo(datasets, frameStarts=None):
                 else:
                     decayed = dose * math.pow(2.0, -elapsed / halfLife)
                     if decayCorrection == "NONE" and frameStarts and len(frameStarts) > 1:
-                        frameDecayed = [dose * math.pow(2.0, -((s or start) - injection).total_seconds() / halfLife)
-                                        for s in frameStarts]
+                        unknown = [str(f + 1) for f, s in enumerate(frameStarts) if s is None]
+                        if unknown:
+                            info["problems"].append(f"start time of frame {_listText(unknown, 6)} unknown "
+                                                    "(images not decay corrected)")
+                        else:
+                            frameDecayed = [dose * math.pow(2.0, -(s - injection).total_seconds() / halfLife)
+                                            for s in frameStarts]
                 info["ScanStart"] = start.isoformat()
         info["DecayReference"] = reference
     info.update({"WeightKg": weight, "InjectedDoseBq": dose, "HalfLifeS": halfLife,
@@ -888,32 +910,125 @@ FRAME_TIMING_COLUMNS = (
     ("EndFromInjectionS", "frame end from the injection, s"),
     ("FrameReferenceTimeMs", "Frame Reference Time (0054,1300), ms"),
     ("DecayFactor", "Decay Factor (0054,1321) applied to the frame"),
+    ("StartSource", "where the frame start comes from"),
+    ("LoaderDecayFactor", "decay correction applied by the loader to a not decay corrected frame (NONE)"),
 )
+START_FROM_ACQUISITION = "acquisition time"
+START_FROM_PREVIOUS = "end of the previous frame"
+START_FROM_SCAN = "scan start"
+
+
+def frameStarts(frames, datasets=None):
+    """Clock start of each time frame and where it comes from: a list of (datetime or None, source), in
+    this order of preference:
+        acquisition time   earliest Acquisition Date/Time of the frame's slices
+        end of the previous frame   previous start + its Actual Frame Duration (frames back to back, as in
+                           dynamic framing); used when the frame has no acquisition time
+        scan start         first frame only, without acquisition time (scanStart)
+    Frame Reference Time (0054,1300) is not used: the standard does not say whether it is the frame's start
+    or middle. Both the frame timing table and the per-frame SUV of non decay corrected images use these
+    starts, so they cannot disagree."""
+    datasets = datasets or [ds for frame in frames for ds in frame]
+    previousEnd = None
+    out = []
+    for f, frame in enumerate(frames):
+        stamps = [a for a in (_acquisitionStart(ds) for ds in frame) if a is not None]
+        if stamps:
+            start, source = min(stamps), START_FROM_ACQUISITION
+        elif previousEnd is not None:
+            start, source = previousEnd, START_FROM_PREVIOUS
+        elif f == 0:
+            start, source = scanStart(datasets)[0], START_FROM_SCAN
+        else:
+            start, source = None, None
+        durationMs = _float(_value(frame[0], "ActualFrameDuration"))
+        previousEnd = start + datetime.timedelta(milliseconds=durationMs) \
+            if (start is not None and durationMs is not None) else None
+        out.append((start, source if start is not None else None))
+    return out
+
+
+def isDecayCorrected(ds):
+    """False for images not decay corrected (Decay Correction (0054,1102) NONE), else True."""
+    return str(_value(ds, "DecayCorrection", "") or "").strip().upper() != "NONE"
+
+
+def decayCorrectionFactors(frames, datasets=None):
+    """Decay correction of the time frames of a series that is not decay corrected (Decay Correction NONE) to
+    the start of the first frame, as scanners do for START: (reference datetime, factors, problem). Frame f
+    is multiplied by
+        2^((start_f - reference) / T1/2) x lambda d_f / (1 - exp(-lambda d_f))
+    i.e. the decay from the reference to the frame start times the decay during the frame (the DICOM Decay
+    Factor (0054,1321) of a decay corrected frame). Uses the frame starts of frameStarts and Actual Frame
+    Duration; factors is None with the reason in problem when a start, a duration or the half life is
+    missing."""
+    datasets = datasets or [ds for frame in frames for ds in frame]
+    radio = _radiopharmaceutical(datasets[0])
+    halfLife = _float(_value(radio, "RadionuclideHalfLife")) if radio is not None else None
+    if not halfLife or halfLife <= 0:
+        return None, None, "half life missing"
+    starts = frameStartTimes(frames, datasets)
+    if any(start is None for start in starts):
+        return None, None, "a frame start is unknown"
+    durations = [_float(_value(frame[0], "ActualFrameDuration")) for frame in frames]
+    if any(d is None or d <= 0 for d in durations):
+        return None, None, "a frame duration is missing"
+    rate = math.log(2.0) / halfLife
+    reference = starts[0]
+    factors = []
+    for start, durationMs in zip(starts, durations):
+        x = rate * durationMs / 1000.0
+        factors.append(math.pow(2.0, (start - reference).total_seconds() / halfLife) * x / -math.expm1(-x))
+    return reference, factors, None
+
+
+def frameStartWarnings(frames, numbers=None, datasets=None):
+    """Texts for the user about the frame starts: frames without an acquisition time (start estimated) and
+    frames that start more than 1 s before the previous one ends (inconsistent times or durations)."""
+    numbers = list(numbers or range(1, len(frames) + 1))
+    starts = frameStarts(frames, datasets)
+    warnings = []
+    estimated = [n for n, (start, source) in zip(numbers, starts) if source != START_FROM_ACQUISITION]
+    if estimated:
+        unknown = [n for n, (start, _) in zip(numbers, starts) if start is None]
+        text = (f"Acquisition time missing in frame {_listText(estimated, 6)}; the start is taken from the end "
+                "of the previous frame (or the scan start) for the timing and for SUV")
+        if unknown:
+            text += f"; frame {_listText(unknown, 6)} has no start at all"
+        warnings.append(text)
+    overlaps = []
+    for f in range(1, len(frames)):
+        (start, source), (previous, _) = starts[f], starts[f - 1]
+        durationMs = _float(_value(frames[f - 1][0], "ActualFrameDuration"))
+        if source == START_FROM_ACQUISITION and previous is not None and durationMs is not None:
+            if (start - previous).total_seconds() < durationMs / 1000.0 - 1.0:
+                overlaps.append(numbers[f])
+    if overlaps:
+        warnings.append(f"Frame {_listText(overlaps, 6)} starts before the previous frame ends (acquisition "
+                        "times and frame durations disagree); the timing follows the acquisition times")
+    return warnings
 
 
 def frameTiming(frames, datasets=None, numbers=None):
     """Timing of each time frame of a dynamic (or gated) series: a list of dicts keyed like
-    FRAME_TIMING_COLUMNS (None where the header does not tell). A frame starts at the earliest acquisition
-    date/time of its slices; when the acquisition times are missing, the starts are accumulated from the
-    frame durations after the scan start. The study start is the start of the first frame of the PET (the DICOM
-    Study Time is often the registration or the CT, not the PET), so frame 1 starts at 0 from the study start."""
+    FRAME_TIMING_COLUMNS (None where the header does not tell). The frame starts are those of frameStarts
+    (acquisition time, else the end of the previous frame), with their source in StartSource. The study start
+    is the start of the first frame of the PET (the DICOM Study Time is often the registration or the CT, not
+    the PET), so frame 1 starts at 0 from the study start."""
     datasets = datasets or [ds for frame in frames for ds in frame]
     first = datasets[0]
     radio = _radiopharmaceutical(first)
     injection = _injectionTime(first, radio)
     scan, _ = scanStart(datasets)
-    timings, running = [], scan
-    for frame in frames:
-        starts = [a for a in (_acquisitionStart(ds) for ds in frame) if a is not None]
-        start = min(starts) if starts else running
+    timings = []
+    for frame, (start, source) in zip(frames, frameStarts(frames, datasets)):
         durationMs = _float(_value(frame[0], "ActualFrameDuration"))
         duration = durationMs / 1000.0 if durationMs is not None else None
-        timings.append((start, durationMs, duration))
-        if start is not None and duration is not None:
-            running = start + datetime.timedelta(seconds=duration)
+        timings.append((start, source, durationMs, duration))
     study = timings[0][0] if timings else None
     rows = []
-    for number, frame, (start, durationMs, duration) in zip(numbers or range(1, len(frames) + 1), frames, timings):
+    for number, frame, (start, source, durationMs, duration) in zip(numbers or range(1, len(frames) + 1), frames,
+                                                                     timings):
         middle = start + datetime.timedelta(seconds=duration / 2.0) if (start and duration is not None) else None
         end = start + datetime.timedelta(seconds=duration) if (start and duration is not None) else None
         rows.append({
@@ -929,18 +1044,16 @@ def frameTiming(frames, datasets=None, numbers=None):
             "EndFromInjectionS": _round(_seconds(end, injection), 3),
             "FrameReferenceTimeMs": _round(_value(frame[0], "FrameReferenceTime"), 1),
             "DecayFactor": _round(_value(frame[0], "DecayFactor"), 6),
+            "StartSource": source,
+            "LoaderDecayFactor": None,
         })
     return rows
 
 
 
-def frameStartTimes(frames):
-    """Clock start of each frame (earliest acquisition date/time of its slices, None when unknown)."""
-    out = []
-    for frame in frames:
-        starts = [a for a in (_acquisitionStart(ds) for ds in frame) if a is not None]
-        out.append(min(starts) if starts else None)
-    return out
+def frameStartTimes(frames, datasets=None):
+    """Clock start of each frame (see frameStarts; None when unknown)."""
+    return [start for start, _ in frameStarts(frames, datasets)]
 
 
 def timingLists(rows):
