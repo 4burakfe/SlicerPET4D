@@ -77,9 +77,9 @@ saved at once and apply to series examined in the DICOM browser afterwards.
   injection.
 - With a summed volume off, the sequence's *(current gate/frame)* volume is shown instead.
 
-## Review/Edit
+## Dynamic PET Review/Edit
 
-The **Review/Edit** module (Nuclear Medicine) reviews a dynamic series frame by frame. Pick the dynamic
+The **Dynamic PET Review/Edit** module (Nuclear Medicine) reviews a dynamic series frame by frame. Pick the dynamic
 sequence (the most recent one is picked for you) and press *Open Review/Edit*:
 
 - **Upper 2/3:** a large axial view of the current frame, and next to it a near-square grid of small axial
@@ -208,7 +208,7 @@ the *Gated / Dynamic PET Settings* module.
 DICOMGatedDynamicPET/
   DICOMGatedDynamicPET.py          DICOM plugin (examine / load), Slicer self-test on synthetic series
   GatedDynamicPETSettings.py       settings module (visible, Nuclear Medicine)
-  DynamicPETEditor.py              Review/Edit module (visible, Nuclear Medicine)
+  DynamicPETEditor.py              Dynamic PET Review/Edit module (visible, Nuclear Medicine)
   DICOMGatedDynamicPETLib/
     settings.py                    the settings, kept in the Slicer application settings
     dynamicviews.py, timeline.py   Review/Edit layout helpers and the timeline widget
@@ -221,7 +221,7 @@ Testing/                          tests without Slicer (petseries, Review/Edit h
 In Slicer, the self-test runs from the Python console:
 `import DICOMGatedDynamicPET; DICOMGatedDynamicPET.DICOMGatedDynamicPETTest().runTest()`.
 
-The Review/Edit module keeps its internal name `DynamicPETEditor` (file, classes, layout id), so scenes and
+The Dynamic PET Review/Edit module keeps its internal name `DynamicPETEditor` (file, classes, layout id), so scenes and
 scripts that use it keep working; only the title shown to users changed.
 
 ## License

@@ -1,5 +1,5 @@
 """
-Review/Edit (3D Slicer module, internally DynamicPETEditor)
+Dynamic PET Review/Edit (3D Slicer module, internally DynamicPETEditor)
 
 Opens a dynamic PET sequence (as loaded by the DICOM Gated / Dynamic PET plugin) in its own layout:
     upper 2/3   a large axial view of the current frame on the left and a near-square grid of small axial
@@ -60,7 +60,7 @@ PLANNED_OPERATIONS = (
 class DynamicPETEditor(ScriptedLoadableModule):
     def __init__(self, parent):
         ScriptedLoadableModule.__init__(self, parent)
-        parent.title = "Review/Edit"
+        parent.title = "Dynamic PET Review/Edit"
         parent.categories = ["Nuclear Medicine"]
         parent.dependencies = []
         parent.contributors = ["Burak Demir"]
@@ -741,7 +741,7 @@ class DynamicPETEditorSession:
     # --- timeline dock ---------------------------------------------------------------------------
     def _makeDock(self):
         mainWindow = slicer.util.mainWindow()
-        self.dock = qt.QDockWidget("Review/Edit timeline")
+        self.dock = qt.QDockWidget("Dynamic PET Review/Edit timeline")
         self.dock.setObjectName("DynamicPETEditorTimeline")
         self.dock.setFeatures(qt.QDockWidget.DockWidgetMovable | qt.QDockWidget.DockWidgetFloatable)
         container = qt.QWidget()
@@ -950,7 +950,7 @@ class DynamicPETEditorWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.windowBox = self._makeWindowBox()
         self.fusionBox = self._makeFusionBox()
         self.roiBox = self._makeRoiBox()
-        self.openButton.toolTip = "Switch to the Review/Edit layout with the timeline"
+        self.openButton.toolTip = "Switch to the Dynamic PET Review/Edit layout with the timeline"
         self.closeButton = qt.QPushButton("Close Review/Edit")
         self.closeButton.enabled = False
         buttons = qt.QHBoxLayout()
@@ -1247,8 +1247,8 @@ class DynamicPETEditorWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
                                                    self.syncCheck.checked)
             self.session.open()
         except Exception as error:
-            logging.exception("Could not open Review/Edit")
-            slicer.util.errorDisplay(f"Could not open Review/Edit:\n{error}")
+            logging.exception("Could not open Dynamic PET Review/Edit")
+            slicer.util.errorDisplay(f"Could not open Dynamic PET Review/Edit:\n{error}")
             if self.session is not None:
                 self.session.close()
             self.session = None
@@ -1329,7 +1329,7 @@ class DynamicPETEditorTest(ScriptedLoadableModuleTest):
             actor = session.overlays[dynamicviews.MAIN_VIEW][2]
             self.assertTrue(actor.GetInput().startswith("F3  0:20 - 0:50"))
             self._checkROIs(session)
-            self.delayDisplay("Review/Edit open")
+            self.delayDisplay("Dynamic PET Review/Edit open")
         finally:
             session.close()
         self.assertEqual(len(slicer.util.getNodesByClass("vtkMRMLScalarVolumeNode")), 1)   # only the proxy

@@ -47,7 +47,7 @@ if(BUILD_TESTING)
 endif()
 
 #-----------------------------------------------------------------------------
-# Review/Edit (visible, Nuclear Medicine, module name DynamicPETEditor): frame-by-frame review layout with a timeline
+# Dynamic PET Review/Edit (visible, Nuclear Medicine, module name DynamicPETEditor): frame-by-frame review layout with a timeline
 set(EDITOR_MODULE_NAME DynamicPETEditor)
 
 slicerMacroBuildScriptedModule(
