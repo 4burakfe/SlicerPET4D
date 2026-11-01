@@ -9,6 +9,7 @@ set(MODULE_PYTHON_SCRIPTS
   ${MODULE_NAME}Lib/settings.py
   ${MODULE_NAME}Lib/dynamicviews.py
   ${MODULE_NAME}Lib/timeline.py
+  ${MODULE_NAME}Lib/roicurves.py
   ${MODULE_NAME}Lib/colortables.py
   ${MODULE_NAME}Lib/colormaps.py
   )
@@ -46,7 +47,7 @@ if(BUILD_TESTING)
 endif()
 
 #-----------------------------------------------------------------------------
-# Dynamic PET Editor (visible, Nuclear Medicine): frame-by-frame review layout with a timeline
+# Review/Edit (visible, Nuclear Medicine, module name DynamicPETEditor): frame-by-frame review layout with a timeline
 set(EDITOR_MODULE_NAME DynamicPETEditor)
 
 slicerMacroBuildScriptedModule(

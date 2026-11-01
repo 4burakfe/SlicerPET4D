@@ -1,4 +1,4 @@
-"""Tests of the Dynamic PET Editor helpers without Slicer: python -m pytest Testing."""
+"""Tests of the Review/Edit helpers without Slicer: python -m pytest Testing."""
 import os
 import sys
 import xml.etree.ElementTree as ElementTree

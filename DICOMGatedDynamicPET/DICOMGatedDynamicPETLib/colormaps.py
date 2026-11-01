@@ -1,4 +1,4 @@
-"""Color maps of the Dynamic PET Editor: the Tarvos (MPI) extension's tables (colortables.py) plus some of
+"""Color maps of Review/Edit: the Tarvos (MPI) extension's tables (colortables.py) plus some of
 Slicer's own. The MPI tables are made in the scene as "MPI <label>" color nodes, the same names Tarvos uses,
 so both extensions share one node."""
 

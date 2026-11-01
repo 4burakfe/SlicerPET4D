@@ -1,4 +1,4 @@
-"""Pure helpers of the Dynamic PET Editor (no Slicer imports): view grid, layout XML, frame intervals and time
+"""Pure helpers of Review/Edit (no Slicer imports): view grid, layout XML, frame intervals and time
 labels."""
 
 import datetime

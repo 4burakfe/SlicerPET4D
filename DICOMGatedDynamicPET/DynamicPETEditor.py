@@ -1,5 +1,5 @@
 """
-Dynamic PET Editor (3D Slicer module)
+Review/Edit (3D Slicer module, internally DynamicPETEditor)
 
 Opens a dynamic PET sequence (as loaded by the DICOM Gated / Dynamic PET plugin) in its own layout:
     upper 2/3   a large axial view of the current frame on the left and a near-square grid of small axial
@@ -10,6 +10,7 @@ Opens a dynamic PET sequence (as loaded by the DICOM Gated / Dynamic PET plugin)
 Each view shows its frame number and start - end time from the study start in its top left corner.
 The module panel sets the window (the same display range for all frames, or each frame on its own), the
 color map and fusion: an anatomical background volume (CT / MR) under the PET in every view, with a PET opacity.
+Spherical ROIs placed in the large view give time-activity curves, drawn on the timeline over the frame blocks.
 Frame operations (summation, reframing, ...) are placeholders for now.
 """
 
@@ -25,12 +26,13 @@ import vtk
 import slicer
 from slicer.ScriptedLoadableModule import (ScriptedLoadableModule, ScriptedLoadableModuleWidget,
                                            ScriptedLoadableModuleLogic, ScriptedLoadableModuleTest)
+from slicer.util import VTKObservationMixin
 
 _MODULE_DIR = os.path.dirname(os.path.abspath(globals().get("__file__", "") or "."))
 if globals().get("__file__") and _MODULE_DIR not in sys.path:
     sys.path.insert(0, _MODULE_DIR)
 
-from DICOMGatedDynamicPETLib import colormaps, dynamicviews  # noqa: E402
+from DICOMGatedDynamicPETLib import colormaps, dynamicviews, roicurves  # noqa: E402
 from DICOMGatedDynamicPETLib.timeline import FrameTimeline  # noqa: E402
 
 LAYOUT_ID = 7801
@@ -40,6 +42,12 @@ TIMING_KEYS = ("Frame", "StartFromStudyStartS", "StartFromScanStartS", "Duration
 EDITOR_ATTRIBUTE = "DynamicPETEditor.FrameVolume"
 COMMON_WINDOW, FRAME_WINDOW = "common", "frame"
 AUTO_PERCENTILE = 99.9
+ROI_ATTRIBUTE = "ReviewEdit.SphereROI"
+ROI_RADIUS_ATTRIBUTE = "ReviewEdit.RadiusMm"
+ROI_COLOR_ATTRIBUTE = "ReviewEdit.Color"
+ROI_NODE_CLASS = "vtkMRMLMarkupsFiducialNode"
+ROI_DEFAULT_RADIUS_MM = 10.0
+ROI_DEBOUNCE_MS = 100
 PLANNED_OPERATIONS = (
     ("Sum selected", "Sum the selected frames into one static volume (duration weighted)"),
     ("Merge", "Merge the selected neighbouring frames into one frame"),
@@ -52,13 +60,14 @@ PLANNED_OPERATIONS = (
 class DynamicPETEditor(ScriptedLoadableModule):
     def __init__(self, parent):
         ScriptedLoadableModule.__init__(self, parent)
-        parent.title = "Dynamic PET Editor"
+        parent.title = "Review/Edit"
         parent.categories = ["Nuclear Medicine"]
         parent.dependencies = []
         parent.contributors = ["Burak Demir"]
         parent.helpText = ("Review a dynamic PET series frame by frame: a large view of the current frame, small "
                            "views of all frames at the same slice and a timeline from the study start. Pick the "
-                           "dynamic sequence and press Open editor.")
+                           "dynamic sequence and press Open Review/Edit. Spherical ROIs placed in the large view "
+                           "give time-activity curves on the timeline.")
         parent.acknowledgementText = "Part of the DICOM Gated / Dynamic PET extension."
 
 
@@ -106,6 +115,261 @@ class DynamicPETEditorLogic(ScriptedLoadableModuleLogic):
 
 
 # ---------------------------------------------------------------------------
+# Spherical ROIs: a point in the large view, a sphere around it and its time-activity curve
+# ---------------------------------------------------------------------------
+class SphereROIs:
+    """The spherical ROIs of an open session. Each is a fiducial node with one point (it stays in the scene, and
+    is taken up again by the next session) and a sphere model that follows it; both show in the large view only.
+    A roi is {"node", "source", "model", "tags", "values"}, values being its mean per frame (empty until placed).
+    Curves are computed from the frames of the sequence, shortly after the point or the radius last changed."""
+
+    def __init__(self, session):
+        self.session = session
+        self.rois = []
+        self.pending = None           # roi waiting for its click in the view
+        self.dirty = []               # rois whose curve is out of date
+        self.observers = []
+        self.onChanged = None         # callback() when a ROI is added, placed, removed or resized
+        self.timer = qt.QTimer()
+        self.timer.setSingleShot(True)
+        self.timer.setInterval(ROI_DEBOUNCE_MS)
+        self.timer.connect("timeout()", self.flush)
+
+    def open(self):
+        interaction = slicer.app.applicationLogic().GetInteractionNode()
+        proxy = self.session.proxyNode
+        self.observers = [
+            (slicer.mrmlScene, slicer.mrmlScene.AddObserver(slicer.mrmlScene.NodeRemovedEvent, self.onNodeRemoved)),
+            (interaction, interaction.AddObserver(interaction.EndPlacementEvent, self.onEndPlacement)),
+            (proxy, proxy.AddObserver(slicer.vtkMRMLTransformableNode.TransformModifiedEvent, self.onVolumeMoved))]
+        for node in slicer.util.getNodesByClass(ROI_NODE_CLASS):
+            if node.GetAttribute(ROI_ATTRIBUTE) == "1":
+                self._adopt(node)
+        self.flush()
+
+    def close(self):
+        """Removes the sphere models and the observers; the fiducial nodes stay in the scene."""
+        self.timer.stop()
+        self.cancelPlacement()
+        for node, tag in self.observers:
+            node.RemoveObserver(tag)
+        self.observers = []
+        for roi in self.rois:
+            self._release(roi)
+        self.rois = []
+        self.dirty = []
+
+    # --- adding and removing ----------------------------------------------------------------------
+    def add(self, radiusMm, centerRas=None):
+        """A new ROI at centerRas, or, without it, waiting for a click in the large view."""
+        self.cancelPlacement()
+        node = slicer.mrmlScene.AddNewNodeByClass(ROI_NODE_CLASS, self._newName())
+        node.SetMaximumNumberOfControlPoints(1)
+        node.SetControlPointLabelFormat("%N")
+        node.SetAttribute(ROI_ATTRIBUTE, "1")
+        node.SetAttribute(ROI_RADIUS_ATTRIBUTE, f"{radiusMm:g}")
+        roi = self._adopt(node)
+        if centerRas is not None:
+            node.AddControlPointWorld(vtk.vtkVector3d(*centerRas))
+        else:
+            self.pending = roi
+            logic = slicer.app.applicationLogic()
+            logic.GetSelectionNode().SetReferenceActivePlaceNodeClassName(ROI_NODE_CLASS)
+            logic.GetSelectionNode().SetActivePlaceNodeID(node.GetID())
+            logic.GetInteractionNode().SetPlaceModePersistence(0)
+            logic.GetInteractionNode().SetCurrentInteractionMode(slicer.vtkMRMLInteractionNode.Place)
+        self._changed()
+        return roi
+
+    def remove(self, roi):
+        slicer.mrmlScene.RemoveNode(roi["node"])    # onNodeRemoved does the rest
+
+    def removeAll(self):
+        for roi in list(self.rois):
+            self.remove(roi)
+
+    def cancelPlacement(self):
+        roi, self.pending = self.pending, None
+        if roi is None:
+            return
+        interaction = slicer.app.applicationLogic().GetInteractionNode()
+        if interaction.GetCurrentInteractionMode() == slicer.vtkMRMLInteractionNode.Place:
+            interaction.SetCurrentInteractionMode(slicer.vtkMRMLInteractionNode.ViewTransform)
+        if self.center(roi) is None:
+            self.remove(roi)
+
+    def onEndPlacement(self, caller=None, event=None):
+        roi, self.pending = self.pending, None
+        if roi is not None:      # the view may set the point just after this event
+            qt.QTimer.singleShot(0, lambda: self._finishPlacement(roi))
+
+    def _finishPlacement(self, roi):
+        if not any(roi is r for r in self.rois):
+            return
+        if self.center(roi) is None:
+            self.remove(roi)     # right click / Esc: no click in the view
+        else:
+            self._changed()
+
+    @vtk.calldata_type(vtk.VTK_OBJECT)
+    def onNodeRemoved(self, caller, event, node):
+        roi = self._roiOf(node)
+        if roi is None:
+            return
+        self.rois = [r for r in self.rois if r is not roi]
+        self.dirty = [r for r in self.dirty if r is not roi]
+        if self.pending is roi:
+            self.pending = None
+        self._release(roi)
+        self._showCurves()
+        self._changed()
+
+    def _roiOf(self, node):
+        return next((roi for roi in self.rois if roi["node"] is node), None)
+
+    def _newName(self):
+        names = {node.GetName() for node in slicer.util.getNodesByClass(ROI_NODE_CLASS)}
+        number = 1
+        while f"ROI {number}" in names:
+            number += 1
+        return f"ROI {number}"
+
+    def _adopt(self, node):
+        """Set up a ROI node: its color and display, its sphere and the observers."""
+        color = node.GetAttribute(ROI_COLOR_ATTRIBUTE)
+        if not color:
+            color = roicurves.nextColor([roi["node"].GetAttribute(ROI_COLOR_ATTRIBUTE) for roi in self.rois])
+            node.SetAttribute(ROI_COLOR_ATTRIBUTE, color)
+        rgb = roicurves.colorRgb(color)
+        viewID = self.session.mainViewNodeID()
+        node.CreateDefaultDisplayNodes()
+        display = node.GetDisplayNode()
+        display.SetColor(*rgb)
+        display.SetSelectedColor(*rgb)
+        display.SetActiveColor(*rgb)
+        display.SetGlyphType(slicer.vtkMRMLMarkupsDisplayNode.Cross2D)    # keeps the voxels in view
+        display.SetGlyphScale(1.5)
+        display.SetTextScale(2.0)
+        display.SetPropertiesLabelVisibility(False)
+        display.RemoveAllViewNodeIDs()
+        display.AddViewNodeID(viewID)
+        source = vtk.vtkSphereSource()
+        source.SetThetaResolution(48)
+        source.SetPhiResolution(32)
+        model = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLModelNode", f"{node.GetName()} sphere")
+        model.SetHideFromEditors(True)
+        model.SetSaveWithScene(False)
+        model.SetPolyDataConnection(source.GetOutputPort())
+        model.CreateDefaultDisplayNodes()
+        modelDisplay = model.GetDisplayNode()
+        modelDisplay.SetColor(*rgb)
+        modelDisplay.SetVisibility2D(True)
+        modelDisplay.SetSliceIntersectionThickness(2)
+        modelDisplay.RemoveAllViewNodeIDs()
+        modelDisplay.AddViewNodeID(viewID)
+        events = (slicer.vtkMRMLMarkupsNode.PointModifiedEvent, slicer.vtkMRMLMarkupsNode.PointPositionDefinedEvent,
+                  slicer.vtkMRMLMarkupsNode.PointRemovedEvent, slicer.vtkMRMLTransformableNode.TransformModifiedEvent)
+        roi = {"node": node, "source": source, "model": model, "values": [],
+               "tags": [node.AddObserver(event, self.onPointModified) for event in events]}
+        self.rois.append(roi)
+        self._updateSphere(roi)
+        self._schedule(roi)
+        return roi
+
+    def _release(self, roi):
+        for tag in roi["tags"]:
+            roi["node"].RemoveObserver(tag)
+        roi["tags"] = []
+        if slicer.mrmlScene.IsNodePresent(roi["model"]):
+            slicer.mrmlScene.RemoveNode(roi["model"])
+
+    # --- sphere and curve -------------------------------------------------------------------------
+    def radius(self, roi):
+        return float(roi["node"].GetAttribute(ROI_RADIUS_ATTRIBUTE) or ROI_DEFAULT_RADIUS_MM)
+
+    def setRadius(self, roi, radiusMm):
+        roi["node"].SetAttribute(ROI_RADIUS_ATTRIBUTE, f"{radiusMm:g}")
+        self._updateSphere(roi)
+        self._schedule(roi)
+        self._changed()
+
+    def center(self, roi):
+        """The point in world RAS; None until it is placed (the point following the mouse does not count)."""
+        node = roi["node"]
+        if node.GetNumberOfDefinedControlPoints() < 1:
+            return None
+        point = [0.0, 0.0, 0.0]
+        node.GetNthControlPointPositionWorld(0, point)
+        return point
+
+    def onPointModified(self, caller, event):
+        roi = self._roiOf(caller)
+        if roi is not None:
+            self._updateSphere(roi)
+            self._schedule(roi)
+
+    def onVolumeMoved(self, caller=None, event=None):
+        for roi in self.rois:
+            self._schedule(roi)
+
+    def _updateSphere(self, roi):
+        center = self.center(roi)
+        roi["model"].GetDisplayNode().SetVisibility(center is not None)
+        if center is not None:
+            roi["source"].SetCenter(center)
+            roi["source"].SetRadius(self.radius(roi))
+            roi["source"].Update()
+
+    def _schedule(self, roi):
+        if not any(roi is r for r in self.dirty):
+            self.dirty.append(roi)
+        self.timer.start()
+
+    def flush(self):
+        """Compute the curves that are out of date now, and show them."""
+        self.timer.stop()
+        dirty, self.dirty = self.dirty, []
+        if not dirty:
+            return
+        for roi in dirty:
+            center = self.center(roi)
+            roi["values"] = [] if center is None else roicurves.sphereCurve(
+                self._frames(), self.session.worldToVolume(center), self.radius(roi))
+        self._showCurves()
+
+    def _frames(self):
+        """(array_kji, ijkToRas) of every frame of the sequence, or None for a frame without an image."""
+        from vtk.util import numpy_support
+        sequence = self.session.sequenceNode
+        matrix = vtk.vtkMatrix4x4()
+        for i in range(sequence.GetNumberOfDataNodes()):
+            node = sequence.GetNthDataNode(i)
+            image = node.GetImageData()
+            scalars = image.GetPointData().GetScalars() if image is not None else None
+            if scalars is None:
+                yield None
+                continue
+            node.GetIJKToRASMatrix(matrix)
+            yield (numpy_support.vtk_to_numpy(scalars).reshape(image.GetDimensions()[::-1]),
+                   slicer.util.arrayFromVTKMatrix(matrix))
+
+    def units(self):
+        sequence = self.session.sequenceNode
+        first = sequence.GetNthDataNode(0)
+        return first.GetAttribute(PREFIX + "Units") or sequence.GetAttribute(PREFIX + "Units") or ""
+
+    def _showCurves(self):
+        if self.session.timeline is not None:
+            self.session.timeline.setCurves([{"name": roi["node"].GetName(), "values": roi["values"],
+                                              "color": roi["node"].GetAttribute(ROI_COLOR_ATTRIBUTE)}
+                                             for roi in self.rois], self.units())
+
+    def _changed(self):
+        if self.onChanged:
+            self.onChanged()
+
+
+# ---------------------------------------------------------------------------
 # Editor session: layout, frame views, overlays, timeline dock
 # ---------------------------------------------------------------------------
 class DynamicPETEditorSession:
@@ -135,6 +399,7 @@ class DynamicPETEditorSession:
         self.playSpeed = 1.0          # acquisition seconds per real second
         self.playTime = None
         self._lastTick = None
+        self.rois = None              # SphereROIs
 
     # --- open / close ---------------------------------------------------------------------------
     def open(self):
@@ -155,8 +420,13 @@ class DynamicPETEditorSession:
         else:
             self.window = self.autoWindow()
         self.onBrowserModified()
+        self.rois = SphereROIs(self)
+        self.rois.open()
 
     def close(self):
+        if self.rois is not None:
+            self.rois.close()
+            self.rois = None
         if self.playTimer is not None:
             self.playTimer.stop()
             self.playTimer = None
@@ -347,6 +617,18 @@ class DynamicPETEditorSession:
     def _sliceWidget(self, name):
         return slicer.app.layoutManager().sliceWidget(name)
 
+    def mainViewNodeID(self):
+        return self._sliceWidget(dynamicviews.MAIN_VIEW).mrmlSliceNode().GetID()
+
+    def worldToVolume(self, point):
+        """A world RAS point in the volume's own RAS, when the current-frame volume is under a transform."""
+        parent = self.proxyNode.GetParentTransformNode() if self.proxyNode is not None else None
+        if parent is None:
+            return point
+        transform = vtk.vtkGeneralTransform()
+        slicer.vtkMRMLTransformNode.GetTransformBetweenNodes(None, parent, transform)
+        return transform.TransformPoint(point)
+
     def _setupViews(self):
         main = self._sliceWidget(dynamicviews.MAIN_VIEW)
         main.mrmlSliceCompositeNode().SetBackgroundVolumeID(self.proxyNode.GetID() if self.proxyNode else None)
@@ -459,7 +741,7 @@ class DynamicPETEditorSession:
     # --- timeline dock ---------------------------------------------------------------------------
     def _makeDock(self):
         mainWindow = slicer.util.mainWindow()
-        self.dock = qt.QDockWidget("Dynamic PET timeline")
+        self.dock = qt.QDockWidget("Review/Edit timeline")
         self.dock.setObjectName("DynamicPETEditorTimeline")
         self.dock.setFeatures(qt.QDockWidget.DockWidgetMovable | qt.QDockWidget.DockWidgetFloatable)
         container = qt.QWidget()
@@ -622,7 +904,11 @@ class DynamicPETEditorSession:
 # ---------------------------------------------------------------------------
 # Module panel
 # ---------------------------------------------------------------------------
-class DynamicPETEditorWidget(ScriptedLoadableModuleWidget):
+class DynamicPETEditorWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
+    def __init__(self, parent=None):
+        ScriptedLoadableModuleWidget.__init__(self, parent)
+        VTKObservationMixin.__init__(self)
+
     def setup(self):
         ScriptedLoadableModuleWidget.setup(self)
         self.session = None
@@ -656,15 +942,16 @@ class DynamicPETEditorWidget(ScriptedLoadableModuleWidget):
         options.addRow(self.overlayCheck)
         self.syncCheck = qt.QCheckBox("Link views (orientation, slice, zoom, pan)")
         self.syncCheck.checked = True
-        self.syncCheck.toolTip = "Changing any editor view changes all of them (the same as each view's link button)"
+        self.syncCheck.toolTip = "Changing any view changes all of them (the same as each view's link button)"
         options.addRow(self.syncCheck)
         self.layout.addWidget(optionsBox)
 
-        self.openButton = qt.QPushButton("Open editor")
+        self.openButton = qt.QPushButton("Open Review/Edit")
         self.windowBox = self._makeWindowBox()
         self.fusionBox = self._makeFusionBox()
-        self.openButton.toolTip = "Switch to the editor layout with the timeline"
-        self.closeButton = qt.QPushButton("Close editor")
+        self.roiBox = self._makeRoiBox()
+        self.openButton.toolTip = "Switch to the Review/Edit layout with the timeline"
+        self.closeButton = qt.QPushButton("Close Review/Edit")
         self.closeButton.enabled = False
         buttons = qt.QHBoxLayout()
         buttons.addWidget(self.openButton)
@@ -672,6 +959,7 @@ class DynamicPETEditorWidget(ScriptedLoadableModuleWidget):
         self.layout.addLayout(buttons)
         self.layout.addWidget(self.windowBox)
         self.layout.addWidget(self.fusionBox)
+        self.layout.addWidget(self.roiBox)
 
         operationsBox = qt.QGroupBox("Frame operations")
         operations = qt.QVBoxLayout(operationsBox)
@@ -711,7 +999,7 @@ class DynamicPETEditorWidget(ScriptedLoadableModuleWidget):
         self.colorSelector = qt.QComboBox()
         for label in colormaps.LABELS:
             self.colorSelector.addItem(label)
-        self.colorSelector.toolTip = "Color map of all editor views (the Tarvos / MPI color maps and Slicer's PET maps)"
+        self.colorSelector.toolTip = "Color map of all views (the Tarvos / MPI color maps and Slicer's PET maps)"
         form.addRow("Color map:", self.colorSelector)
         box.enabled = False
 
@@ -733,7 +1021,7 @@ class DynamicPETEditorWidget(ScriptedLoadableModuleWidget):
         self.fusionSelector.renameEnabled = False
         self.fusionSelector.setMRMLScene(slicer.mrmlScene)
         self.fusionSelector.setCurrentNode(None)
-        self.fusionSelector.toolTip = "Anatomical volume (CT, MR) shown under the PET in every editor view"
+        self.fusionSelector.toolTip = "Anatomical volume (CT, MR) shown under the PET in every view"
         form.addRow("Background:", self.fusionSelector)
         self.opacitySlider = ctk.ctkSliderWidget()
         self.opacitySlider.minimum = 0.0
@@ -747,6 +1035,115 @@ class DynamicPETEditorWidget(ScriptedLoadableModuleWidget):
         self.fusionSelector.connect("currentNodeChanged(vtkMRMLNode*)", self.onFusionVolumeChanged)
         self.opacitySlider.connect("valueChanged(double)", self.onFusionOpacityChanged)
         return box
+
+    def _makeRoiBox(self):
+        box = qt.QGroupBox("ROIs")
+        layout = qt.QVBoxLayout(box)
+        row = qt.QHBoxLayout()
+        self.addRoiButton = qt.QPushButton("Add spherical ROI")
+        self.addRoiButton.toolTip = "Then click in the large view; its time-activity curve shows on the timeline"
+        row.addWidget(self.addRoiButton, 1)
+        row.addWidget(qt.QLabel("Radius:"))
+        self.roiRadiusSpin = qt.QDoubleSpinBox()
+        self.roiRadiusSpin.setRange(0.5, 200.0)
+        self.roiRadiusSpin.setDecimals(1)
+        self.roiRadiusSpin.setSingleStep(1.0)
+        self.roiRadiusSpin.setSuffix(" mm")
+        self.roiRadiusSpin.value = ROI_DEFAULT_RADIUS_MM
+        self.roiRadiusSpin.setKeyboardTracking(False)
+        self.roiRadiusSpin.toolTip = "Radius of new ROIs and of the selected ROI"
+        row.addWidget(self.roiRadiusSpin)
+        layout.addLayout(row)
+        self.roiTable = qt.QTableWidget(0, 3)
+        self.roiTable.setHorizontalHeaderLabels(["", "ROI", "Radius"])
+        self.roiTable.verticalHeader().hide()
+        self.roiTable.setSelectionBehavior(qt.QAbstractItemView.SelectRows)
+        self.roiTable.setSelectionMode(qt.QAbstractItemView.SingleSelection)
+        self.roiTable.setEditTriggers(qt.QAbstractItemView.NoEditTriggers)
+        self.roiTable.horizontalHeader().setSectionResizeMode(1, qt.QHeaderView.Stretch)
+        self.roiTable.setColumnWidth(0, 24)
+        self.roiTable.setColumnWidth(2, 70)
+        self.roiTable.setMaximumHeight(150)
+        layout.addWidget(self.roiTable)
+        row = qt.QHBoxLayout()
+        self.removeRoiButton = qt.QPushButton("Remove")
+        self.removeRoiButton.toolTip = "Remove the selected ROI"
+        self.removeAllRoisButton = qt.QPushButton("Remove all")
+        row.addWidget(self.removeRoiButton)
+        row.addWidget(self.removeAllRoisButton)
+        layout.addLayout(row)
+        box.enabled = False
+        self.selectedRoiNode = None
+
+        self.addRoiButton.connect("clicked()", self.onAddRoi)
+        self.roiRadiusSpin.connect("valueChanged(double)", self.onRoiRadiusChanged)
+        self.roiTable.connect("itemSelectionChanged()", self.onRoiSelectionChanged)
+        self.removeRoiButton.connect("clicked()", self.onRemoveRoi)
+        self.removeAllRoisButton.connect("clicked()", self.onRemoveAllRois)
+        return box
+
+    def _rois(self):
+        return self.session.rois if self.session is not None else None
+
+    def _selectedRoi(self):
+        rois = self._rois()
+        return rois._roiOf(self.selectedRoiNode) if rois is not None else None
+
+    def _refreshRoiTable(self):
+        rois = self._rois()
+        items = rois.rois if rois is not None else []
+        self.roiTable.blockSignals(True)
+        try:
+            self.roiTable.clearContents()
+            self.roiTable.setRowCount(len(items))
+            selected = self._selectedRoi()
+            for row, roi in enumerate(items):
+                swatch = qt.QTableWidgetItem()
+                swatch.setBackground(qt.QBrush(qt.QColor(roi["node"].GetAttribute(ROI_COLOR_ATTRIBUTE))))
+                self.roiTable.setItem(row, 0, swatch)
+                name = roi["node"].GetName()
+                if rois.center(roi) is None:
+                    name += " (click in the large view)"
+                self.roiTable.setItem(row, 1, qt.QTableWidgetItem(name))
+                self.roiTable.setItem(row, 2, qt.QTableWidgetItem(f"{rois.radius(roi):g} mm"))
+                if roi is selected:
+                    self.roiTable.selectRow(row)
+            if selected is None:
+                self.roiTable.clearSelection()
+        finally:
+            self.roiTable.blockSignals(False)
+        self.removeRoiButton.enabled = selected is not None
+        self.removeAllRoisButton.enabled = bool(items)
+
+    def onAddRoi(self):
+        rois = self._rois()
+        if rois is not None:
+            self.selectedRoiNode = rois.add(self.roiRadiusSpin.value)["node"]
+            self._refreshRoiTable()
+
+    def onRoiSelectionChanged(self):
+        rois, indexes = self._rois(), self.roiTable.selectedIndexes()
+        roi = rois.rois[indexes[0].row()] if rois is not None and indexes else None
+        self.selectedRoiNode = roi["node"] if roi is not None else None
+        self.removeRoiButton.enabled = roi is not None
+        if roi is not None:
+            self.roiRadiusSpin.blockSignals(True)
+            self.roiRadiusSpin.value = rois.radius(roi)
+            self.roiRadiusSpin.blockSignals(False)
+
+    def onRoiRadiusChanged(self, value):
+        roi = self._selectedRoi()
+        if roi is not None:
+            self._rois().setRadius(roi, value)
+
+    def onRemoveRoi(self):
+        roi = self._selectedRoi()
+        if roi is not None:
+            self._rois().remove(roi)
+
+    def onRemoveAllRois(self):
+        if self._rois() is not None:
+            self._rois().removeAll()
 
     def onFusionVolumeChanged(self, node):
         if self.session is None:
@@ -814,6 +1211,7 @@ class DynamicPETEditorWidget(ScriptedLoadableModuleWidget):
 
     def cleanup(self):
         self.onClose()
+        self.removeObservers()
         ScriptedLoadableModuleWidget.cleanup(self)
 
     def selectDynamicSequence(self):
@@ -849,8 +1247,8 @@ class DynamicPETEditorWidget(ScriptedLoadableModuleWidget):
                                                    self.syncCheck.checked)
             self.session.open()
         except Exception as error:
-            logging.exception("Could not open the Dynamic PET Editor")
-            slicer.util.errorDisplay(f"Could not open the Dynamic PET Editor:\n{error}")
+            logging.exception("Could not open Review/Edit")
+            slicer.util.errorDisplay(f"Could not open Review/Edit:\n{error}")
             if self.session is not None:
                 self.session.close()
             self.session = None
@@ -859,6 +1257,10 @@ class DynamicPETEditorWidget(ScriptedLoadableModuleWidget):
         self.fusionBox.enabled = self.session is not None
         if self.session is not None and self.fusionSelector.currentNode() is not None:
             self.onFusionVolumeChanged(self.fusionSelector.currentNode())
+        self.roiBox.enabled = self.session is not None
+        if self.session is not None:
+            self.session.rois.onChanged = self._refreshRoiTable
+        self._refreshRoiTable()
 
     def onClose(self):
         if self.session is not None:
@@ -869,6 +1271,10 @@ class DynamicPETEditorWidget(ScriptedLoadableModuleWidget):
             self.windowBox.enabled = False
         if hasattr(self, "fusionBox"):
             self.fusionBox.enabled = False
+        if hasattr(self, "roiBox"):
+            self.roiBox.enabled = False
+            self.selectedRoiNode = None
+            self._refreshRoiTable()
 
     def onOverlayToggled(self, checked):
         if self.session is not None:
@@ -922,7 +1328,50 @@ class DynamicPETEditorTest(ScriptedLoadableModuleTest):
             self.assertEqual(session.timeline.currentIndex, 2)
             actor = session.overlays[dynamicviews.MAIN_VIEW][2]
             self.assertTrue(actor.GetInput().startswith("F3  0:20 - 0:50"))
-            self.delayDisplay("Dynamic PET Editor open")
+            self._checkROIs(session)
+            self.delayDisplay("Review/Edit open")
         finally:
             session.close()
         self.assertEqual(len(slicer.util.getNodesByClass("vtkMRMLScalarVolumeNode")), 1)   # only the proxy
+        self.assertEqual(len(slicer.util.getNodesByClass("vtkMRMLModelNode")), self.modelsBefore)
+        self.assertEqual(len(slicer.util.getNodesByClass(ROI_NODE_CLASS)), 1)              # the ROI stays
+        session = DynamicPETEditorSession(sequence)
+        session.open()
+        try:
+            self.assertEqual(len(session.rois.rois), 1)                                    # and is taken up again
+            self.assertEqual(session.rois.radius(session.rois.rois[0]), 6.0)
+            self.assertEqual(len(session.timeline.curves[0]["values"]), 5)
+        finally:
+            session.close()
+
+    def _checkROIs(self, session):
+        sequence, rois = session.sequenceNode, session.rois
+        self.modelsBefore = len(slicer.util.getNodesByClass("vtkMRMLModelNode"))
+        bounds = [0.0] * 6
+        session.proxyNode.GetRASBounds(bounds)
+        center = [(bounds[2 * a] + bounds[2 * a + 1]) / 2.0 for a in range(3)]
+        roi = rois.add(50.0, center)
+        rois.flush()
+        self.assertEqual(session.timeline.curves[0]["name"], roi["node"].GetName())
+        self.assertEqual(len(roi["values"]), sequence.GetNumberOfDataNodes())
+        self.assertEqual(len(session.timeline.curves[0]["values"]), 5)
+        self.assertEqual(session.timeline.curveUnits, "Bq/ml")
+        for i, value in enumerate(roi["values"]):
+            matrix = vtk.vtkMatrix4x4()
+            sequence.GetNthDataNode(i).GetIJKToRASMatrix(matrix)
+            array = slicer.util.arrayFromVolume(sequence.GetNthDataNode(i))
+            expected = roicurves.sphereMean(array, slicer.util.arrayFromVTKMatrix(matrix), center, 50.0)
+            self.assertAlmostEqual(value, expected)
+        rois.setRadius(roi, 6.0)
+        rois.flush()
+        self.assertEqual(roi["source"].GetRadius(), 6.0)
+        viewID = session.mainViewNodeID()
+        self.assertEqual(roi["node"].GetDisplayNode().GetNthViewNodeID(0), viewID)
+        self.assertEqual(roi["model"].GetDisplayNode().GetNthViewNodeID(0), viewID)
+        self.assertFalse(session.timeline.grab().isNull())
+        # a click that never comes leaves no node behind
+        pending = rois.add(5.0)
+        self.assertIsNotNone(rois.pending)
+        rois.cancelPlacement()
+        self.assertEqual(len(rois.rois), 1)
+        self.assertFalse(slicer.mrmlScene.IsNodePresent(pending["node"]))

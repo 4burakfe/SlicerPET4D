@@ -77,10 +77,10 @@ saved at once and apply to series examined in the DICOM browser afterwards.
   injection.
 - With a summed volume off, the sequence's *(current gate/frame)* volume is shown instead.
 
-## Dynamic PET Editor
+## Review/Edit
 
-The **Dynamic PET Editor** module (Nuclear Medicine) reviews a dynamic series frame by frame. Pick the dynamic
-sequence (the most recent one is picked for you) and press *Open editor*:
+The **Review/Edit** module (Nuclear Medicine) reviews a dynamic series frame by frame. Pick the dynamic
+sequence (the most recent one is picked for you) and press *Open Review/Edit*:
 
 - **Upper 2/3:** a large axial view of the current frame, and next to it a near-square grid of small axial
   views, one per frame (5 frames: 2 x 3, 20 frames: 4 x 5). The views are linked (Slicer's view link,
@@ -104,10 +104,37 @@ sequence (the most recent one is picked for you) and press *Open editor*:
   maps (PET-DICOM, Hel, PET-HotIron, Jotun, Vanaheim, Valhalla, Trugold) and Slicer's Inferno, PET maps and grey.
 - **Fusion** (module panel): pick a background volume (CT / MR); every view shows it under its PET frame, with a
   PET opacity slider.
-- **Close editor:** goes back to the previous layout and removes the editor's helper volumes.
+- **ROIs** (module panel): see *Spherical ROIs and time-activity curves* below.
+- **Close Review/Edit:** goes back to the previous layout and removes the helper volumes and the sphere models. ROI
+  points stay in the scene, and the next *Open Review/Edit* takes them up again.
 
 Series longer than *Frame views (max)* (64 by default) show that many frames, spread over the series. The frame
 operations (sum selected, merge, split, reframe, remove) are placeholders for now.
+
+### Spherical ROIs and time-activity curves
+
+Press *Add spherical ROI* and click in the large (left) view. Right click or Esc cancels. The ROI is a point
+with a sphere around it, in a color of its own, shown in the large view only. Drag the point to move it. The
+radius box (mm, 10 by default) sets the radius of new ROIs and of the ROI selected in the list. *Remove* and
+*Remove all* delete ROIs.
+
+Every ROI has a time-activity curve, drawn on the timeline between the ruler and the frame blocks (which become a
+shorter track while there are curves):
+
+- The curve has one point per frame, in the **middle** of the frame ((start + end) / 2), on the same time axis
+  as the ruler and the frame blocks, so it follows the time window. Faint vertical lines mark the frame boundaries.
+- The value is the **mean over the voxels whose centres are inside the sphere**, in the series' units (Bq/ml or
+  SUV). A sphere smaller than a voxel uses the nearest voxel. A frame in which the sphere is outside the volume
+  has no point, and the line breaks there.
+- The current frame's points are larger. Hover over a point for the ROI, the frame and the value. Clicking in
+  the plot picks the frame, like clicking its block.
+- The curve is computed about 0.1 s after the point or the radius last changed, from all frames of the sequence.
+  When the volume is under a transform, the point is mapped into it, so a linear transform with scaling changes
+  the sphere's size in the volume.
+
+The ROI points are fiducial nodes with the attributes `ReviewEdit.SphereROI` = 1, `ReviewEdit.RadiusMm` and
+`ReviewEdit.Color`. They are saved with the scene. They show only in the large view, so they are hidden in other
+layouts.
 
 ### SUV
 
@@ -181,17 +208,21 @@ the *Gated / Dynamic PET Settings* module.
 DICOMGatedDynamicPET/
   DICOMGatedDynamicPET.py          DICOM plugin (examine / load), Slicer self-test on synthetic series
   GatedDynamicPETSettings.py       settings module (visible, Nuclear Medicine)
-  DynamicPETEditor.py              Dynamic PET Editor module (visible, Nuclear Medicine)
+  DynamicPETEditor.py              Review/Edit module (visible, Nuclear Medicine)
   DICOMGatedDynamicPETLib/
     settings.py                    the settings, kept in the Slicer application settings
-    dynamicviews.py, timeline.py   editor layout helpers and the timeline widget
+    dynamicviews.py, timeline.py   Review/Edit layout helpers and the timeline widget
+    roicurves.py                   spherical ROIs: sphere voxels, time-activity curves (numpy, no Slicer imports)
     petseries.py                   PET DICOM: kind, frame ordering, geometry, SUV, tracer, decay, frame timing,
                                    ECG gating, synthetic test series (pydicom + numpy, no Slicer imports)
-Testing/                          tests without Slicer (petseries, editor helpers): python -m pytest Testing
+Testing/                          tests without Slicer (petseries, Review/Edit helpers): python -m pytest Testing
 ```
 
 In Slicer, the self-test runs from the Python console:
 `import DICOMGatedDynamicPET; DICOMGatedDynamicPET.DICOMGatedDynamicPETTest().runTest()`.
+
+The Review/Edit module keeps its internal name `DynamicPETEditor` (file, classes, layout id), so scenes and
+scripts that use it keep working; only the title shown to users changed.
 
 ## License
 

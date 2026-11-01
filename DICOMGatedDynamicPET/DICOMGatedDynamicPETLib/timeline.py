@@ -1,6 +1,10 @@
-"""Timeline widget of the Dynamic PET Editor: a time ruler over a track of frame blocks, each as wide as its
-duration. The ruler has a row per time reference (dynamicviews.rulerRows): clock time, time from the study
-start and time from the injection.
+"""Timeline widget of Review/Edit: a time ruler over a track of frame blocks, each as wide as its duration. The
+ruler has a row per time reference (dynamicviews.rulerRows): clock time, time from the study start and time from
+the injection.
+
+With curves (setCurves: the time-activity curves of the spherical ROIs) a plot band sits between the ruler and a
+shorter frame track. It uses the same time axis, so a curve's points stay in the middle of their frame blocks at
+any zoom; the current frame's points are larger. Without curves there is no band.
 
 Only a time window [viewStart, viewEnd] is drawn (zoom): set it with setViewRange (the editor's two-handle time
 slider) or with the mouse wheel over the timeline (zooms around the cursor). Click a frame to make it current;
@@ -14,6 +18,7 @@ Callbacks (set by the editor):
 import qt
 
 from .dynamicviews import formatClock, formatTime, niceTickStep, rulerRows, zoomRange
+from .roicurves import formatValue, frameMidpoints, niceAxis
 
 _BACKGROUND = qt.QColor(30, 30, 33)
 _RULER = qt.QColor(44, 44, 48)
@@ -24,12 +29,19 @@ _SELECTED = qt.QColor(255, 255, 255)
 _PLAYHEAD = qt.QColor(235, 64, 52)
 _TRACK = qt.QColor(38, 38, 42)
 _FRAME_TEXT = qt.QColor(10, 30, 28)
+_GRID = qt.QColor(62, 62, 68)
 
 
 class FrameTimeline(qt.QWidget):
     RULER_ROW_HEIGHT = 17
     LABEL_WIDTH = 64
     MARGIN = 8
+    CURVE_TRACK_HEIGHT = 30       # frame track under the plot band
+    CURVE_BAND_MIN_HEIGHT = 110
+    CURVE_BAND_GAP = 4
+    POINT_RADIUS = 2.5
+    CURRENT_POINT_RADIUS = 4.5
+    HOVER_DISTANCE = 10           # pixels from a curve point that show its tooltip
 
     def __init__(self, parent=None):
         qt.QWidget.__init__(self, parent)
@@ -41,6 +53,9 @@ class FrameTimeline(qt.QWidget):
         self.playTime = None          # playback position (s); the playhead follows it while playing
         self.rulers = []
         self.rulerHeight = self.RULER_ROW_HEIGHT + 4
+        self.curves = []              # {"name", "color", "values"}: one value (or None) per frame
+        self.curveUnits = ""
+        self.curveTicks = [0.0, 1.0]
         self.onCurrentFrameChanged = None
         self.onSelectionChanged = None
         self.onViewRangeChanged = None
@@ -54,12 +69,24 @@ class FrameTimeline(qt.QWidget):
         self.frames = list(frames)
         self.rulers = rulerRows(self.frames)
         self.rulerHeight = self.RULER_ROW_HEIGHT * max(1, len(self.rulers)) + 4
-        self.setMinimumHeight(self.rulerHeight + 90)
+        self._updateMinimumHeight()
         self.selected = set()
         self.currentIndex = 0 if self.frames else -1
         if self.frames:
             self.viewStart, self.viewEnd = self.fullRange()
         self.update()
+
+    def setCurves(self, curves, units=""):
+        """curves: [{"name", "color" ('#RRGGBB'), "values" (per frame, None allowed)}]; none hides the plot band."""
+        self.curves = [c for c in curves if any(v is not None for v in c["values"])]
+        self.curveUnits = units or ""
+        self.curveTicks = niceAxis(max([v for c in self.curves for v in c["values"] if v is not None] or [0.0]))
+        self._updateMinimumHeight()
+        self.update()
+
+    def _updateMinimumHeight(self):
+        extra = self.CURVE_TRACK_HEIGHT + self.CURVE_BAND_MIN_HEIGHT + self.CURVE_BAND_GAP + 16 if self.curves else 90
+        self.setMinimumHeight(self.rulerHeight + extra)
 
     def fullRange(self):
         return (self.frames[0]["start"], self.frames[-1]["end"]) if self.frames else (0.0, 1.0)
@@ -84,8 +111,20 @@ class FrameTimeline(qt.QWidget):
     # --- geometry ------------------------------------------------------------------------------
     def _trackRect(self):
         left = self.LABEL_WIDTH
-        return (left, self.rulerHeight + 6, max(1, self.width - left - self.MARGIN),
-                max(10, self.height - self.rulerHeight - 16))
+        top, height = self.rulerHeight + 6, max(10, self.height - self.rulerHeight - 16)
+        if self.curves:
+            top, height = top + height - min(self.CURVE_TRACK_HEIGHT, height), min(self.CURVE_TRACK_HEIGHT, height)
+        return left, top, max(1, self.width - left - self.MARGIN), height
+
+    def _bandRect(self):
+        """The plot band: between the ruler and the frame track."""
+        left, trackTop, width, _ = self._trackRect()
+        top = self.rulerHeight + 6
+        return left, top, width, max(10, trackTop - self.CURVE_BAND_GAP - top)
+
+    def _y(self, value):
+        _, top, _, height = self._bandRect()
+        return top + height - value * (height - 6) / max(self.curveTicks[-1], 1e-12)
 
     def _x(self, t):
         left, _, width, _ = self._trackRect()
@@ -122,8 +161,12 @@ class FrameTimeline(qt.QWidget):
                 painter.drawText(qt.QRect(left, top, width, height), qt.Qt.AlignCenter, "No dynamic series")
                 return
             self._paintRulerTitles(painter)
+            if self.curves:
+                self._paintCurveAxis(painter)
             painter.setClipRect(qt.QRect(left, 0, width, self.height))
             self._paintRuler(painter)
+            if self.curves:
+                self._paintCurves(painter)
             self._paintFrames(painter, top, height)
             self._paintPlayhead(painter)
         finally:
@@ -174,8 +217,67 @@ class FrameTimeline(qt.QWidget):
                 painter.setPen(qt.QPen(_FRAME_TEXT))
                 text = f"F{frame['number']}"
                 if rect.width() > 70:
-                    text += f"\n{formatTime(frame['duration'])}"
+                    text += (" " if self.curves else "\n") + formatTime(frame["duration"])
                 painter.drawText(rect, qt.Qt.AlignCenter, text)
+
+    def _paintCurveAxis(self, painter):
+        """Value labels of the plot band and the units, in the label column."""
+        left, top, _, height = self._bandRect()
+        painter.save()
+        self._smallFont(painter)
+        self._smallFont(painter)
+        painter.setPen(qt.QPen(_DIM_TEXT))
+        for tick in self.curveTicks:
+            painter.drawText(qt.QRect(14, int(self._y(tick)) - 8, left - 18, 16),
+                             qt.Qt.AlignRight | qt.Qt.AlignVCenter, formatValue(tick))
+        painter.translate(2, top + height)
+        painter.rotate(-90)
+        painter.drawText(qt.QRect(0, 0, height, 14), qt.Qt.AlignCenter, self.curveUnits)
+        painter.restore()
+
+    def _paintCurves(self, painter):
+        """The band's background and grid (the frame boundaries, the value ticks), and a line through the middle
+        of the frames for each curve; a frame without a value breaks the line."""
+        left, top, width, height = self._bandRect()
+        painter.save()
+        painter.setClipRect(qt.QRect(left, top, width, height))
+        painter.fillRect(left, top, width, height, _TRACK)
+        painter.setPen(qt.QPen(_GRID))
+        for tick in self.curveTicks:
+            painter.drawLine(left, int(self._y(tick)), left + width, int(self._y(tick)))
+        lastX = None
+        for frame in self.frames:
+            for t in (frame["start"], frame["end"]):
+                x = int(self._x(t))
+                if lastX is None or x - lastX >= 3:
+                    painter.drawLine(x, top, x, top + height)
+                    lastX = x
+        midpoints = frameMidpoints(self.frames)
+        for curve in self.curves:
+            color = qt.QColor(curve["color"])
+            path, drawing = qt.QPainterPath(), False
+            for t, value in zip(midpoints, curve["values"]):
+                if value is None:
+                    drawing = False
+                elif drawing:
+                    path.lineTo(self._x(t), self._y(value))
+                else:
+                    path.moveTo(self._x(t), self._y(value))
+                    drawing = True
+            painter.setBrush(qt.QBrush(qt.Qt.NoBrush))
+            painter.setPen(qt.QPen(qt.QBrush(color), 1.5))
+            painter.drawPath(path)
+            painter.setBrush(qt.QBrush(color))
+            painter.setPen(qt.QPen(qt.Qt.NoPen))
+            for t, value in zip(midpoints, curve["values"]):
+                if value is not None:
+                    painter.drawEllipse(qt.QPointF(self._x(t), self._y(value)), self.POINT_RADIUS, self.POINT_RADIUS)
+            if 0 <= self.currentIndex < len(curve["values"]) and curve["values"][self.currentIndex] is not None:
+                painter.setPen(qt.QPen(qt.QBrush(_SELECTED), 1.5))
+                painter.drawEllipse(qt.QPointF(self._x(midpoints[self.currentIndex]),
+                                               self._y(curve["values"][self.currentIndex])),
+                                    self.CURRENT_POINT_RADIUS, self.CURRENT_POINT_RADIUS)
+        painter.restore()
 
     def _paintPlayhead(self, painter):
         if not (0 <= self.currentIndex < len(self.frames)):
@@ -206,7 +308,29 @@ class FrameTimeline(qt.QWidget):
             self.onSelectionChanged(self.selectedIndexes())
         self.update()
 
+    def _curvePointAt(self, x, y):
+        """(curve, frame index) of the curve point nearest to the position, within HOVER_DISTANCE pixels; or None."""
+        left, top, width, height = self._bandRect()
+        if not self.curves or not (left <= x <= left + width and top <= y <= top + height):
+            return None
+        best, nearest = None, self.HOVER_DISTANCE ** 2
+        midpoints = frameMidpoints(self.frames)
+        for curve in self.curves:
+            for index, value in enumerate(curve["values"]):
+                if value is not None and index < len(midpoints):
+                    distance = (self._x(midpoints[index]) - x) ** 2 + (self._y(value) - y) ** 2
+                    if distance <= nearest:
+                        best, nearest = (curve, index), distance
+        return best
+
     def mouseMoveEvent(self, event):
+        point = self._curvePointAt(event.pos().x(), event.pos().y())
+        if point is not None:
+            curve, index = point
+            units = f" {self.curveUnits}" if self.curveUnits else ""
+            self.toolTip = (f"{curve['name']}, frame {self.frames[index]['number']}: "
+                            f"{formatValue(curve['values'][index])}{units}")
+            return
         index = self._indexAt(event.pos().x())
         if index is None:
             self.toolTip = ""
