@@ -198,6 +198,9 @@ dynamic sequence (the most recent one is picked for you); the layout opens by it
   frame in its middle, in two plots: the shifts x (R), y (A), z (S) in mm, and below it the angles pitch (about R),
   roll (about A), yaw (about S) in degrees, each component in its own colour. Their time axis follows the
   timeline's. Click a legend entry to hide / show a line, Ctrl + wheel zooms the values, a double click resets them.
+- **View options:** Slicer's volume names in the corners of the views (*B:*, *F:*) are off (*Volume names in the
+  views*), and *Bottom panel: Motion plots / Frame timeline* show or hide the plots and the timeline (with both off
+  the panel closes).
 
 Settings in the panel:
 
