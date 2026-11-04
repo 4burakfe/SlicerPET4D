@@ -19,14 +19,17 @@ def gridShape(count):
     return rows, columns
 
 
-def frameViewName(index):
+ORIENTATIONS = ("Axial", "Coronal", "Sagittal")
+
+
+def frameViewName(index, prefix=FRAME_VIEW_PREFIX):
     """Layout name of the small view of frame index (0-based)."""
-    return f"{FRAME_VIEW_PREFIX}{index + 1}"
+    return f"{prefix}{index + 1}"
 
 
-def emptyViewName(index):
+def emptyViewName(index, prefix=EMPTY_VIEW_PREFIX):
     """Layout name of the index-th (0-based) empty view that fills the last grid row."""
-    return f"{EMPTY_VIEW_PREFIX}{index + 1}"
+    return f"{prefix}{index + 1}"
 
 
 def emptyViewCount(count):
@@ -34,19 +37,21 @@ def emptyViewCount(count):
     return rows * columns - count
 
 
-def _sliceViewXml(name, label, color):
+def _sliceViewXml(name, label, color, orientation="Axial", viewGroup=VIEW_GROUP):
     return (f'<item><view class="vtkMRMLSliceNode" singletontag="{name}">'
-            '<property name="orientation" action="default">Axial</property>'
+            f'<property name="orientation" action="default">{orientation}</property>'
             f'<property name="viewlabel" action="default">{label}</property>'
             f'<property name="viewcolor" action="default">{color}</property>'
-            f'<property name="viewgroup" action="default">{VIEW_GROUP}</property>'
+            f'<property name="viewgroup" action="default">{viewGroup}</property>'
             '</view></item>')
 
 
-def layoutXml(count, mainShare=55):
-    """Slicer layout of the editor: the main axial view on the left (mainShare % of the width) and a near-square
-    grid of count small axial views, one per frame, on the right. The last row is filled with empty views, so
-    every frame view has the same size and shape."""
+def layoutXml(count, mainShare=55, orientation="Axial", mainView=MAIN_VIEW, framePrefix=FRAME_VIEW_PREFIX,
+              emptyPrefix=EMPTY_VIEW_PREFIX, viewGroup=VIEW_GROUP, mainLabel="D"):
+    """Slicer layout of the editor: the main view on the left (mainShare % of the width) and a near-square
+    grid of count small views, one per frame, on the right. The last row is filled with empty views, so
+    every frame view has the same size and shape. Other modules (Motion Correction) use their own view names
+    and view group, so their layout does not share slice nodes with Review/Edit."""
     rows, columns = gridShape(count)
     grid = []
     for r in range(rows):
@@ -54,12 +59,14 @@ def layoutXml(count, mainShare=55):
         for c in range(columns):
             index = r * columns + c
             if index < count:
-                cells.append(_sliceViewXml(frameViewName(index), str(index + 1), "#3A7F7F"))
+                cells.append(_sliceViewXml(frameViewName(index, framePrefix), str(index + 1), "#3A7F7F",
+                                           orientation, viewGroup))
             else:
-                cells.append(_sliceViewXml(emptyViewName(index - count), "", "#202020"))
+                cells.append(_sliceViewXml(emptyViewName(index - count, emptyPrefix), "", "#202020",
+                                           orientation, viewGroup))
         grid.append('<item><layout type="horizontal">' + "".join(cells) + "</layout></item>")
     right = '<layout type="vertical">' + "".join(grid) + "</layout>"
-    main = _sliceViewXml(MAIN_VIEW, "D", "#F34A33")
+    main = _sliceViewXml(mainView, mainLabel, "#F34A33", orientation, viewGroup)
     main = main.replace("<item>", f'<item splitSize="{mainShare * 10}">', 1)
     return ('<layout type="horizontal" split="true">' + main
             + f'<item splitSize="{(100 - mainShare) * 10}">' + right + "</item></layout>")

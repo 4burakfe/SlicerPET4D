@@ -6,6 +6,11 @@ With curves (setCurves: the time-activity curves of the spherical ROIs) a plot b
 shorter frame track. It uses the same time axis, so a curve's points stay in the middle of their frame blocks at
 any zoom; the current frame's points are larger. Without curves there is no band.
 
+With motion rows (setMotion: the result of Dynamic PET Motion Correction) two rows sit right above the frame
+track, on the same time axis: the shift (mm along R, A, S) and the angles (degrees about R, A, S) of every frame,
+or its status (reference, low activity, over limit, failed). A narrow block shows the largest value only; hovering
+gives all of them.
+
 Only a time window [viewStart, viewEnd] is drawn (zoom): set it with setViewRange (the editor's two-handle time
 slider) or with the mouse wheel over the timeline (zooms around the cursor). Click a frame to make it current;
 Ctrl+click toggles it in the selection, Shift+click selects a range; Left / Right step through the frames.
@@ -18,6 +23,7 @@ Callbacks (set by the editor):
 import qt
 
 from .dynamicviews import formatClock, formatTime, niceTickStep, rulerRows, zoomRange
+from .motioncorrection import cellText, frameMotionTooltip, magnitudeLevel, statusCellText
 from .roicurves import formatValue, frameMidpoints, niceAxis
 
 _BACKGROUND = qt.QColor(30, 30, 33)
@@ -30,6 +36,8 @@ _PLAYHEAD = qt.QColor(235, 64, 52)
 _TRACK = qt.QColor(38, 38, 42)
 _FRAME_TEXT = qt.QColor(10, 30, 28)
 _GRID = qt.QColor(62, 62, 68)
+_MOTION_LEVELS = (qt.QColor(150, 220, 150), qt.QColor(240, 200, 90), qt.QColor(255, 110, 90))
+_STATUS_TEXT = qt.QColor(160, 160, 165)
 
 
 class FrameTimeline(qt.QWidget):
@@ -42,6 +50,10 @@ class FrameTimeline(qt.QWidget):
     POINT_RADIUS = 2.5
     CURRENT_POINT_RADIUS = 4.5
     HOVER_DISTANCE = 10           # pixels from a curve point that show its tooltip
+    MOTION_ROW_HEIGHT = 16
+    MOTION_TITLES = ("Shift mm", "Angle deg")
+    SHIFT_LEVELS_MM = (2.0, 5.0)      # cell colour: green below 2 mm, amber below 5 mm, red above
+    ANGLE_LEVELS_DEG = (1.0, 3.0)
 
     def __init__(self, parent=None):
         qt.QWidget.__init__(self, parent)
@@ -56,6 +68,7 @@ class FrameTimeline(qt.QWidget):
         self.curves = []              # {"name", "color", "values"}: one value (or None) per frame
         self.curveUnits = ""
         self.curveTicks = [0.0, 1.0]
+        self.motion = []              # per frame {"status", "shift", "angles", "message"} or None; empty: no rows
         self.onCurrentFrameChanged = None
         self.onSelectionChanged = None
         self.onViewRangeChanged = None
@@ -84,9 +97,19 @@ class FrameTimeline(qt.QWidget):
         self._updateMinimumHeight()
         self.update()
 
+    def setMotion(self, entries):
+        """entries: per frame {"status", "shift" (3 mm or None), "angles" (3 deg or None), "message"} or None;
+        an empty list removes the motion rows."""
+        self.motion = list(entries or [])
+        self._updateMinimumHeight()
+        self.update()
+
+    def _motionHeight(self):
+        return 2 * self.MOTION_ROW_HEIGHT + 2 if self.motion else 0
+
     def _updateMinimumHeight(self):
         extra = self.CURVE_TRACK_HEIGHT + self.CURVE_BAND_MIN_HEIGHT + self.CURVE_BAND_GAP + 16 if self.curves else 90
-        self.setMinimumHeight(self.rulerHeight + extra)
+        self.setMinimumHeight(self.rulerHeight + extra + self._motionHeight())
 
     def fullRange(self):
         return (self.frames[0]["start"], self.frames[-1]["end"]) if self.frames else (0.0, 1.0)
@@ -111,7 +134,8 @@ class FrameTimeline(qt.QWidget):
     # --- geometry ------------------------------------------------------------------------------
     def _trackRect(self):
         left = self.LABEL_WIDTH
-        top, height = self.rulerHeight + 6, max(10, self.height - self.rulerHeight - 16)
+        top = self.rulerHeight + 6 + self._motionHeight()
+        height = max(10, self.height - top - 10)
         if self.curves:
             top, height = top + height - min(self.CURVE_TRACK_HEIGHT, height), min(self.CURVE_TRACK_HEIGHT, height)
         return left, top, max(1, self.width - left - self.MARGIN), height
@@ -120,7 +144,7 @@ class FrameTimeline(qt.QWidget):
         """The plot band: between the ruler and the frame track."""
         left, trackTop, width, _ = self._trackRect()
         top = self.rulerHeight + 6
-        return left, top, width, max(10, trackTop - self.CURVE_BAND_GAP - top)
+        return left, top, width, max(10, trackTop - self.CURVE_BAND_GAP - self._motionHeight() - top)
 
     def _y(self, value):
         _, top, _, height = self._bandRect()
@@ -163,11 +187,15 @@ class FrameTimeline(qt.QWidget):
             self._paintRulerTitles(painter)
             if self.curves:
                 self._paintCurveAxis(painter)
+            if self.motion:
+                self._paintMotionTitles(painter)
             painter.setClipRect(qt.QRect(left, 0, width, self.height))
             self._paintRuler(painter)
             if self.curves:
                 self._paintCurves(painter)
             self._paintFrames(painter, top, height)
+            if self.motion:
+                self._paintMotion(painter)
             self._paintPlayhead(painter)
         finally:
             painter.end()
@@ -219,6 +247,54 @@ class FrameTimeline(qt.QWidget):
                 if rect.width() > 70:
                     text += (" " if self.curves else "\n") + formatTime(frame["duration"])
                 painter.drawText(rect, qt.Qt.AlignCenter, text)
+
+    def _motionRowRect(self, row):
+        left, trackTop, width, _ = self._trackRect()
+        top = trackTop - self._motionHeight() + row * self.MOTION_ROW_HEIGHT
+        return left, top, width, self.MOTION_ROW_HEIGHT
+
+    def _paintMotionTitles(self, painter):
+        painter.save()
+        self._smallFont(painter)
+        painter.setPen(qt.QPen(_DIM_TEXT))
+        for row, title in enumerate(self.MOTION_TITLES):
+            _, top, _, height = self._motionRowRect(row)
+            painter.drawText(qt.QRect(4, top, self.LABEL_WIDTH - 8, height), qt.Qt.AlignLeft | qt.Qt.AlignVCenter,
+                             title)
+        painter.restore()
+
+    def _paintMotion(self, painter):
+        """The shift and angle rows: one cell per frame block, the text coloured by size."""
+        painter.save()
+        self._smallFont(painter)
+        charWidth = max(4.0, painter.fontMetrics().averageCharWidth())
+        for row, key in enumerate(("shift", "angles")):
+            left, top, width, height = self._motionRowRect(row)
+            painter.fillRect(left, top, width, height - 1, _TRACK)
+            levels = self.SHIFT_LEVELS_MM if key == "shift" else self.ANGLE_LEVELS_DEG
+            for i, frame in enumerate(self.frames):
+                entry = self.motion[i] if i < len(self.motion) else None
+                if not entry or frame["end"] < self.viewStart or frame["start"] > self.viewEnd:
+                    continue
+                x0, x1 = self._x(frame["start"]), self._x(frame["end"])
+                rect = qt.QRectF(x0 + 1, top, max(1.0, x1 - x0 - 2), height - 1)
+                values = entry.get(key)
+                if values is not None:
+                    text = cellText(values, rect.width(), charWidth)
+                    painter.setPen(qt.QPen(_MOTION_LEVELS[magnitudeLevel(values, *levels)]))
+                else:
+                    text = statusCellText(entry.get("status"), rect.width(), charWidth) if row == 0 else ""
+                    painter.setPen(qt.QPen(_STATUS_TEXT))
+                if text:
+                    painter.drawText(rect, qt.Qt.AlignCenter, text)
+            painter.setPen(qt.QPen(_GRID))
+            lastX = None
+            for frame in self.frames:
+                x = int(self._x(frame["start"]))
+                if lastX is None or x - lastX >= 3:
+                    painter.drawLine(x, top, x, top + height - 2)
+                    lastX = x
+        painter.restore()
 
     def _paintCurveAxis(self, painter):
         """Value labels of the plot band and the units, in the label column."""
@@ -336,8 +412,11 @@ class FrameTimeline(qt.QWidget):
             self.toolTip = ""
             return
         frame = self.frames[index]
-        self.toolTip = (f"Frame {frame['number']}: {formatTime(frame['start'])} - {formatTime(frame['end'])} "
-                        f"({formatTime(frame['duration'])})")
+        tip = (f"Frame {frame['number']}: {formatTime(frame['start'])} - {formatTime(frame['end'])} "
+               f"({formatTime(frame['duration'])})")
+        if index < len(self.motion) and self.motion[index]:
+            tip += "\n" + frameMotionTooltip(self.motion[index])
+        self.toolTip = tip
 
     def wheelEvent(self, event):
         if not self.frames:

@@ -10,6 +10,7 @@ set(MODULE_PYTHON_SCRIPTS
   ${MODULE_NAME}Lib/dynamicviews.py
   ${MODULE_NAME}Lib/timeline.py
   ${MODULE_NAME}Lib/roicurves.py
+  ${MODULE_NAME}Lib/motioncorrection.py
   ${MODULE_NAME}Lib/colortables.py
   ${MODULE_NAME}Lib/colormaps.py
   )
@@ -59,4 +60,19 @@ slicerMacroBuildScriptedModule(
 
 if(BUILD_TESTING)
   slicer_add_python_unittest(SCRIPT ${EDITOR_MODULE_NAME}.py)
+endif()
+
+#-----------------------------------------------------------------------------
+# Dynamic PET Motion Correction (visible, Nuclear Medicine): frame-by-frame registration with BRAINSFit
+set(MC_MODULE_NAME DynamicPETMotionCorrection)
+
+slicerMacroBuildScriptedModule(
+  NAME ${MC_MODULE_NAME}
+  SCRIPTS ${MC_MODULE_NAME}.py
+  RESOURCES Resources/Icons/${MC_MODULE_NAME}.png
+  WITH_GENERIC_TESTS
+  )
+
+if(BUILD_TESTING)
+  slicer_add_python_unittest(SCRIPT ${MC_MODULE_NAME}.py)
 endif()

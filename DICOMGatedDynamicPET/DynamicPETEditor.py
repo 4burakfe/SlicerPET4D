@@ -1242,6 +1242,10 @@ class DynamicPETEditorWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         if node is None:
             return
         self.onClose()
+        # Motion Correction takes the main layout and a timeline dock too: close it first
+        motionCorrection = getattr(slicer.modules, "DynamicPETMotionCorrectionWidget", None)
+        if motionCorrection is not None and getattr(motionCorrection, "session", None) is not None:
+            motionCorrection.onClose()
         try:
             self.session = DynamicPETEditorSession(node, self.maxViewsSpin.value, self.overlayCheck.checked,
                                                    self.syncCheck.checked)

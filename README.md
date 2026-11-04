@@ -160,6 +160,47 @@ place of the weight (`SUVMethod`, `LeanBodyMassKg`, `BodySurfaceAreaM2` are stor
 - When SUV cannot be computed (no weight, dose or times) only Bq/ml is offered, and the reason is in the
   tooltip.
 
+## Dynamic PET Motion Correction
+
+The **Dynamic PET Motion Correction** module (Nuclear Medicine) registers every frame of a dynamic series to a
+reference with Slicer's built-in **BRAINSFit** and resamples it on its own grid with **BRAINSResample**. Pick the
+dynamic sequence (the most recent one is picked for you); the layout opens by itself:
+
+- **Upper 2/3:** the **reference** in a large view on the left (inverted grey), and a near-square grid of small views,
+  one per frame: the frame in **hot iron over the reference in inverted grey** (frame voxels below 3 % of the frame's
+  window are transparent). All views use one orientation (**coronal** by default; axial / coronal / sagittal in the
+  panel) and are linked. After registration the small views show the corrected frames; *Show frames: Original /
+  Motion corrected* switches back and forth.
+- **Lower 1/3:** the frame timeline (click a block to highlight that frame, Left / Right to step, the mouse wheel
+  zooms). After a **rigid** registration two rows sit right above the frame blocks: each frame's **shift** (mm along
+  R, A, S) and **angles** (degrees about R, A, S), coloured by size (shift: green < 2 mm, amber < 5 mm, red;
+  angles: < 1 deg, < 3 deg). Narrow blocks show the largest value; hover for all of them. Frames that were not
+  registered say why (ref, low, limit, failed).
+
+Settings in the panel:
+
+| Setting | Default | |
+|---|---|---|
+| Reference frame | frame with the highest activity | the frame shown in the large view; it is kept as it is |
+| Summed image (optional) | none | register to this volume instead (e.g. the series' summed volume); then every frame is registered |
+| Method | Rigid | Rigid, Affine or BSpline (BRAINSFit `transformType`, Mattes mutual information, no initialization) |
+| Enable two pass | off; second pass Affine | a second BRAINSFit run (Affine or BSpline) starting from the first |
+| Do not register low activity frames | on, below 1 % | activity = sum of the voxels of the frame; frames below that % of the highest frame are kept as they are |
+| Limit motion | on, 200 mm | a registration that moves any point of the middle half of the volume (3 x 3 x 3 grid) further than this along R, A or S is rejected and the frame is kept |
+| Advanced | sampling 0.05, B-spline grid 5 | BRAINSFit sampling percentage and control grid |
+
+**Why the shift / angle rows are rigid only:** a rigid transform is exactly three shifts and three angles. An
+affine transform adds scaling and shear, so splitting it into "a rotation and a shift" is not unique, and a
+B-spline has a different displacement at every point. With two passes the rows show the rigid first pass. The
+shift is the displacement of the centre of the reference volume (not the matrix translation, which depends on where
+the RAS origin is), and the values are the *motion* of the frame relative to the reference (the inverse of the
+correction).
+
+*Save motion corrected series* makes a new sequence *"&lt;series&gt; motion corrected"* (same index values and frame
+attributes, so Review/Edit opens it with the same timeline), a table *"... motion"* with the status, shift and angles
+of every frame, and (optional) the duration-weighted summed volume of the corrected frames. Every frame carries
+`DynamicPET.MotionCorrection.Status` (and `ShiftRASMm` / `AnglesRASDeg` for rigid).
+
 ## What is stored on the volumes
 
 Node attributes, with the prefix `StaticPET.`, `GatedPET.` or `DynamicPET.`. Every volume also carries
@@ -209,17 +250,21 @@ DICOMGatedDynamicPET/
   DICOMGatedDynamicPET.py          DICOM plugin (examine / load), Slicer self-test on synthetic series
   GatedDynamicPETSettings.py       settings module (visible, Nuclear Medicine)
   DynamicPETEditor.py              Dynamic PET Review/Edit module (visible, Nuclear Medicine)
+  DynamicPETMotionCorrection.py    Dynamic PET Motion Correction module (visible, Nuclear Medicine), Slicer self-test
   DICOMGatedDynamicPETLib/
     settings.py                    the settings, kept in the Slicer application settings
     dynamicviews.py, timeline.py   Review/Edit layout helpers and the timeline widget
     roicurves.py                   spherical ROIs: sphere voxels, time-activity curves (numpy, no Slicer imports)
+    motioncorrection.py            Motion Correction: low activity frames, rigid shift / angles, motion limit (numpy)
     petseries.py                   PET DICOM: kind, frame ordering, geometry, SUV, tracer, decay, frame timing,
                                    ECG gating, synthetic test series (pydicom + numpy, no Slicer imports)
 Testing/                          tests without Slicer (petseries, Review/Edit helpers): python -m pytest Testing
 ```
 
 In Slicer, the self-test runs from the Python console:
-`import DICOMGatedDynamicPET; DICOMGatedDynamicPET.DICOMGatedDynamicPETTest().runTest()`.
+`import DICOMGatedDynamicPET; DICOMGatedDynamicPET.DICOMGatedDynamicPETTest().runTest()`; the motion correction
+self-test (a synthetic series with a frame moved 8 mm and a low activity frame) with
+`import DynamicPETMotionCorrection; DynamicPETMotionCorrection.DynamicPETMotionCorrectionTest().runTest()`.
 
 The Dynamic PET Review/Edit module keeps its internal name `DynamicPETEditor` (file, classes, layout id), so scenes and
 scripts that use it keep working; only the title shown to users changed.
