@@ -181,10 +181,10 @@ dynamic sequence (the most recent one is picked for you); the layout opens by it
   frame's **shift** (mm along R, A, S) and **angles** (degrees about R, A, S), coloured by size (shift: green < 2 mm,
   amber < 5 mm, red; angles: < 1 deg, < 3 deg). Narrow blocks show the largest value; hover for all of them. Frames
   that were not registered say why (ref, low, limit, failed).
-- **Motion plot** (above the timeline, rigid only): the same motion over time on a white background, one point per
-  frame in its middle: x (R), y (A), z (S) in mm as solid lines on the left axis, pitch (about R), roll (about A),
-  yaw (about S) in degrees as dashed lines on the right axis. Its time axis follows the timeline's. Click a legend
-  entry to hide / show a line, Ctrl + wheel zooms the values, a double click resets them.
+- **Motion plots** (above the timeline, rigid only): the same motion over time on a white background, one point per
+  frame in its middle, in two plots: the shifts x (R), y (A), z (S) in mm, and below it the angles pitch (about R),
+  roll (about A), yaw (about S) in degrees, each component in its own colour. Their time axis follows the
+  timeline's. Click a legend entry to hide / show a line, Ctrl + wheel zooms the values, a double click resets them.
 
 Settings in the panel:
 

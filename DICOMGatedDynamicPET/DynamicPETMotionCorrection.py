@@ -469,7 +469,7 @@ class MotionCorrectionSession:
         self.referenceColor = REFERENCE_COLORMAP
         self.results = None
         self.hardened = False              # the corrections are in the sequence itself
-        self.plot = None
+        self.plots = []                    # shift (mm) and angle (deg) plots, rigid only
         self.showCorrected = True
         self.originalUppers = []
         self.correctedUppers = []
@@ -500,7 +500,7 @@ class MotionCorrectionSession:
             self.dock.deleteLater()
             self.dock = None
             self.timeline = None
-            self.plot = None
+            self.plots = []
         if self.previousLayout is not None and layoutManager.layout == LAYOUT_ID:
             layoutManager.setLayout(self.previousLayout)
         for node in self.frameVolumes + [self.referenceHelper]:
@@ -702,9 +702,9 @@ class MotionCorrectionSession:
             if results and motionRows else []
         if self.timeline is not None:
             self.timeline.setMotion(entries)
-        if self.plot is not None:
-            self.plot.setMotion(entries)
-            self.plot.setVisible(bool(entries))
+        for plot in self.plots:
+            plot.setMotion(entries)
+            plot.setVisible(bool(entries))
         self.setShowCorrected(self.showCorrected)
         self._updateToolbar()
 
@@ -786,17 +786,19 @@ class MotionCorrectionSession:
         toolbar.addWidget(self.summaryLabel)
         toolbar.addWidget(showAllButton)
         layout.addLayout(toolbar)
-        self.plot = MotionPlot()
-        self.plot.setFrames(self.intervals)
-        self.plot.onCurrentFrameChanged = self.setCurrentIndex
-        self.plot.onViewRangeChanged = self._onViewRangeChanged
-        self.plot.setVisible(False)       # shown after a rigid registration
+        self.plots = [MotionPlot("shift"), MotionPlot("angles")]
+        for plot in self.plots:
+            plot.setFrames(self.intervals)
+            plot.onCurrentFrameChanged = self.setCurrentIndex
+            plot.onViewRangeChanged = self._onViewRangeChanged
+            plot.setVisible(False)       # shown after a rigid registration
         self.timeline = FrameTimeline()
         self.timeline.setFrames(self.intervals)
         self.timeline.onCurrentFrameChanged = self.setCurrentIndex
         self.timeline.onViewRangeChanged = self._onViewRangeChanged
         splitter = qt.QSplitter(qt.Qt.Vertical)
-        splitter.addWidget(self.plot)
+        for plot in self.plots:
+            splitter.addWidget(plot)
         splitter.addWidget(self.timeline)
         splitter.setChildrenCollapsible(False)
         layout.addWidget(splitter, 1)
@@ -814,7 +816,7 @@ class MotionCorrectionSession:
 
     def _onViewRangeChanged(self, start, end):
         """The time window changed in the plot or the timeline: both show it."""
-        for widget in (self.timeline, self.plot):
+        for widget in [self.timeline] + self.plots:
             if widget is not None:
                 widget.setViewRange(start, end)
 
@@ -823,8 +825,8 @@ class MotionCorrectionSession:
             self.currentIndex = index
             if self.timeline is not None:
                 self.timeline.setCurrentIndex(index)
-            if self.plot is not None:
-                self.plot.setCurrentIndex(index)
+            for plot in self.plots:
+                plot.setCurrentIndex(index)
             self._updateOverlays()
             self._updateToolbar()
 
@@ -1495,7 +1497,7 @@ class DynamicPETMotionCorrectionTest(ScriptedLoadableModuleTest):
             view = layoutManager.sliceWidget(dynamicviews.frameViewName(3, FRAME_VIEW_PREFIX))
             self.assertEqual(view.mrmlSliceCompositeNode().GetForegroundVolumeID(), session.frameVolumes[3].GetID())
             self.assertEqual(len(session.timeline.motion), 5)
-            self.assertEqual(len(session.plot.motion), 5)
+            self.assertEqual([len(plot.motion) for plot in session.plots], [5, 5])
             session.setFrameColor("Hel")
             self.assertEqual(session.frameVolumes[0].GetDisplayNode().GetColorNodeID(),
                              colormaps.colorNodeForLabel("Hel").GetID())

@@ -33,6 +33,16 @@ FAILED = "failed"
 NOT_RUN = "not run"
 UNCHANGED = (REFERENCE, LOW_ACTIVITY, OVER_LIMIT, FAILED, NOT_RUN)   # frames kept as they were
 
+# the six rigid motion components of the motion plots: (key, component, label, colour)
+COMPONENTS = (
+    ("shift", 0, "x (R)", "#D62728"),
+    ("shift", 1, "y (A)", "#2CA02C"),
+    ("shift", 2, "z (S)", "#1F77B4"),
+    ("angles", 0, "pitch (about R)", "#FF7F0E"),
+    ("angles", 1, "roll (about A)", "#9467BD"),
+    ("angles", 2, "yaw (about S)", "#17BECF"),
+)
+
 STATUS_SHORT = {REFERENCE: "ref", LOW_ACTIVITY: "low", OVER_LIMIT: "limit", FAILED: "failed", NOT_RUN: ""}
 
 

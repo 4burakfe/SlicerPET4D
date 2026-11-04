@@ -1,32 +1,25 @@
-"""Motion plot of Dynamic PET Motion Correction: the rigid motion of every frame over time, on a white background.
-Shifts along R, A, S (x, y, z) in mm are solid lines on the left axis; the angles about R, A, S (pitch, roll, yaw)
-in degrees are dashed lines on the right axis. One point per frame, in the middle of the frame; a frame that was not
-registered has no point and breaks the line.
+"""Motion plots of Dynamic PET Motion Correction: the rigid motion of every frame over time, on a white background.
+One plot per kind: MotionPlot("shift") draws x, y, z (mm along R, A, S), MotionPlot("angles") pitch, roll, yaw
+(degrees about R, A, S), each component in its own colour. One point per frame, in the middle of the frame; a
+frame that was not registered has no point and breaks the line.
 
 The time axis is the timeline's (the same label column and margins), so the two line up: setViewRange follows the
 timeline's time window, and the mouse wheel zooms time here too (onViewRangeChanged). Ctrl + wheel zooms the
-value axes, Shift + wheel pans in time, a double click resets the value zoom. Click picks the frame.
+value axis, Shift + wheel pans in time, a double click resets the value zoom. Click picks the frame.
 """
 
 import qt
 
 from .dynamicviews import formatTime, panRange, zoomRange
-from .motioncorrection import plotLimit, plotTicks, vectorText
+from .motioncorrection import COMPONENTS, plotLimit, plotTicks, vectorText
 from .roicurves import frameMidpoints
 
-SERIES = (   # (key, component, label, colour, dashed)
-    ("shift", 0, "x (R) mm", "#D62728", False),
-    ("shift", 1, "y (A) mm", "#2CA02C", False),
-    ("shift", 2, "z (S) mm", "#1F77B4", False),
-    ("angles", 0, "pitch (about R) deg", "#FF7F0E", True),
-    ("angles", 1, "roll (about A) deg", "#9467BD", True),
-    ("angles", 2, "yaw (about S) deg", "#17BECF", True),
-)
+UNITS = {"shift": "mm", "angles": "deg"}
+MINIMUM_LIMIT = {"shift": 2.0, "angles": 1.0}   # smallest half height of the value axis
 _BACKGROUND = qt.QColor(255, 255, 255)
 _AXIS_TEXT = qt.QColor(70, 70, 75)
 _GRID = qt.QColor(225, 225, 228)
 _ZERO = qt.QColor(150, 150, 155)
-_CURRENT = qt.QColor(235, 64, 52)
 
 
 class MotionPlot(qt.QWidget):
@@ -35,18 +28,20 @@ class MotionPlot(qt.QWidget):
     LEGEND_HEIGHT = 18
     POINT_RADIUS = 2.5
 
-    def __init__(self, parent=None):
+    def __init__(self, kind="shift", parent=None):
         qt.QWidget.__init__(self, parent)
+        self.kind = kind
+        self.series = [(component, label, colour) for key, component, label, colour in COMPONENTS if key == kind]
         self.frames = []
         self.motion = []
         self.currentIndex = -1
         self.viewStart, self.viewEnd = 0.0, 1.0
         self.valueZoom = 1.0
-        self.visibleSeries = [True] * len(SERIES)
+        self.visibleSeries = [True] * len(self.series)
         self.legendRects = []         # set while painting, used by clicks on the legend
         self.onCurrentFrameChanged = None
         self.onViewRangeChanged = None
-        self.setMinimumHeight(140)
+        self.setMinimumHeight(110)
         self.setMouseTracking(True)
 
     # --- data ------------------------------------------------------------------------------------
@@ -73,13 +68,12 @@ class MotionPlot(qt.QWidget):
     def fullRange(self):
         return (self.frames[0]["start"], self.frames[-1]["end"]) if self.frames else (0.0, 1.0)
 
-    def _values(self, key, component):
-        return [(e.get(key)[component] if e and e.get(key) is not None else None) for e in self.motion]
+    def _values(self, component):
+        return [(e.get(self.kind)[component] if e and e.get(self.kind) is not None else None) for e in self.motion]
 
-    def _limits(self):
-        shifts = [v for s in range(3) for v in self._values("shift", s) if v is not None]
-        angles = [v for s in range(3) for v in self._values("angles", s) if v is not None]
-        return plotLimit(shifts, 2.0) / self.valueZoom, plotLimit(angles, 1.0) / self.valueZoom
+    def _limit(self):
+        values = [v for component, _, _ in self.series for v in self._values(component) if v is not None]
+        return plotLimit(values, MINIMUM_LIMIT.get(self.kind, 1.0)) / self.valueZoom
 
     # --- geometry --------------------------------------------------------------------------------
     def _plotRect(self):
@@ -123,21 +117,20 @@ class MotionPlot(qt.QWidget):
                 painter.drawText(qt.QRect(left, top, width, height), qt.Qt.AlignCenter,
                                  "Register with the rigid method to plot the motion of the frames")
                 return
-            shiftLimit, angleLimit = self._limits()
-            self._paintAxes(painter, shiftLimit, angleLimit)
+            limit = self._limit()
+            self._paintAxes(painter, limit)
             painter.setClipRect(qt.QRect(left, top, width, height))
             self._paintCurrent(painter)
             midpoints = frameMidpoints(self.frames)
-            for visible, (key, component, _, colour, dashed) in zip(self.visibleSeries, SERIES):
+            for visible, (component, _, colour) in zip(self.visibleSeries, self.series):
                 if visible:
-                    self._paintSeries(painter, midpoints, self._values(key, component),
-                                      shiftLimit if key == "shift" else angleLimit, qt.QColor(colour), dashed)
+                    self._paintSeries(painter, midpoints, self._values(component), limit, qt.QColor(colour))
         finally:
             painter.end()
 
     def _legendRects(self, metrics):
         rects, x = [], self.LABEL_WIDTH
-        for _, _, label, _, _ in SERIES:
+        for _, label, _ in self.series:
             w = 22 + metrics.boundingRect(label).width() + 4
             rects.append(qt.QRect(x, 2, w, self.LEGEND_HEIGHT))
             x += w + 10
@@ -145,11 +138,9 @@ class MotionPlot(qt.QWidget):
 
     def _paintLegend(self, painter):
         self.legendRects = self._legendRects(painter.fontMetrics())
-        for visible, rect, (_, _, label, colour, dashed) in zip(self.visibleSeries, self.legendRects, SERIES):
+        for visible, rect, (_, label, colour) in zip(self.visibleSeries, self.legendRects, self.series):
             pen = qt.QPen(qt.QColor(colour))
             pen.setWidthF(2.0)
-            if dashed:
-                pen.setStyle(qt.Qt.DashLine)
             painter.setPen(pen)
             y = rect.top() + rect.height() // 2
             painter.drawLine(rect.left(), y, rect.left() + 16, y)
@@ -157,25 +148,20 @@ class MotionPlot(qt.QWidget):
             painter.drawText(qt.QRect(rect.left() + 20, rect.top(), rect.width() - 20, rect.height()),
                              qt.Qt.AlignLeft | qt.Qt.AlignVCenter, label)
 
-    def _paintAxes(self, painter, shiftLimit, angleLimit):
+    def _paintAxes(self, painter, limit):
         left, top, width, height = self._plotRect()
         painter.setPen(qt.QPen(_GRID))
         for frame in self.frames:
             x = int(self._x(frame["start"]))
             if left <= x <= left + width:
                 painter.drawLine(x, top, x, top + height)
-        for tick in plotTicks(shiftLimit):
-            y = int(self._y(tick, shiftLimit))
+        for tick in plotTicks(limit):
+            y = int(self._y(tick, limit))
             painter.setPen(qt.QPen(_ZERO if tick == 0 else _GRID))
             painter.drawLine(left, y, left + width, y)
             painter.setPen(qt.QPen(_AXIS_TEXT))
             painter.drawText(qt.QRect(2, y - 8, left - 6, 16), qt.Qt.AlignRight | qt.Qt.AlignVCenter, f"{tick:g}")
-        painter.setPen(qt.QPen(_AXIS_TEXT))
-        for tick in plotTicks(angleLimit):     # degree labels inside the right edge
-            y = int(self._y(tick, angleLimit))
-            painter.drawText(qt.QRect(left + width - 50, y - 8, 46, 16), qt.Qt.AlignRight | qt.Qt.AlignVCenter,
-                             f"{tick:g}°")
-        painter.drawText(qt.QRect(2, top, left - 6, 14), qt.Qt.AlignLeft | qt.Qt.AlignTop, "mm")
+        painter.drawText(qt.QRect(2, 2, left - 6, 16), qt.Qt.AlignLeft | qt.Qt.AlignVCenter, UNITS.get(self.kind, ""))
 
     def _paintCurrent(self, painter):
         if 0 <= self.currentIndex < len(self.frames):
@@ -184,7 +170,7 @@ class MotionPlot(qt.QWidget):
             x0, x1 = self._x(frame["start"]), self._x(frame["end"])
             painter.fillRect(qt.QRectF(x0, top, max(1.0, x1 - x0), height), qt.QColor(255, 235, 200))
 
-    def _paintSeries(self, painter, midpoints, values, limit, colour, dashed):
+    def _paintSeries(self, painter, midpoints, values, limit, colour):
         path, drawing = qt.QPainterPath(), False
         for t, value in zip(midpoints, values):
             if value is None:
@@ -196,8 +182,6 @@ class MotionPlot(qt.QWidget):
                 drawing = True
         pen = qt.QPen(colour)
         pen.setWidthF(1.8)
-        if dashed:
-            pen.setStyle(qt.Qt.DashLine)
         painter.setBrush(qt.QBrush(qt.Qt.NoBrush))
         painter.setPen(pen)
         painter.drawPath(path)
@@ -230,9 +214,9 @@ class MotionPlot(qt.QWidget):
             return
         entry, frame = self.motion[index], self.frames[index]
         lines = [f"Frame {frame['number']}: {formatTime(frame['start'])} - {formatTime(frame['end'])}"]
-        if entry.get("shift") is not None:
-            lines.append(f"x, y, z: {vectorText(entry['shift'])} mm")
-            lines.append(f"pitch, roll, yaw: {vectorText(entry['angles'])} deg")
+        if entry.get(self.kind) is not None:
+            lines.append(("x, y, z: " if self.kind == "shift" else "pitch, roll, yaw: ")
+                         + f"{vectorText(entry[self.kind])} {UNITS.get(self.kind, '')}")
         else:
             lines.append(entry.get("status") or "")
         self.toolTip = "\n".join(lines)
