@@ -12,7 +12,9 @@ or its status (reference, low activity, over limit, failed). A narrow block show
 gives all of them.
 
 Only a time window [viewStart, viewEnd] is drawn (zoom): set it with setViewRange (the editor's two-handle time
-slider) or with the mouse wheel over the timeline (zooms around the cursor). Click a frame to make it current;
+slider) or with the mouse wheel over the timeline (zooms around the cursor); Shift + wheel pans in time.
+Ctrl + wheel over the plot band zooms its value axis (from 0 up), a double click on the band resets it, and a
+double click elsewhere shows the whole series. Click a frame to make it current;
 Ctrl+click toggles it in the selection, Shift+click selects a range; Left / Right step through the frames.
 Callbacks (set by the editor):
     onCurrentFrameChanged(index)     the user picked a frame
@@ -22,7 +24,7 @@ Callbacks (set by the editor):
 
 import qt
 
-from .dynamicviews import formatClock, formatTime, niceTickStep, rulerRows, zoomRange
+from .dynamicviews import formatClock, formatTime, niceTickStep, panRange, rulerRows, zoomRange
 from .motioncorrection import cellText, frameMotionTooltip, magnitudeLevel, statusCellText
 from .roicurves import formatValue, frameMidpoints, niceAxis
 
@@ -51,7 +53,7 @@ class FrameTimeline(qt.QWidget):
     CURRENT_POINT_RADIUS = 4.5
     HOVER_DISTANCE = 10           # pixels from a curve point that show its tooltip
     MOTION_ROW_HEIGHT = 16
-    MOTION_TITLES = ("Shift mm", "Angle deg")
+    MOTION_TITLES = ("Shift mm", "Angle \u00b0")
     SHIFT_LEVELS_MM = (2.0, 5.0)      # cell colour: green below 2 mm, amber below 5 mm, red above
     ANGLE_LEVELS_DEG = (1.0, 3.0)
 
@@ -68,6 +70,7 @@ class FrameTimeline(qt.QWidget):
         self.curves = []              # {"name", "color", "values"}: one value (or None) per frame
         self.curveUnits = ""
         self.curveTicks = [0.0, 1.0]
+        self.valueZoom = 1.0          # Ctrl + wheel over the plot band: its top is the highest value / valueZoom
         self.motion = []              # per frame {"status", "shift", "angles", "message"} or None; empty: no rows
         self.onCurrentFrameChanged = None
         self.onSelectionChanged = None
@@ -93,8 +96,17 @@ class FrameTimeline(qt.QWidget):
         """curves: [{"name", "color" ('#RRGGBB'), "values" (per frame, None allowed)}]; none hides the plot band."""
         self.curves = [c for c in curves if any(v is not None for v in c["values"])]
         self.curveUnits = units or ""
-        self.curveTicks = niceAxis(max([v for c in self.curves for v in c["values"] if v is not None] or [0.0]))
+        self._updateCurveTicks()
         self._updateMinimumHeight()
+        self.update()
+
+    def _updateCurveTicks(self):
+        highest = max([v for c in self.curves for v in c["values"] if v is not None] or [0.0])
+        self.curveTicks = niceAxis(highest / self.valueZoom)
+
+    def setValueZoom(self, zoom):
+        self.valueZoom = min(max(float(zoom), 1.0), 1000.0)
+        self._updateCurveTicks()
         self.update()
 
     def setMotion(self, entries):
@@ -418,14 +430,36 @@ class FrameTimeline(qt.QWidget):
             tip += "\n" + frameMotionTooltip(self.motion[index])
         self.toolTip = tip
 
+    def _inBand(self, x, y):
+        left, top, width, height = self._bandRect()
+        return bool(self.curves) and left <= x <= left + width and top <= y <= top + height
+
+    def mouseDoubleClickEvent(self, event):
+        if self._inBand(event.pos().x(), event.pos().y()):
+            self.setValueZoom(1.0)
+            return
+        if self.frames:
+            self.setViewRange(*self.fullRange())
+            if self.onViewRangeChanged:
+                self.onViewRangeChanged(self.viewStart, self.viewEnd)
+
     def wheelEvent(self, event):
         if not self.frames:
             return
         steps = event.angleDelta().y() / 120.0
         if not steps:
             return
-        start, end = zoomRange(self.viewStart, self.viewEnd, self._time(event.pos().x()), 0.8 ** steps,
-                               *self.fullRange())
+        modifiers = event.modifiers()
+        if modifiers & qt.Qt.ControlModifier:
+            if self.curves:
+                self.setValueZoom(self.valueZoom * 1.25 ** steps)
+            event.accept()
+            return
+        if modifiers & qt.Qt.ShiftModifier:
+            start, end = panRange(self.viewStart, self.viewEnd, steps, *self.fullRange())
+        else:
+            start, end = zoomRange(self.viewStart, self.viewEnd, self._time(event.pos().x()), 0.8 ** steps,
+                                   *self.fullRange())
         self.setViewRange(start, end)
         if self.onViewRangeChanged:
             self.onViewRangeChanged(self.viewStart, self.viewEnd)
