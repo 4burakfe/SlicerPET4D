@@ -80,7 +80,8 @@ class DynamicPETMotionCorrection(ScriptedLoadableModule):
 class DynamicPETMotionCorrectionLogic(ScriptedLoadableModuleLogic):
     """Registration of the frames of a dynamic sequence to a reference. Settings (dict):
         method               "Rigid", "Affine" or "BSpline"
-        twoPass, secondMethod    a second pass ("Affine" or "BSpline") starting from the first
+        twoPass, secondMethod    a second pass ("Rigid", default, "Affine" or "BSpline") to the motion corrected sum of
+                                 the first, starting from it
         skipLowActivity, lowActivityPercent    frames below that % of the highest frame activity are kept
         limitMotion, maxMotionMm    a registration moving more than that along R, A or S is rejected
         samplingPercentage, bsplineGrid    BRAINSFit details
@@ -685,6 +686,10 @@ class MotionCorrectionSession:
         self.hardened = False              # the corrections are in the sequence itself
         self.plots = []                    # shift (mm) and angle (deg) plots, rigid only
         self.showCorrected = True
+        self.showNames = False             # Slicer's volume names (B:, F:) in the corners of the views
+        self.showPlots = True              # motion plots in the dock (when there is rigid motion to plot)
+        self.showTimeline = True           # frame timeline in the dock
+        self.annotatedViews = []           # slice views whose corner annotations this session hides
         self.originalUppers = []
         self.frameMaximum = 1.0            # highest voxel of the frames (range of the frame window)
         self.frameWindow = None            # (lower, upper) of all frames; None: 0 - highest 99.9th percentile
@@ -716,6 +721,10 @@ class MotionCorrectionSession:
             renderer.RemoveActor2D(actor)
             sliceView.scheduleRender()
         self.overlays = {}
+        for sliceView in self.annotatedViews:
+            sliceView.cornerAnnotation().SetVisibility(True)
+            sliceView.scheduleRender()
+        self.annotatedViews = []
         layoutManager = slicer.app.layoutManager()
         if layoutManager.layout == LAYOUT_ID:
             self._link(False)
@@ -828,6 +837,29 @@ class MotionCorrectionSession:
                 continue
             widget.sliceController().setVisible(False)
             self.observers.append(guardViewVolumes(widget, lambda: (None, None, None)))
+            self.annotatedViews.append(widget.sliceView())
+        self.annotatedViews += [w.sliceView() for w in self._allWidgets()]
+        self.setShowNames(self.showNames)
+
+    def setShowNames(self, show):
+        """Slicer's corner annotations (B: / F: volume names, ...) in the views of the layout."""
+        self.showNames = bool(show)
+        for sliceView in self.annotatedViews:
+            sliceView.cornerAnnotation().SetVisibility(self.showNames)
+            sliceView.scheduleRender()
+
+    def setPanels(self, plots=None, timeline=None):
+        """Show / hide the motion plots and the frame timeline; the dock hides when both are off."""
+        if plots is not None:
+            self.showPlots = bool(plots)
+        if timeline is not None:
+            self.showTimeline = bool(timeline)
+        for plot in self.plots:
+            plot.setVisible(self.showPlots and bool(plot.motion))
+        if self.timeline is not None:
+            self.timeline.setVisible(self.showTimeline)
+        if self.dock is not None:
+            self.dock.setVisible(self.showPlots or self.showTimeline)
 
     def _guardVolumes(self):
         """The reference and frame views keep their volumes when Slicer shows a newly loaded volume everywhere."""
@@ -961,7 +993,7 @@ class MotionCorrectionSession:
             self.timeline.setMotion(entries)
         for plot in self.plots:
             plot.setMotion(entries)
-            plot.setVisible(bool(entries))
+        self.setPanels()
         self.setShowCorrected(self.showCorrected)
         self._updateToolbar()
 
@@ -1071,6 +1103,7 @@ class MotionCorrectionSession:
         except Exception:
             self.dock.setMinimumHeight(max(170, int(mainWindow.height / 3)))
         self._updateToolbar()
+        self.setPanels()
 
     def _onViewRangeChanged(self, start, end):
         """The time window changed in the plot or the timeline: both show it."""
@@ -1223,6 +1256,21 @@ class DynamicPETMotionCorrectionWidget(ScriptedLoadableModuleWidget, VTKObservat
         self.showWidget.setLayout(showRow)
         self.showWidget.enabled = False
         view.addRow("Show frames:", self.showWidget)
+        self.namesCheck = qt.QCheckBox("Volume names in the views (B:, F:)")
+        self.namesCheck.checked = False
+        self.namesCheck.toolTip = "Slicer's corner annotations (background / foreground volume names) in the views"
+        view.addRow(self.namesCheck)
+        panelRow = qt.QHBoxLayout()
+        self.plotsCheck = qt.QCheckBox("Motion plots")
+        self.plotsCheck.checked = True
+        self.plotsCheck.toolTip = "Show the shift and angle plots at the bottom (after a rigid registration)"
+        self.timelineCheck = qt.QCheckBox("Frame timeline")
+        self.timelineCheck.checked = True
+        self.timelineCheck.toolTip = "Show the frame timeline at the bottom; with the plots off too the panel closes"
+        panelRow.addWidget(self.plotsCheck)
+        panelRow.addWidget(self.timelineCheck)
+        panelRow.addStretch(1)
+        view.addRow("Bottom panel:", panelRow)
         buttons = qt.QHBoxLayout()
         self.openButton = qt.QPushButton("Show layout")
         self.openButton.toolTip = "Switch to the motion correction layout (it opens by itself when a series is picked)"
@@ -1356,6 +1404,9 @@ class DynamicPETMotionCorrectionWidget(ScriptedLoadableModuleWidget, VTKObservat
         self.referenceColorCombo.connect("currentIndexChanged(int)", self.onReferenceColorChanged)
         self.linkCheck.connect("toggled(bool)", self.onLinkToggled)
         self.showCorrectedRadio.connect("toggled(bool)", self.onShowCorrectedToggled)
+        self.namesCheck.connect("toggled(bool)", self.onNamesToggled)
+        self.plotsCheck.connect("toggled(bool)", self.onPanelsToggled)
+        self.timelineCheck.connect("toggled(bool)", self.onPanelsToggled)
         self.openButton.connect("clicked()", self.onOpen)
         self.closeButton.connect("clicked()", self.onClose)
         self.methodCombo.connect("currentIndexChanged(int)", self.onMethodChanged)
@@ -1481,6 +1532,9 @@ class DynamicPETMotionCorrectionWidget(ScriptedLoadableModuleWidget, VTKObservat
             self.session.frameColor = self.frameColorCombo.currentText
             self.session.referenceColor = self.referenceColorCombo.currentText
             self.session.showCorrected = self.showCorrectedRadio.checked
+            self.session.showNames = self.namesCheck.checked
+            self.session.showPlots = self.plotsCheck.checked
+            self.session.showTimeline = self.timelineCheck.checked
             self.session.open()
             summed = self.summedSelector.currentNode()
             if summed is not None:
@@ -1585,6 +1639,14 @@ class DynamicPETMotionCorrectionWidget(ScriptedLoadableModuleWidget, VTKObservat
     def onLinkToggled(self, checked):
         if self.session is not None:
             self.session.setLinked(checked)
+
+    def onNamesToggled(self, show):
+        if self.session is not None:
+            self.session.setShowNames(show)
+
+    def onPanelsToggled(self, *args):
+        if self.session is not None:
+            self.session.setPanels(self.plotsCheck.checked, self.timelineCheck.checked)
 
     def onShowCorrectedToggled(self, corrected):
         if self.session is not None:
@@ -1945,6 +2007,17 @@ class DynamicPETMotionCorrectionTest(ScriptedLoadableModuleTest):
             self.assertEqual(session.referenceVolume.GetDisplayNode().GetWindowLevelMax(), 500.0)
             session.setFrameWindow(0.0, 300.0)
             self.assertEqual(session.frameVolumes[0].GetDisplayNode().GetWindowLevelMax(), 300.0)
+            self.assertFalse(main.sliceView().cornerAnnotation().GetVisibility())    # volume names off
+            session.setShowNames(True)
+            self.assertTrue(main.sliceView().cornerAnnotation().GetVisibility())
+            session.setShowNames(False)
+            session.setPanels(plots=False)
+            self.assertFalse(session.plots[0].visible)
+            self.assertTrue(session.timeline.visible)
+            session.setPanels(timeline=False)
+            self.assertFalse(session.dock.visible)
+            session.setPanels(plots=True, timeline=True)
+            self.assertTrue(session.dock.visible and session.plots[0].visible)
             session.setOrientation("Axial")
             self.assertEqual(view.mrmlSliceNode().GetOrientation(), "Axial")
             self.delayDisplay("Dynamic PET Motion Correction open")

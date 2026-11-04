@@ -74,12 +74,14 @@ def test_limit():
 
 def test_transform_types():
     assert mc.transformTypes("Rigid") == ["Rigid"]
-    assert mc.transformTypes("Rigid", True) == ["Rigid", "Affine"]
+    assert mc.transformTypes("Rigid", True) == ["Rigid", "Rigid"]
+    assert mc.transformTypes("Rigid", True, "Affine") == ["Rigid", "Affine"]
     assert mc.transformTypes("Affine", True, "BSpline") == ["Affine", "BSpline"]
     assert mc.transformTypes("BSpline", True) == ["BSpline"]
     assert mc.transformTypes("Rigid", True, "Rigid") == ["Rigid", "Rigid"]
     assert mc.methodText("Rigid") == "Rigid"
-    assert mc.methodText("Rigid", True) == "Rigid, then Affine to the motion corrected sum"
+    assert mc.methodText("Rigid", True) == "Rigid, then Rigid to the motion corrected sum"
+    assert mc.rowsPass("Rigid", True) == 1
     assert mc.rowsPass("Rigid", True, "Rigid") == 1
     assert mc.rowsPass("Rigid", True, "Affine") == 0 and mc.rowsPass("Rigid") == 0
     with pytest.raises(ValueError):
