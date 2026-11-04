@@ -588,6 +588,49 @@ class SliceWiseMean:
         return np.where((self.weights > 0)[:, None, None], real, filled).astype(np.float32)
 
 
+SUM_DURATION = "duration"     # summed image: time average of the frames' concentration (default)
+SUM_COUNTS = "counts"         # summed image: what a static acquisition over the same time would show
+SUM_WEIGHTINGS = (SUM_DURATION, SUM_COUNTS)
+
+
+def summationWeights(durations, starts=None, halfLife=None, weighting=SUM_DURATION, decayCorrected=True):
+    """Weights of the time frames in the summed image: (weights, description). weights is None for a plain mean
+    (a duration unknown).
+
+    duration: d_i, the time average of the (decay corrected) concentration over the acquisition.
+    counts:   the weight of each frame in one static acquisition over the same time, decay corrected to the same
+              reference: the counts a constant activity gives in the frame, integral of exp(-lambda (t - s_0)) over
+              the frame = exp(-lambda (s_i - s_0)) (1 - exp(-lambda d_i)) / lambda. A static frame with the same
+              decay correction is sum(C_i w_i) / sum(w_i) exactly, so early frames weigh more than late ones. Frames
+              that are not decay corrected already hold the counts per second: their duration weights are the
+              static acquisition. Without the frame starts or the half life it falls back to the durations.
+    starts are seconds from any common reference (e.g. the study start), halfLife seconds."""
+    if not durations or any(d is None or not d > 0 for d in durations):
+        return None, "frame durations unknown, plain mean"
+    durations = [float(d) for d in durations]
+    if weighting != SUM_COUNTS:
+        return durations, "duration weighted"
+    if not decayCorrected:
+        return durations, "count weighted (frames not decay corrected, so as their durations)"
+    if not halfLife or not float(halfLife) > 0 or not starts or any(s is None for s in starts) \
+            or len(starts) != len(durations):
+        return durations, "duration weighted (count weighting needs the frame starts and the half life)"
+    rate = math.log(2.0) / float(halfLife)
+    first = min(float(s) for s in starts)
+    weights = [math.exp(-rate * (float(s) - first)) * -math.expm1(-rate * d) / rate for s, d in zip(starts, durations)]
+    return weights, f"count weighted as a static acquisition (half life {float(halfLife):g} s)"
+
+
+def weightedMean(arrays, weights=None):
+    """sum(C_i x w_i) / sum(w_i) of frame arrays (a plain mean when weights is None)."""
+    weights = [1.0] * len(arrays) if weights is None else [float(w) for w in weights]
+    total = None
+    for array, weight in zip(arrays, weights):
+        part = np.asarray(array, dtype=np.float64) * weight
+        total = part if total is None else total + part
+    return total / float(sum(weights))
+
+
 def durationWeightedMean(arrays, durations):
     """Activity concentration over the whole acquisition from time frames: sum(C_i x d_i) / sum(d_i)
     (a plain mean when the durations are unknown)."""

@@ -65,6 +65,7 @@ saved at once and apply to series examined in the DICOM browser afterwards.
 | SUV method | body weight (SUVbw), lean body mass (SUVlbm / SUL, Janmahasatian), body surface area (SUVbsa, Du Bois) | SUVbw |
 | Loadable selected first, per static / gated / dynamic | SUV or Bq/ml | SUV, SUV, Bq/ml |
 | Summed volumes, gated / dynamic | on or off | on, on |
+| Dynamic PET: weight the frames by counts (simulate a static scan) | on or off | off |
 
 - Every series offers the chosen SUV and Bq/ml; the other one stays in the list, unselected.
 - SUVlbm needs the patient height and sex (M / F), SUVbsa the height. Without them the series offers SUVbw,
@@ -72,7 +73,17 @@ saved at once and apply to series examined in the DICOM browser afterwards.
 - **Gated summed volume:** the mean of the gates (see below). Tarvos lists a gated PET study through this
   image, so keep it on for Tarvos.
 - **Dynamic summed volume:** *"<series> summed Bq/ml"*. The frames are summed by their durations, which is
-  the duration-weighted mean, so the values stay in Bq/ml or SUV. It links to its sequence
+  the duration-weighted mean, so the values stay in Bq/ml or SUV: the time average of the decay corrected
+  concentration over the acquisition.
+- **Weight the frames by counts** (off by default) makes the summed volume what **one static acquisition of the
+  same time** would show instead. Each frame is weighted by the counts a constant activity gives in it,
+  `w_i = exp(-λ (s_i - s_1)) (1 - exp(-λ d_i)) / λ` (s = frame start, d = duration, λ = ln 2 / half life), so the
+  early frames weigh more: for C-11 over 90 min the last minute weighs about 5 % of the first. With decay corrected
+  frames, `Σ C_i w_i / Σ w_i` is exactly the value of a static frame decay corrected to its start. Frames that are
+  not decay corrected already are counts per second, so their duration weights are the static acquisition. Without
+  the frame starts or the half life the durations are used. The setting is written on the summed volume and the
+  sequence (`DynamicPET.SumWeighting` = `duration` or `counts`, with the weighting used in `StaticFrom`), and
+  Motion Correction resums with it. It links to its sequence
   (`DynamicPET.DynamicSequence`) and carries the total duration and the first start / last end from the
   injection.
 - With a summed volume off, the sequence's *(current gate/frame)* volume is shown instead.
@@ -216,8 +227,8 @@ Under *Register frames*:
   over the limit, failed) as they were, so the new series has the same frames and times as the original. It gets its
   own browser and current frame volume, a table *"&lt;series&gt; motion"* with the status, shift and angles of every
   frame and, with *Resum the summed image*, a new summed image *"&lt;summed&gt; motion corrected"* of the corrected
-  frames: the duration-weighted mean, as the DICOM loader makes it, with the attributes and display of the old summed
-  image. The new series points to it (`DynamicPET.SummedVolumeID`). Every frame carries
+  frames, as the DICOM loader makes it (weighted by duration, or by counts when the series' `DynamicPET.SumWeighting`
+  tag says so), with the attributes and display of the old summed image. The new series points to it (`DynamicPET.SummedVolumeID`). Every frame carries
   `DynamicPET.MotionCorrection.Status` (and `ShiftRASMm` / `AnglesRASDeg` for rigid). The module then shows the new
   series. Save the scene to keep it.
 - **Keep only the motion corrected series** (on by default): Harden also **deletes the original series** (sequence,

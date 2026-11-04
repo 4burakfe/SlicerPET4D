@@ -25,7 +25,8 @@ Results, placed in the series' subject hierarchy study:
               "<series> gated SUVbw" (index "Gate") with a browser and a "(current gate)" proxy volume
     dynamic   the sequence "<series> dynamic Bq/ml" (index "Time", s from the scan start to the frame middle)
               with a browser and a "(current frame)" proxy volume, the table "<series> frame timing" and
-              "<series> summed Bq/ml": the frames summed (duration weighted, so still a concentration)
+              "<series> summed Bq/ml": the frames summed (weighted by duration, or by counts as a static scan
+              would see them with the SummedWeighting setting; a weighted mean, so still a concentration)
     static    the volume "<series> SUVbw"
 Every volume carries DICOM.Modality = PT, DICOM.instanceUIDs and attributes with the prefix of its kind
 (StaticPET., GatedPET., DynamicPET.): units and scale, SUV inputs, radiopharmaceutical and radionuclide,
@@ -192,12 +193,14 @@ class DICOMGatedDynamicPETPluginClass(DICOMPlugin):
             return None
 
     # --- loading -------------------------------------------------------------------------------
-    def loadSeries(self, files, name, units=None, kind=None, loadable=None, summed=None, decayCorrect=None):
+    def loadSeries(self, files, name, units=None, kind=None, loadable=None, summed=None, decayCorrect=None,
+                   weighting=None):
         """Load a PET series in units (Bq/ml, SUVbw, SUVlbm or SUVbsa; from the name when None); returns the
         node to show (static volume, gated mean or dynamic summed volume, else the sequence proxy). summed:
         make the static image of a gated / dynamic series (None: the setting). decayCorrect: decay correct the
         frames of a dynamic series that is not decay corrected (Decay Correction NONE) to the first frame
-        start (None: ask)."""
+        start (None: ask). weighting: how the frames of a dynamic series are summed, petseries.SUM_DURATION or
+        SUM_COUNTS (None: the setting)."""
         import pydicom
         progress = slicer.util.createProgressDialog(labelText="Reading PET images...", maximum=len(files) + 1)
         datasets = []
@@ -275,7 +278,10 @@ class DICOMGatedDynamicPETPluginClass(DICOMPlugin):
         elif kind == petseries.GATED:
             node = self._loadGated(name, layout, scales, ijkToRas, units, prefix, common, loadable, summed)
         else:
-            node = self._loadDynamic(name, layout, scales, ijkToRas, units, prefix, common, loadable, summed)
+            weighting = weighting or petsettings.summedWeighting()
+            decayCorrected = petseries.isDecayCorrected(datasets[0]) or bool(decayFactors)
+            node = self._loadDynamic(name, layout, scales, ijkToRas, units, prefix, common, loadable, summed,
+                                     weighting, decayCorrected)
         _showLater(node)
         if layout["warnings"]:
             _warnUser(name, layout["warnings"])
@@ -365,21 +371,27 @@ class DICOMGatedDynamicPETPluginClass(DICOMPlugin):
                      f"in {units} (ordered by {method}, scale {scales[0]:.6g}), mean of the gates as '{meanNode.GetName()}'")
         return meanNode
 
-    def _loadDynamic(self, name, layout, scales, ijkToRas, units, prefix, common, loadable, summed=True):
+    def _loadDynamic(self, name, layout, scales, ijkToRas, units, prefix, common, loadable, summed=True,
+                     weighting=petseries.SUM_DURATION, decayCorrected=True):
         frames, method = layout["frames"], layout["method"]
         timing = petseries.frameTiming(frames, numbers=layout["numbers"])
         for row, factor in zip(timing, layout.get("decayFactors") or []):
             row["LoaderDecayFactor"] = round(factor, 6)
         durations = [row["DurationS"] for row in timing]
-        weighted = all(d and d > 0 for d in durations)
+        try:
+            halfLife = float(common.get("RadionuclideHalfLifeS"))
+        except (TypeError, ValueError):
+            halfLife = None
+        weights, weightingText = petseries.summationWeights(
+            durations, [row["StartFromStudyStartS"] for row in timing], halfLife, weighting, decayCorrected)
         nodes, upper, summer = [], 0.0, petseries.SliceWiseMean()
         for f, (slots, frame, row) in enumerate(zip(layout["slots"], frames, timing)):
             array = petseries.frameArray(slots, scales[f])
             upper = max(upper, float(np.percentile(array, 99.9)))
             if summed:
-                # summed acquisition = duration weighted mean of the concentrations, slice by slice over the
-                # frames that have the slice
-                summer.add(array, slots, durations[f] if weighted else 1.0)
+                # summed acquisition = weighted mean of the concentrations (by duration or by counts), slice by
+                # slice over the frames that have the slice
+                summer.add(array, slots, weights[f] if weights else 1.0)
             node = self._volume(f"{name} F{row['Frame']}", array, ijkToRas, units, prefix, common, frame,
                                 addToScene=False)
             node.SetAttribute(prefix + "Frame", str(row["Frame"]))
@@ -394,6 +406,7 @@ class DICOMGatedDynamicPETPluginClass(DICOMPlugin):
         indexValues = frameIndexValues(timing)
         sequenceNode, browserNode, proxyNode = self._sequence(
             name, nodes, indexValues, "Time", "s", petseries.timingLists(timing), prefix, upper)
+        sequenceNode.SetAttribute(prefix + "SumWeighting", weighting)   # followed when the frames are summed again
         sequenceNode.SetAttribute(prefix + "IndexMeaning", "seconds from the scan start to the frame middle"
                                   if timing[0]["MidFromScanStartS"] is not None else "frame number")
         if timing[0]["StartDateTime"]:
@@ -409,10 +422,10 @@ class DICOMGatedDynamicPETPluginClass(DICOMPlugin):
             summedName = name.replace(" dynamic ", " summed ", 1) if " dynamic " in name else f"{name} summed"
             array = summer.mean()
             summedNode = self._volume(summedName, array, ijkToRas, units, prefix, common, frames[0])
-            summedNode.SetAttribute(prefix + "StaticFrom", f"{len(frames)} frames summed, "
-                                    + ("duration weighted" if weighted else "frame durations unknown, plain mean"))
+            summedNode.SetAttribute(prefix + "StaticFrom", f"{len(frames)} frames summed, {weightingText}")
             summedNode.SetAttribute(prefix + "SummedFrames", str(len(frames)))
-            if weighted:
+            summedNode.SetAttribute(prefix + "SumWeighting", weighting)
+            if weights:
                 summedNode.SetAttribute(prefix + "DurationS", f"{sum(durations):.6g}")
             first, last = timing[0], timing[-1]
             for key, value in (("StartFromInjectionS", first["StartFromInjectionS"]),
@@ -628,6 +641,17 @@ class DICOMGatedDynamicPETTest(ScriptedLoadableModuleTest):
         self.assertEqual(json.loads(sequence.GetAttribute("DynamicPET.FrameDurationS")), durations)
         table = slicer.mrmlScene.GetNodeByID(sequence.GetAttribute("DynamicPET.FrameTimingTableID"))
         self.assertEqual(table.GetNumberOfRows(), 4)
+        self.assertEqual(sequence.GetAttribute("DynamicPET.SumWeighting"), petseries.SUM_DURATION)
+        # weighted by counts: as one static acquisition of the 110 s, the early frames weigh more
+        counted = DICOMGatedDynamicPETPluginClass().loadSeries(files, "Synthetic dynamic Bq/ml",
+                                                               petseries.UNITS_ACTIVITY, summed=True,
+                                                               weighting=petseries.SUM_COUNTS)
+        halfLife = float(counted.GetAttribute("DynamicPET.RadionuclideHalfLifeS"))
+        weights, _ = petseries.summationWeights(durations, [0.0, 10.0, 20.0, 50.0], halfLife, petseries.SUM_COUNTS)
+        countMean = sum(1000.0 * (i + 1) * w for i, w in enumerate(weights)) / sum(weights)
+        np.testing.assert_allclose(slicer.util.arrayFromVolume(counted), countMean, rtol=1e-4)
+        self.assertEqual(counted.GetAttribute("DynamicPET.SumWeighting"), petseries.SUM_COUNTS)
+        self.assertIn("count weighted", counted.GetAttribute("DynamicPET.StaticFrom"))
         self.delayDisplay("Dynamic PET loaded")
 
     def test_LoadDynamicNotDecayCorrected(self):

@@ -405,18 +405,53 @@ class DynamicPETMotionCorrectionLogic(ScriptedLoadableModuleLogic):
         logging.info("Dynamic PET motion correction: removed the originals " + ", ".join(f"'{n}'" for n in removed))
         return removed
 
+    @staticmethod
+    def summationWeighting(sequenceNode, source=None):
+        """How the summed image of the sequence is made, from the tags the loader wrote (DynamicPET.SumWeighting
+        of the summed image, else of the sequence): petseries.SUM_DURATION (default) or SUM_COUNTS."""
+        from DICOMGatedDynamicPETLib import petseries
+        for node in (source, sequenceNode):
+            value = node.GetAttribute(PREFIX + "SumWeighting") if node is not None else None
+            if value in petseries.SUM_WEIGHTINGS:
+                return value
+        return petseries.SUM_DURATION
+
+    @staticmethod
+    def _frameNumbers(sequenceNode, key):
+        values = []
+        for i in range(sequenceNode.GetNumberOfDataNodes()):
+            try:
+                values.append(float(sequenceNode.GetNthDataNode(i).GetAttribute(PREFIX + key)))
+            except (TypeError, ValueError):
+                values.append(None)
+        return values
+
+    def summationWeights(self, sequenceNode, weighting):
+        """(weights, description) of the frames of the sequence, as the loader sums them (petseries)."""
+        from DICOMGatedDynamicPETLib import petseries
+        durations = self._frameNumbers(sequenceNode, "DurationS")
+        starts = self._frameNumbers(sequenceNode, "StartFromStudyStartS")
+        first = sequenceNode.GetNthDataNode(0) if sequenceNode.GetNumberOfDataNodes() else None
+        halfLife, decayCorrected = None, True
+        if first is not None:
+            try:
+                halfLife = float(first.GetAttribute(PREFIX + "RadionuclideHalfLifeS"))
+            except (TypeError, ValueError):
+                pass
+            loaderCorrection = first.GetAttribute(PREFIX + "LoaderDecayCorrection") or ""
+            decayCorrected = (first.GetAttribute(PREFIX + "DecayCorrection") or "").upper() != "NONE" or \
+                loaderCorrection.startswith("frames decay corrected")
+        return petseries.summationWeights(durations, starts, halfLife, weighting, decayCorrected)
+
     def resum(self, sequenceNode, source=None):
-        """New summed volume of the frames of the sequence: duration-weighted mean (petseries, as the loader), with
-        the attributes and display of the summed image it replaces."""
+        """New summed volume of the frames of the sequence, as the loader makes it (petseries): weighted by
+        duration or by counts, as the summed image it replaces (or the sequence) is tagged; with the attributes and
+        display of that summed image."""
         from DICOMGatedDynamicPETLib import petseries
         count = sequenceNode.GetNumberOfDataNodes()
         arrays = [self.frameArray(sequenceNode, i) for i in range(count)]
-        durations = []
-        for i in range(count):
-            try:
-                durations.append(float(sequenceNode.GetNthDataNode(i).GetAttribute(PREFIX + "DurationS")))
-            except (TypeError, ValueError):
-                durations.append(None)
+        weighting = self.summationWeighting(sequenceNode, source)
+        weights, weightingText = self.summationWeights(sequenceNode, weighting)
         scene = slicer.mrmlScene
         if source is not None:
             name = self.correctedName(source.GetName())
@@ -427,7 +462,7 @@ class DynamicPETMotionCorrectionLogic(ScriptedLoadableModuleLogic):
             name = self.correctedName(base.replace(" dynamic ", " summed ", 1) if " dynamic " in base
                                       else f"{base} summed")
         summed = scene.AddNewNodeByClass("vtkMRMLScalarVolumeNode", scene.GenerateUniqueName(name))
-        array = petseries.durationWeightedMean(arrays, durations).astype(np.float32)
+        array = petseries.weightedMean(arrays, weights).astype(np.float32)
         slicer.util.updateVolumeFromArray(summed, array)
         first = sequenceNode.GetNthDataNode(0)
         matrix = vtk.vtkMatrix4x4()
@@ -440,9 +475,8 @@ class DynamicPETMotionCorrectionLogic(ScriptedLoadableModuleLogic):
             summed.SetVoxelValueUnits(template.GetVoxelValueUnits())
         except Exception:
             pass
-        weighted = all(d and d > 0 for d in durations)
-        summed.SetAttribute(PREFIX + "StaticFrom", f"{count} motion corrected frames summed, "
-                            + ("duration weighted" if weighted else "frame durations unknown, plain mean"))
+        summed.SetAttribute(PREFIX + "StaticFrom", f"{count} motion corrected frames summed, {weightingText}")
+        summed.SetAttribute(PREFIX + "SumWeighting", weighting)
         summed.SetAttribute(PREFIX + "SummedFrames", str(count))
         summed.SetAttribute(PREFIX + "DynamicSequence", sequenceNode.GetID())
         summed.SetAttribute(MC_PREFIX + "Method", sequenceNode.GetAttribute(MC_PREFIX + "Method") or "")
@@ -1035,7 +1069,8 @@ class DynamicPETMotionCorrectionWidget(ScriptedLoadableModuleWidget, VTKObservat
         self.resumCheck = qt.QCheckBox("Resum the summed image")
         self.resumCheck.checked = True
         self.resumCheck.toolTip = ("On Harden transforms, make a new summed image of the corrected frames "
-                                   "(duration-weighted mean, as the DICOM loader) next to the old one")
+                                   "next to the old one, as the DICOM loader makes it: weighted by duration, or by "
+                                   "counts when the series was loaded with count weighting (its tags say which)")
         form.addRow(self.resumCheck)
         self.infoLabel = qt.QLabel()
         self.infoLabel.wordWrap = True
@@ -1689,6 +1724,7 @@ class DynamicPETMotionCorrectionTest(ScriptedLoadableModuleTest):
             node.SetAttribute(PREFIX + "Frame", str(f + 1))
             node.SetAttribute(PREFIX + "StartFromStudyStartS", str(60.0 * f))
             node.SetAttribute(PREFIX + "DurationS", "60")
+            node.SetAttribute(PREFIX + "RadionuclideHalfLifeS", "1223.4")   # C-11
             sequence.SetDataNodeAtValue(node, str(60.0 * f + 30.0))
             slicer.mrmlScene.RemoveNode(node)
         return sequence
@@ -1753,6 +1789,7 @@ class DynamicPETMotionCorrectionTest(ScriptedLoadableModuleTest):
         from DynamicPETEditor import DynamicPETEditorLogic
         oldSummed = logic.resum(sequence)
         oldSummed.SetName("Synthetic summed")
+        oldSummed.SetAttribute(PREFIX + "SumWeighting", "counts")        # loaded with count weighting
         sequence.SetAttribute(PREFIX + "SummedVolumeID", oldSummed.GetID())
         browser = DynamicPETEditorLogic.browserFor(sequence)
         undo, kept, keptTable, keptSummed = logic.harden(sequence, results, logic.defaultSettings(), "frame 1")
@@ -1761,6 +1798,15 @@ class DynamicPETMotionCorrectionTest(ScriptedLoadableModuleTest):
             self.assertFalse(slicer.mrmlScene.IsNodePresent(node))
         self.assertEqual(kept.GetNumberOfDataNodes(), 5)
         self.assertEqual(keptSummed.GetName(), "Synthetic summed" + CORRECTED_SUFFIX)
+        # the new summed image follows the count weighting of the old one
+        from DICOMGatedDynamicPETLib import petseries
+        weights, _ = petseries.summationWeights([60.0] * 5, [60.0 * f for f in range(5)], 1223.4, "counts")
+        self.assertGreater(weights[0] / weights[-1], 1.1)
+        countMean = petseries.weightedMean([slicer.util.arrayFromVolume(kept.GetNthDataNode(i)) for i in range(5)],
+                                           weights)
+        np.testing.assert_allclose(slicer.util.arrayFromVolume(keptSummed), countMean, rtol=1e-4, atol=1e-3)
+        self.assertEqual(keptSummed.GetAttribute(PREFIX + "SumWeighting"), "counts")
+        self.assertIn("count weighted", keptSummed.GetAttribute(PREFIX + "StaticFrom"))
         np.testing.assert_array_equal(slicer.util.arrayFromVolume(kept.GetNthDataNode(1)), lowBefore)
         sequence = kept
 
