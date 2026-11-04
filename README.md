@@ -208,7 +208,7 @@ Settings in the panel:
 | Resum the summed image | on | *Harden transforms* also makes a new summed image of the corrected frames |
 | Keep only the motion corrected series | on | *Harden transforms* deletes the original series and old summed image |
 | Method | Rigid | Rigid, Affine or BSpline (BRAINSFit `transformType`, Mattes mutual information, no initialization) |
-| Enable two pass | off; second pass Affine | after the first pass, the corrected frames are summed (as the series' summed image: by duration or by counts) and every frame is registered again (Rigid, Affine or BSpline) **to that motion corrected sum**, starting from its first pass transform; a frame the second pass fails on or moves over the limit keeps its first pass result |
+| Enable two pass | off; second pass Rigid | after the first pass, the corrected frames are summed (as the series' summed image: by duration or by counts) and every frame is registered again (Rigid, Affine or BSpline) **to that motion corrected sum**, starting from its first pass transform; a frame the second pass fails on or moves over the limit keeps its first pass result |
 | Do not register low activity frames | on, below 1 % | activity = sum of the voxels of the frame; frames below that % of the highest frame are kept as they are |
 | Limit motion | on, 200 mm | a registration that moves any point of the middle half of the volume (3 x 3 x 3 grid) further than this along R, A or S is rejected and the frame is kept |
 | Advanced | sampling 0.05, B-spline grid 5 | BRAINSFit sampling percentage and control grid |

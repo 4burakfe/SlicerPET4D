@@ -18,7 +18,7 @@ import numpy as np
 METHODS = ("Rigid", "Affine", "BSpline")
 SECOND_PASS_METHODS = ("Rigid", "Affine", "BSpline")
 DEFAULT_METHOD = "Rigid"
-DEFAULT_SECOND_METHOD = "Affine"
+DEFAULT_SECOND_METHOD = "Rigid"
 DEFAULT_LOW_ACTIVITY_PERCENT = 1.0
 DEFAULT_MAX_MOTION_MM = 200.0
 DEFAULT_SAMPLING = 0.05

@@ -80,7 +80,8 @@ class DynamicPETMotionCorrection(ScriptedLoadableModule):
 class DynamicPETMotionCorrectionLogic(ScriptedLoadableModuleLogic):
     """Registration of the frames of a dynamic sequence to a reference. Settings (dict):
         method               "Rigid", "Affine" or "BSpline"
-        twoPass, secondMethod    a second pass ("Affine" or "BSpline") starting from the first
+        twoPass, secondMethod    a second pass ("Rigid", default, "Affine" or "BSpline") to the motion corrected sum of
+                                 the first, starting from it
         skipLowActivity, lowActivityPercent    frames below that % of the highest frame activity are kept
         limitMotion, maxMotionMm    a registration moving more than that along R, A or S is rejected
         samplingPercentage, bsplineGrid    BRAINSFit details
