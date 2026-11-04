@@ -5,6 +5,9 @@ DICOMGatedDynamicPET/ (edited in the Gated / Dynamic PET Settings module, read b
     PreferredUnits/<KIND>   SUV | Bq/ml      loadable selected first (default SUV, Bq/ml for DYNAMIC)
     SummedVolume/<KIND>     true | false     also make the static image of a gated / dynamic series
                                              (default true)
+    SummedWeighting         duration | counts  how the frames of a dynamic series are summed: by their durations
+                                             (time average, default) or by the counts of a static acquisition
+                                             over the same time (simulated static scan)
 """
 
 import qt
@@ -20,6 +23,7 @@ DEFAULTS = {
     f"PreferredUnits/{petseries.DYNAMIC}": ACTIVITY,
     f"SummedVolume/{petseries.GATED}": True,
     f"SummedVolume/{petseries.DYNAMIC}": True,
+    "SummedWeighting": petseries.SUM_DURATION,
 }
 
 
@@ -57,3 +61,9 @@ def summedVolume(kind):
     if isinstance(value, str):
         return value.strip().lower() in ("true", "1", "yes")
     return bool(value)
+
+
+def summedWeighting():
+    """petseries.SUM_DURATION or SUM_COUNTS: how the frames of a dynamic series are summed."""
+    value = str(_value("SummedWeighting")).strip().lower()
+    return value if value in petseries.SUM_WEIGHTINGS else DEFAULTS["SummedWeighting"]

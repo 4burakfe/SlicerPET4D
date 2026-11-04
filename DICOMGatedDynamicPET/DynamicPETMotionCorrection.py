@@ -187,11 +187,20 @@ class DynamicPETMotionCorrectionLogic(ScriptedLoadableModuleLogic):
 
     def registerFrames(self, sequenceNode, referenceVolume, referenceFrame, settings, progress=None):
         """Register every frame of the sequence to referenceVolume. referenceFrame is the index of the frame the
-        reference is (kept as it is), or None (a summed image). progress(index, count, text) returns False to stop.
+        reference is (kept as it is), or None (a summed image). progress(index, total, text) returns False to stop.
+
+        With two passes the first pass registers the frames to referenceVolume; the summed image of the frames it
+        corrected and of the reference frame (weighted as the series' summed image: by duration or by counts) is
+        then the target of the second pass, which starts from the first pass's transform (a frame the first pass
+        could not correct starts from no motion). A frame the second pass fails on or moves over the limit keeps its
+        first pass result. Low activity frames are left out of both.
+
         Returns a result per frame: {"status", "shift", "angles", "message", "image" (vtkImageData of the
         corrected frame, or None when the frame is kept)}."""
         count = sequenceNode.GetNumberOfDataNodes()
         types = mc.transformTypes(settings["method"], settings["twoPass"], settings["secondMethod"])
+        twoPass = len(types) > 1
+        rowsPass = mc.rowsPass(settings["method"], settings["twoPass"], settings["secondMethod"])
         rigidRows = mc.showsMotionRows(settings["method"])
         activities = self.frameActivities(sequenceNode)
         low = mc.lowActivityFrames(activities, settings["lowActivityPercent"]) if settings["skipLowActivity"] \
@@ -201,20 +210,41 @@ class DynamicPETMotionCorrectionLogic(ScriptedLoadableModuleLogic):
         points = mc.limitSamplePoints(bounds)
         center = [(bounds[2 * a] + bounds[2 * a + 1]) / 2.0 for a in range(3)]
         limit = settings["maxMotionMm"] if settings["limitMotion"] else None
+        total = count * len(types)
 
         results = [{"status": mc.NOT_RUN, "shift": None, "angles": None, "message": "", "image": None}
                    for _ in range(count)]
+        weights = None
+        if twoPass:
+            weighting = self.summationWeighting(sequenceNode, self.summedVolumeOf(sequenceNode))
+            weights, _ = self.summationWeights(sequenceNode, weighting)
+        summed = {"total": None, "weight": 0.0}
+
+        def addToSum(index, array):
+            weight = weights[index] if weights else 1.0
+            part = np.asarray(array, dtype=np.float64) * weight
+            summed["total"] = part if summed["total"] is None else summed["total"] + part
+            summed["weight"] += weight
+
         moving = self.helperVolume("MC moving frame")
         resampled = self.helperVolume("MC resampled frame")
+        target = None
+        firstPass = {}          # frame index -> first pass transform, the start of the second pass
+        stopped = False
         try:
+            # --- first pass: to the reference
             for i in range(count):
                 result = results[i]
-                if progress is not None and progress(i, count, f"Frame {i + 1} of {count}") is False:
+                if progress is not None and progress(i, total, f"Frame {i + 1} of {count}"
+                                                     + (" (first pass)" if twoPass else "")) is False:
+                    stopped = True
                     break
                 if i == referenceFrame:
                     result["status"] = mc.REFERENCE
                     if rigidRows:
                         result["shift"], result["angles"] = (0.0, 0.0, 0.0), (0.0, 0.0, 0.0)
+                    if twoPass:
+                        addToSum(i, self.frameArray(sequenceNode, i))
                     continue
                 if low[i]:
                     result["status"] = mc.LOW_ACTIVITY
@@ -222,39 +252,95 @@ class DynamicPETMotionCorrectionLogic(ScriptedLoadableModuleLogic):
                                          f"frame (< {settings['lowActivityPercent']:g} %), not registered")
                     continue
                 self.shareVoxels(moving, sequenceNode.GetNthDataNode(i))
-                transforms = []
+                transform = None
                 try:
-                    for transformType in types:
-                        transforms.append(self.registerPass(referenceVolume, moving, transformType, settings,
-                                                            transforms[-1] if transforms else None))
-                    final = transforms[-1]
-                    moved = self.displacement(final, points)
-                    if rigidRows:
-                        result["shift"], result["angles"] = mc.rigidMotion(self.motionMatrix(transforms[0]), center)
-                    if mc.exceedsLimit(moved, limit):
-                        result["status"] = mc.OVER_LIMIT
-                        result["message"] = (f"moves up to {mc.vectorText(moved)} mm along R, A, S (limit "
-                                             f"{limit:g} mm), kept as it was")
-                        continue
-                    self.resample(moving, final, resampled)
-                    image = vtk.vtkImageData()
-                    image.DeepCopy(resampled.GetImageData())
-                    result["image"] = image
-                    result["status"] = mc.REGISTERED
+                    transform = self.registerPass(referenceVolume, moving, types[0], settings)
+                    if self._correctFrame(result, transform, moving, resampled, points, center, limit, rigidRows) \
+                            and twoPass:
+                        addToSum(i, slicer.util.arrayFromVolume(resampled))
+                        firstPass[i] = transform
+                        transform = None
                 except Exception as error:
                     logging.exception(f"Motion correction of frame {i + 1} failed")
-                    result["status"] = mc.FAILED
-                    result["message"] = str(error)
-                    result["shift"] = result["angles"] = None
+                    result.update(status=mc.FAILED, message=str(error), shift=None, angles=None, image=None)
                 finally:
-                    for node in transforms:
-                        slicer.mrmlScene.RemoveNode(node)
+                    if transform is not None:
+                        slicer.mrmlScene.RemoveNode(transform)
+
+            # --- second pass: to the summed image of the frames the first pass corrected
+            if twoPass and not stopped and summed["total"] is not None and summed["weight"] > 0:
+                target = self.helperVolume("MC first pass sum")
+                slicer.util.updateVolumeFromArray(target, (summed["total"] / summed["weight"]).astype(np.float32))
+                matrix = vtk.vtkMatrix4x4()
+                sequenceNode.GetNthDataNode(0).GetIJKToRASMatrix(matrix)
+                target.SetIJKToRASMatrix(matrix)
+                summed["total"] = None
+                for i in range(count):
+                    result = results[i]
+                    if progress is not None and progress(count + i, total,
+                                                         f"Frame {i + 1} of {count} (second pass)") is False:
+                        break
+                    if result["status"] in (mc.REFERENCE, mc.LOW_ACTIVITY, mc.NOT_RUN):
+                        continue
+                    self.shareVoxels(moving, sequenceNode.GetNthDataNode(i))
+                    self._secondPass(result, target, moving, resampled, types[1], settings, firstPass.get(i),
+                                     points, center, limit, rigidRows and rowsPass == 1)
         finally:
-            slicer.mrmlScene.RemoveNode(moving)
-            slicer.mrmlScene.RemoveNode(resampled)
-        logging.info(f"Dynamic PET motion correction of '{sequenceNode.GetName()}' ({' + '.join(types)}): "
+            for node in [moving, resampled, target] + list(firstPass.values()):
+                if node is not None:
+                    slicer.mrmlScene.RemoveNode(node)
+        logging.info(f"Dynamic PET motion correction of '{sequenceNode.GetName()}' "
+                     f"({mc.methodText(settings['method'], settings['twoPass'], settings['secondMethod'])}): "
                      + mc.summaryText([r["status"] for r in results]))
         return results
+
+    def _correctFrame(self, result, transform, moving, resampled, points, center, limit, rows):
+        """Check the transform against the motion limit and resample the frame through it into result (rows: also
+        the rigid motion). False when the frame is over the limit (kept as it was)."""
+        moved = self.displacement(transform, points)
+        if rows:
+            result["shift"], result["angles"] = mc.rigidMotion(self.motionMatrix(transform), center)
+        if mc.exceedsLimit(moved, limit):
+            result.update(status=mc.OVER_LIMIT, image=None,
+                          message=f"moves up to {mc.vectorText(moved)} mm along R, A, S (limit {limit:g} mm), "
+                                  "kept as it was")
+            return False
+        self.resample(moving, transform, resampled)
+        image = vtk.vtkImageData()
+        image.DeepCopy(resampled.GetImageData())
+        result.update(status=mc.REGISTERED, image=image, message="")
+        return True
+
+    def _secondPass(self, result, target, moving, resampled, transformType, settings, initial, points, center, limit,
+                    rows):
+        """Second pass of one frame to the first pass sum, into result; a first pass result is kept when the second
+        pass fails or goes over the limit."""
+        firstOk = result["status"] == mc.REGISTERED
+        second = {"status": mc.NOT_RUN, "shift": None, "angles": None, "message": "", "image": None}
+        transform = None
+        try:
+            transform = self.registerPass(target, moving, transformType, settings, initial)
+            if self._correctFrame(second, transform, moving, resampled, points, center, limit, rows):
+                if rows:
+                    result["shift"], result["angles"] = second["shift"], second["angles"]
+                elif not firstOk:
+                    result["shift"] = result["angles"] = None    # first pass motion was rejected
+                result.update(status=mc.REGISTERED, image=second["image"], message="")
+            elif firstOk:
+                result["message"] = f"second pass {second['message'].replace(', kept as it was', '')}; first pass kept"
+            else:
+                result.update(status=mc.OVER_LIMIT, image=None, message=second["message"])
+                if rows:
+                    result["shift"], result["angles"] = second["shift"], second["angles"]
+        except Exception as error:
+            logging.exception("Second pass of motion correction failed")
+            if firstOk:
+                result["message"] = f"second pass failed ({error}); first pass kept"
+            else:
+                result.update(status=mc.FAILED, message=str(error), image=None)
+        finally:
+            if transform is not None:
+                slicer.mrmlScene.RemoveNode(transform)
 
     # --- harden / revert --------------------------------------------------------------------------
     @staticmethod
@@ -273,7 +359,7 @@ class DynamicPETMotionCorrectionLogic(ScriptedLoadableModuleLogic):
         volume of the corrected frames, as the loader makes it (duration-weighted mean). summedSource is the summed
         image it replaces (default: the sequence's own). The original sequence and summed image are left as they
         are (removeOriginals() removes them). Returns (undo record for revert(), new sequence, table, new summed)."""
-        method = " + ".join(mc.transformTypes(settings["method"], settings["twoPass"], settings["secondMethod"]))
+        method = mc.methodText(settings["method"], settings["twoPass"], settings["secondMethod"])
         scene = slicer.mrmlScene
         name = scene.GenerateUniqueName(self.correctedName(sequenceNode.GetName()))
         corrected = scene.AddNewNodeByClass("vtkMRMLSequenceNode", name)
@@ -405,18 +491,53 @@ class DynamicPETMotionCorrectionLogic(ScriptedLoadableModuleLogic):
         logging.info("Dynamic PET motion correction: removed the originals " + ", ".join(f"'{n}'" for n in removed))
         return removed
 
+    @staticmethod
+    def summationWeighting(sequenceNode, source=None):
+        """How the summed image of the sequence is made, from the tags the loader wrote (DynamicPET.SumWeighting
+        of the summed image, else of the sequence): petseries.SUM_DURATION (default) or SUM_COUNTS."""
+        from DICOMGatedDynamicPETLib import petseries
+        for node in (source, sequenceNode):
+            value = node.GetAttribute(PREFIX + "SumWeighting") if node is not None else None
+            if value in petseries.SUM_WEIGHTINGS:
+                return value
+        return petseries.SUM_DURATION
+
+    @staticmethod
+    def _frameNumbers(sequenceNode, key):
+        values = []
+        for i in range(sequenceNode.GetNumberOfDataNodes()):
+            try:
+                values.append(float(sequenceNode.GetNthDataNode(i).GetAttribute(PREFIX + key)))
+            except (TypeError, ValueError):
+                values.append(None)
+        return values
+
+    def summationWeights(self, sequenceNode, weighting):
+        """(weights, description) of the frames of the sequence, as the loader sums them (petseries)."""
+        from DICOMGatedDynamicPETLib import petseries
+        durations = self._frameNumbers(sequenceNode, "DurationS")
+        starts = self._frameNumbers(sequenceNode, "StartFromStudyStartS")
+        first = sequenceNode.GetNthDataNode(0) if sequenceNode.GetNumberOfDataNodes() else None
+        halfLife, decayCorrected = None, True
+        if first is not None:
+            try:
+                halfLife = float(first.GetAttribute(PREFIX + "RadionuclideHalfLifeS"))
+            except (TypeError, ValueError):
+                pass
+            loaderCorrection = first.GetAttribute(PREFIX + "LoaderDecayCorrection") or ""
+            decayCorrected = (first.GetAttribute(PREFIX + "DecayCorrection") or "").upper() != "NONE" or \
+                loaderCorrection.startswith("frames decay corrected")
+        return petseries.summationWeights(durations, starts, halfLife, weighting, decayCorrected)
+
     def resum(self, sequenceNode, source=None):
-        """New summed volume of the frames of the sequence: duration-weighted mean (petseries, as the loader), with
-        the attributes and display of the summed image it replaces."""
+        """New summed volume of the frames of the sequence, as the loader makes it (petseries): weighted by
+        duration or by counts, as the summed image it replaces (or the sequence) is tagged; with the attributes and
+        display of that summed image."""
         from DICOMGatedDynamicPETLib import petseries
         count = sequenceNode.GetNumberOfDataNodes()
         arrays = [self.frameArray(sequenceNode, i) for i in range(count)]
-        durations = []
-        for i in range(count):
-            try:
-                durations.append(float(sequenceNode.GetNthDataNode(i).GetAttribute(PREFIX + "DurationS")))
-            except (TypeError, ValueError):
-                durations.append(None)
+        weighting = self.summationWeighting(sequenceNode, source)
+        weights, weightingText = self.summationWeights(sequenceNode, weighting)
         scene = slicer.mrmlScene
         if source is not None:
             name = self.correctedName(source.GetName())
@@ -427,7 +548,7 @@ class DynamicPETMotionCorrectionLogic(ScriptedLoadableModuleLogic):
             name = self.correctedName(base.replace(" dynamic ", " summed ", 1) if " dynamic " in base
                                       else f"{base} summed")
         summed = scene.AddNewNodeByClass("vtkMRMLScalarVolumeNode", scene.GenerateUniqueName(name))
-        array = petseries.durationWeightedMean(arrays, durations).astype(np.float32)
+        array = petseries.weightedMean(arrays, weights).astype(np.float32)
         slicer.util.updateVolumeFromArray(summed, array)
         first = sequenceNode.GetNthDataNode(0)
         matrix = vtk.vtkMatrix4x4()
@@ -440,9 +561,8 @@ class DynamicPETMotionCorrectionLogic(ScriptedLoadableModuleLogic):
             summed.SetVoxelValueUnits(template.GetVoxelValueUnits())
         except Exception:
             pass
-        weighted = all(d and d > 0 for d in durations)
-        summed.SetAttribute(PREFIX + "StaticFrom", f"{count} motion corrected frames summed, "
-                            + ("duration weighted" if weighted else "frame durations unknown, plain mean"))
+        summed.SetAttribute(PREFIX + "StaticFrom", f"{count} motion corrected frames summed, {weightingText}")
+        summed.SetAttribute(PREFIX + "SumWeighting", weighting)
         summed.SetAttribute(PREFIX + "SummedFrames", str(count))
         summed.SetAttribute(PREFIX + "DynamicSequence", sequenceNode.GetID())
         summed.SetAttribute(MC_PREFIX + "Method", sequenceNode.GetAttribute(MC_PREFIX + "Method") or "")
@@ -1035,7 +1155,8 @@ class DynamicPETMotionCorrectionWidget(ScriptedLoadableModuleWidget, VTKObservat
         self.resumCheck = qt.QCheckBox("Resum the summed image")
         self.resumCheck.checked = True
         self.resumCheck.toolTip = ("On Harden transforms, make a new summed image of the corrected frames "
-                                   "(duration-weighted mean, as the DICOM loader) next to the old one")
+                                   "next to the old one, as the DICOM loader makes it: weighted by duration, or by "
+                                   "counts when the series was loaded with count weighting (its tags say which)")
         form.addRow(self.resumCheck)
         self.infoLabel = qt.QLabel()
         self.infoLabel.wordWrap = True
@@ -1124,12 +1245,17 @@ class DynamicPETMotionCorrectionWidget(ScriptedLoadableModuleWidget, VTKObservat
         reg.addRow("Method:", self.methodCombo)
         self.twoPassCheck = qt.QCheckBox("Enable two pass")
         self.twoPassCheck.checked = False
-        self.twoPassCheck.toolTip = "Run a second registration that starts from the first one"
+        self.twoPassCheck.toolTip = ("After the first pass, sum the corrected frames (weighted as the series' summed "
+                                     "image) and register every frame again to that motion corrected sum, starting "
+                                     "from the first pass. The sum is a cleaner target than one frame.")
         self.secondMethodCombo = qt.QComboBox()
         for name in mc.SECOND_PASS_METHODS:
             self.secondMethodCombo.addItem(name)
         self.secondMethodCombo.setCurrentIndex(self.secondMethodCombo.findText(mc.DEFAULT_SECOND_METHOD))
         self.secondMethodCombo.enabled = False
+        self.secondMethodCombo.toolTip = ("Method of the second pass, to the motion corrected sum. Rigid: the "
+                                          "timeline rows show its (final) motion; Affine / BSpline also correct "
+                                          "scaling / local deformation.")
         row = qt.QHBoxLayout()
         row.addWidget(self.twoPassCheck)
         row.addWidget(qt.QLabel("second pass:"))
@@ -1234,6 +1360,7 @@ class DynamicPETMotionCorrectionWidget(ScriptedLoadableModuleWidget, VTKObservat
         self.closeButton.connect("clicked()", self.onClose)
         self.methodCombo.connect("currentIndexChanged(int)", self.onMethodChanged)
         self.twoPassCheck.connect("toggled(bool)", self.onMethodChanged)
+        self.secondMethodCombo.connect("currentIndexChanged(int)", self.onMethodChanged)
         self.lowActivityCheck.connect("toggled(bool)", self._updateInfo)
         self.lowActivitySpin.connect("valueChanged(double)", self._updateInfo)
         self.limitCheck.connect("toggled(bool)", lambda on: setattr(self.limitSpin, "enabled", on))
@@ -1262,7 +1389,8 @@ class DynamicPETMotionCorrectionWidget(ScriptedLoadableModuleWidget, VTKObservat
         self.secondMethodCombo.enabled = self.twoPassCheck.checked and method != "BSpline"
         if mc.showsMotionRows(method):
             self.rowsNote.text = ("The timeline shows each frame's shift (mm) and angles (deg)"
-                                  + (" of the rigid first pass." if self.twoPassCheck.checked else "."))
+                                  + ("." if not self.twoPassCheck.checked or self.secondMethodCombo.currentText ==
+                                     "Rigid" else " of the rigid first pass."))
         else:
             self.rowsNote.text = ("Shift / angle rows on the timeline are shown for rigid only: an affine or "
                                   "B-spline transform has no single shift and angle per frame.")
@@ -1497,6 +1625,7 @@ class DynamicPETMotionCorrectionWidget(ScriptedLoadableModuleWidget, VTKObservat
                                                   labelText="Registering frames...", maximum=count)
 
         def progress(index, total, text):
+            dialog.maximum = total
             dialog.setValue(index)
             dialog.setLabelText(f"Registering: {text}")
             slicer.app.processEvents()
@@ -1515,7 +1644,7 @@ class DynamicPETMotionCorrectionWidget(ScriptedLoadableModuleWidget, VTKObservat
         self.results, self.resultsSettings, self.undo, self.hardened = results, settings, None, False
         self.session.setResults(results, mc.showsMotionRows(settings["method"]))
         self._updateButtons()
-        method = " + ".join(mc.transformTypes(settings["method"], settings["twoPass"], settings["secondMethod"]))
+        method = mc.methodText(settings["method"], settings["twoPass"], settings["secondMethod"])
         self.resultLabel.text = (f"{method} to {self.session.referenceText}: "
                                  f"{mc.summaryText([r['status'] for r in results])}.")
         if any(r["status"] == mc.NOT_RUN for r in results):
@@ -1566,7 +1695,7 @@ class DynamicPETMotionCorrectionWidget(ScriptedLoadableModuleWidget, VTKObservat
         if self.session is not None:
             self.session.setResults(results, mc.showsMotionRows(settings["method"]), hardened=True)
         self._updateButtons()
-        method = " + ".join(mc.transformTypes(settings["method"], settings["twoPass"], settings["secondMethod"]))
+        method = mc.methodText(settings["method"], settings["twoPass"], settings["secondMethod"])
         self.resultLabel.text = (f"{method} to {referenceText}: {mc.summaryText([r['status'] for r in results])}."
                                  f"\nHardened into '{corrected.GetName()}' (table '{table.GetName()}'"
                                  + (f", new summed image '{summed.GetName()}'" if summed is not None else "") + ")."
@@ -1689,6 +1818,7 @@ class DynamicPETMotionCorrectionTest(ScriptedLoadableModuleTest):
             node.SetAttribute(PREFIX + "Frame", str(f + 1))
             node.SetAttribute(PREFIX + "StartFromStudyStartS", str(60.0 * f))
             node.SetAttribute(PREFIX + "DurationS", "60")
+            node.SetAttribute(PREFIX + "RadionuclideHalfLifeS", "1223.4")   # C-11
             sequence.SetDataNodeAtValue(node, str(60.0 * f + 30.0))
             slicer.mrmlScene.RemoveNode(node)
         return sequence
@@ -1719,6 +1849,19 @@ class DynamicPETMotionCorrectionTest(ScriptedLoadableModuleTest):
         limited = logic.registerFrames(sequence, reference, 0, settings)
         self.assertEqual(limited[3]["status"], mc.OVER_LIMIT)
         self.assertIsNone(limited[3]["image"])
+
+        # two passes: the second to the summed image of the first pass, rigid again, gives the same motion
+        twoPass = dict(logic.defaultSettings(), twoPass=True, secondMethod="Rigid")
+        steps = []
+        second = logic.registerFrames(sequence, reference, 0, twoPass, lambda i, n, text: steps.append((i, n)))
+        self.assertEqual([r["status"] for r in second], statuses)
+        self.assertEqual(steps[-1], (9, 10))                               # 5 frames, 2 passes
+        self.assertAlmostEqual(second[3]["shift"][0], self.SHIFT_VOXELS * self.SPACING, delta=1.5)
+        image = second[3]["image"]
+        moved = numpy_support.vtk_to_numpy(image.GetPointData().GetScalars()).reshape(image.GetDimensions()[::-1])
+        self.assertLess(np.abs(moved - corrected).mean(), 0.5 * before)
+        self.assertEqual([n for n in slicer.util.getNodesByClass("vtkMRMLScalarVolumeNode")
+                          if n.GetName() == "MC first pass sum"], [])
 
         # harden makes a motion corrected series with every frame (the low activity one unchanged), the originals
         # stay; revert removes the new series
@@ -1753,6 +1896,7 @@ class DynamicPETMotionCorrectionTest(ScriptedLoadableModuleTest):
         from DynamicPETEditor import DynamicPETEditorLogic
         oldSummed = logic.resum(sequence)
         oldSummed.SetName("Synthetic summed")
+        oldSummed.SetAttribute(PREFIX + "SumWeighting", "counts")        # loaded with count weighting
         sequence.SetAttribute(PREFIX + "SummedVolumeID", oldSummed.GetID())
         browser = DynamicPETEditorLogic.browserFor(sequence)
         undo, kept, keptTable, keptSummed = logic.harden(sequence, results, logic.defaultSettings(), "frame 1")
@@ -1761,6 +1905,15 @@ class DynamicPETMotionCorrectionTest(ScriptedLoadableModuleTest):
             self.assertFalse(slicer.mrmlScene.IsNodePresent(node))
         self.assertEqual(kept.GetNumberOfDataNodes(), 5)
         self.assertEqual(keptSummed.GetName(), "Synthetic summed" + CORRECTED_SUFFIX)
+        # the new summed image follows the count weighting of the old one
+        from DICOMGatedDynamicPETLib import petseries
+        weights, _ = petseries.summationWeights([60.0] * 5, [60.0 * f for f in range(5)], 1223.4, "counts")
+        self.assertGreater(weights[0] / weights[-1], 1.1)
+        countMean = petseries.weightedMean([slicer.util.arrayFromVolume(kept.GetNthDataNode(i)) for i in range(5)],
+                                           weights)
+        np.testing.assert_allclose(slicer.util.arrayFromVolume(keptSummed), countMean, rtol=1e-4, atol=1e-3)
+        self.assertEqual(keptSummed.GetAttribute(PREFIX + "SumWeighting"), "counts")
+        self.assertIn("count weighted", keptSummed.GetAttribute(PREFIX + "StaticFrom"))
         np.testing.assert_array_equal(slicer.util.arrayFromVolume(kept.GetNthDataNode(1)), lowBefore)
         sequence = kept
 

@@ -16,7 +16,7 @@ import math
 import numpy as np
 
 METHODS = ("Rigid", "Affine", "BSpline")
-SECOND_PASS_METHODS = ("Affine", "BSpline")
+SECOND_PASS_METHODS = ("Rigid", "Affine", "BSpline")
 DEFAULT_METHOD = "Rigid"
 DEFAULT_SECOND_METHOD = "Affine"
 DEFAULT_LOW_ACTIVITY_PERCENT = 1.0
@@ -56,8 +56,9 @@ def showsMotionRows(method):
 
 
 def transformTypes(method, twoPass=False, secondMethod=DEFAULT_SECOND_METHOD):
-    """BRAINSFit transform type of each pass: ["Rigid"] or ["Rigid", "Affine"]. A B-spline first pass has no
-    second pass."""
+    """BRAINSFit transform type of each pass: ["Rigid"] or ["Rigid", "Affine"]. The first pass registers the
+    frames to the reference, the second to the summed image of the frames corrected by the first. A B-spline
+    first pass has no second pass."""
     if method not in METHODS:
         raise ValueError(f"Unknown registration method {method!r}")
     if not twoPass or method == "BSpline":
@@ -65,6 +66,19 @@ def transformTypes(method, twoPass=False, secondMethod=DEFAULT_SECOND_METHOD):
     if secondMethod not in SECOND_PASS_METHODS:
         raise ValueError(f"Unknown second pass method {secondMethod!r}")
     return [method, secondMethod]
+
+
+def methodText(method, twoPass=False, secondMethod=DEFAULT_SECOND_METHOD):
+    """'Rigid' or 'Rigid, then Affine to the motion corrected sum'."""
+    types = transformTypes(method, twoPass, secondMethod)
+    return types[0] if len(types) == 1 else f"{types[0]}, then {types[1]} to the motion corrected sum"
+
+
+def rowsPass(method, twoPass=False, secondMethod=DEFAULT_SECOND_METHOD):
+    """Index of the pass whose rigid motion the shift / angle rows show: the second when both are rigid (it is the
+    final motion), else the first."""
+    types = transformTypes(method, twoPass, secondMethod)
+    return 1 if types == ["Rigid", "Rigid"] else 0
 
 
 # ---------------------------------------------------------------------------

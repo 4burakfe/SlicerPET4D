@@ -4,6 +4,7 @@ import sys
 import tempfile
 
 import numpy as np
+import pytest
 import pydicom
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "DICOMGatedDynamicPET"))
@@ -331,3 +332,29 @@ def test_suv_methods_per_frame():
     _, frameScales, _, _ = ps.suvScales(suv, "bsa")
     factor = ps.bodySurfaceAreaM2(70, 170) * 1e4 / 70000
     np.testing.assert_allclose(frameScales, np.array(suv["frameSuvScales"]) * factor)
+
+
+def test_summation_weights():
+    durations = [60.0, 600.0, 1200.0]
+    weights, text = ps.summationWeights(durations)
+    assert weights == durations and text == "duration weighted"
+    assert ps.summationWeights([60.0, None])[0] is None
+    # counts: one static acquisition decay corrected to its start equals the count weighted mean of the decay
+    # corrected frames (C-11, 0 - 31 min, a changing distribution)
+    halfLife, starts = 1223.4, [0.0, 60.0, 660.0]
+    rate = np.log(2.0) / halfLife
+    activity = [5.0, 2.0, 1.0]                     # decay corrected concentration in each frame (constant inside)
+    counts = [a * np.exp(-rate * s) * -np.expm1(-rate * d) / rate for a, s, d in zip(activity, starts, durations)]
+    total = 1860.0
+    static = sum(counts) * rate / -np.expm1(-rate * total)        # static frame, decay corrected to its start
+    weights, text = ps.summationWeights(durations, starts, halfLife, ps.SUM_COUNTS)
+    assert "count weighted" in text
+    assert float(ps.weightedMean([np.array(a) for a in activity], weights)) == pytest.approx(static, rel=1e-12)
+    assert float(ps.weightedMean([np.array(a) for a in activity], durations)) != pytest.approx(static, rel=1e-3)
+    # starts relative to any reference give the same mean
+    shifted, _ = ps.summationWeights(durations, [s + 300.0 for s in starts], halfLife, ps.SUM_COUNTS)
+    np.testing.assert_allclose(np.array(shifted) / sum(shifted), np.array(weights) / sum(weights))
+    # frames not decay corrected already hold counts per second: durations; missing inputs: durations
+    assert ps.summationWeights(durations, starts, halfLife, ps.SUM_COUNTS, decayCorrected=False)[0] == durations
+    weights, text = ps.summationWeights(durations, None, halfLife, ps.SUM_COUNTS)
+    assert weights == durations and "needs" in text

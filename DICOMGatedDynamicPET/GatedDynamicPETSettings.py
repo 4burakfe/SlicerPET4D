@@ -9,6 +9,8 @@ Defaults of the DICOM Gated / Dynamic PET plugin, kept in the Slicer application
                         first (default SUV, Bq/ml for dynamic)
     summed volumes      also make the static image of gated (mean of the gates) and dynamic (frames summed)
                         series (default on)
+    count weighting     sum the dynamic frames as a static acquisition over the same time would count them
+                        (early frames weigh more) instead of by their durations (default off)
 Changes apply to series examined in the DICOM browser after the change.
 """
 
@@ -36,9 +38,10 @@ class GatedDynamicPETSettings(ScriptedLoadableModule):
         parent.dependencies = []
         parent.contributors = ["Burak Demir"]
         parent.helpText = ("Defaults of the DICOM Gated / Dynamic PET loader: the SUV normalisation, which units "
-                           "the DICOM browser selects first for static, gated and dynamic PET, and whether gated and "
-                           "dynamic series also get a summed (static) volume. Changes apply to series examined in "
-                           "the DICOM browser after the change.")
+                           "the DICOM browser selects first for static, gated and dynamic PET, whether gated and "
+                           "dynamic series also get a summed (static) volume, and how the dynamic frames are summed "
+                           "(by duration or by counts). Changes apply to series examined in the DICOM browser after "
+                           "the change.")
         parent.acknowledgementText = ("Lean body mass: Janmahasatian et al., Clin Pharmacokinet 2005 (as in PERCIST). "
                                       "Body surface area: Du Bois and Du Bois, 1916.")
 
@@ -87,10 +90,19 @@ class GatedDynamicPETSettingsWidget(ScriptedLoadableModuleWidget):
             check.toolTip = texts[kind][1]
             summedForm.addRow(check)
             self.summedChecks[kind] = check
+        self.countWeightCheck = qt.QCheckBox("Dynamic PET: weight the frames by counts (simulate a static scan)")
+        self.countWeightCheck.toolTip = (
+            "Off: the frames are summed by their durations, the time average of the decay corrected concentration. "
+            "On: each frame is weighted by the counts a static acquisition over the same time would get from it "
+            "(its duration and the decay since the first frame), so the summed image is what one static scan of "
+            "the whole acquisition would show; early frames weigh more (for C-11 over 90 min the last minute "
+            "weighs about 5 % of the first). Motion Correction resums with the weighting of the series.")
+        summedForm.addRow(self.countWeightCheck)
         self.layout.addWidget(summedBox)
 
         self.resetButton = qt.QPushButton("Restore defaults")
-        self.resetButton.toolTip = "SUVbw; SUV first for static and gated, Bq/ml first for dynamic; summed volumes on."
+        self.resetButton.toolTip = ("SUVbw; SUV first for static and gated, Bq/ml first for dynamic; summed volumes "
+                                    "on, weighted by duration.")
         self.layout.addWidget(self.resetButton)
         note = qt.QLabel("Changes are saved at once and apply to series examined in the DICOM browser afterwards.")
         note.wordWrap = True
@@ -102,6 +114,7 @@ class GatedDynamicPETSettingsWidget(ScriptedLoadableModuleWidget):
             combo.connect("currentIndexChanged(int)", self.onChanged)
         for check in self.summedChecks.values():
             check.connect("toggled(bool)", self.onChanged)
+        self.countWeightCheck.connect("toggled(bool)", self.onChanged)
         self.resetButton.connect("clicked()", self.onReset)
         self.updateFromSettings()
 
@@ -113,6 +126,7 @@ class GatedDynamicPETSettingsWidget(ScriptedLoadableModuleWidget):
                 combo.setCurrentIndex(max(0, combo.findData(petsettings.preferredUnits(kind))))
             for kind, check in self.summedChecks.items():
                 check.checked = petsettings.summedVolume(kind)
+            self.countWeightCheck.checked = petsettings.summedWeighting() == petseries.SUM_COUNTS
         finally:
             self._updating = False
 
@@ -124,6 +138,8 @@ class GatedDynamicPETSettingsWidget(ScriptedLoadableModuleWidget):
             petsettings.setValue(f"PreferredUnits/{kind}", combo.currentData)
         for kind, check in self.summedChecks.items():
             petsettings.setValue(f"SummedVolume/{kind}", bool(check.checked))
+        petsettings.setValue("SummedWeighting", petseries.SUM_COUNTS if self.countWeightCheck.checked
+                             else petseries.SUM_DURATION)
 
     def onReset(self):
         petsettings.resetDefaults()
@@ -142,6 +158,9 @@ class GatedDynamicPETSettingsTest(ScriptedLoadableModuleTest):
             self.assertEqual(petsettings.preferredUnits(petseries.DYNAMIC), petsettings.ACTIVITY)
             self.assertEqual(petsettings.preferredUnits(petseries.GATED), petsettings.SUV)
             self.assertTrue(petsettings.summedVolume(petseries.GATED))
+            self.assertEqual(petsettings.summedWeighting(), petseries.SUM_DURATION)
+            petsettings.setValue("SummedWeighting", petseries.SUM_COUNTS)
+            self.assertEqual(petsettings.summedWeighting(), petseries.SUM_COUNTS)
             petsettings.setValue("SUVMethod", "lbm")
             petsettings.setValue(f"SummedVolume/{petseries.DYNAMIC}", False)
             self.assertEqual(petsettings.suvMethod(), "lbm")
