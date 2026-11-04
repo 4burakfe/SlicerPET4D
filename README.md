@@ -208,14 +208,15 @@ Settings in the panel:
 | Resum the summed image | on | *Harden transforms* also makes a new summed image of the corrected frames |
 | Keep only the motion corrected series | on | *Harden transforms* deletes the original series and old summed image |
 | Method | Rigid | Rigid, Affine or BSpline (BRAINSFit `transformType`, Mattes mutual information, no initialization) |
-| Enable two pass | off; second pass Affine | a second BRAINSFit run (Affine or BSpline) starting from the first |
+| Enable two pass | off; second pass Affine | after the first pass, the corrected frames are summed (as the series' summed image: by duration or by counts) and every frame is registered again (Rigid, Affine or BSpline) **to that motion corrected sum**, starting from its first pass transform; a frame the second pass fails on or moves over the limit keeps its first pass result |
 | Do not register low activity frames | on, below 1 % | activity = sum of the voxels of the frame; frames below that % of the highest frame are kept as they are |
 | Limit motion | on, 200 mm | a registration that moves any point of the middle half of the volume (3 x 3 x 3 grid) further than this along R, A or S is rejected and the frame is kept |
 | Advanced | sampling 0.05, B-spline grid 5 | BRAINSFit sampling percentage and control grid |
 
 **Why the shift / angle rows are rigid only:** a rigid transform is exactly three shifts and three angles. An
 affine transform adds scaling and shear, so splitting it into "a rotation and a shift" is not unique, and a
-B-spline has a different displacement at every point. With two passes the rows show the rigid first pass. The
+B-spline has a different displacement at every point. With two passes the rows show the rigid first pass, or the
+final motion when the second pass is rigid too. The
 shift is the displacement of the centre of the reference volume (not the matrix translation, which depends on where
 the RAS origin is), and the values are the *motion* of the frame relative to the reference (the inverse of the
 correction).
@@ -227,7 +228,7 @@ Under *Register frames*:
   over the limit, failed) as they were, so the new series has the same frames and times as the original. It gets its
   own browser and current frame volume, a table *"&lt;series&gt; motion"* with the status, shift and angles of every
   frame and, with *Resum the summed image*, a new summed image *"&lt;summed&gt; motion corrected"* of the corrected
-  frames, as the DICOM loader makes it (weighted by duration, or by counts when the series' `DynamicPET.SumWeighting`
+  frames (recomputed from the final frames, so after two passes from the second), as the DICOM loader makes it (weighted by duration, or by counts when the series' `DynamicPET.SumWeighting`
   tag says so), with the attributes and display of the old summed image. The new series points to it (`DynamicPET.SummedVolumeID`). Every frame carries
   `DynamicPET.MotionCorrection.Status` (and `ShiftRASMm` / `AnglesRASDeg` for rigid). The module then shows the new
   series. Save the scene to keep it.
