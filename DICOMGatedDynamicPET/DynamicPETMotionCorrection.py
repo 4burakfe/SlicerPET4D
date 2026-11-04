@@ -47,6 +47,7 @@ EMPTY_VIEW_PREFIX = "DynMCEmpty"
 VIEW_GROUP = 79
 PREFIX = "DynamicPET."
 MC_PREFIX = "DynamicPET.MotionCorrection."
+CORRECTED_SUFFIX = " motion corrected"
 HELPER_ATTRIBUTE = "DynamicPETMotionCorrection.Helper"
 DEFAULT_ORIENTATION = "Coronal"
 FRAME_COLORMAP = "PET-Rainbow2"
@@ -261,45 +262,148 @@ class DynamicPETMotionCorrectionLogic(ScriptedLoadableModuleLogic):
         nodeID = sequenceNode.GetAttribute(PREFIX + "SummedVolumeID")
         return slicer.mrmlScene.GetNodeByID(nodeID) if nodeID else None
 
-    def harden(self, sequenceNode, results, settings, referenceText, resum=True, summedSource=None):
-        """Write the corrected frames into the sequence (over the original voxels), with the motion on every frame
-        and a table of the per-frame motion; with resum, a new summed volume of the corrected frames, as the loader
-        makes it (duration-weighted mean). summedSource is the summed image it replaces (default: the sequence's
-        own). Returns the undo record for revert(); it keeps the original voxels in memory."""
-        method = " + ".join(mc.transformTypes(settings["method"], settings["twoPass"], settings["secondMethod"]))
-        frameKeys = [MC_PREFIX + key for key in ("Status", "ShiftRASMm", "AnglesRASDeg")]
-        sequenceKeys = [MC_PREFIX + key for key in ("Method", "Reference", "TableID")] + [PREFIX + "SummedVolumeID"]
-        undo = {"sequence": sequenceNode, "images": {}, "frameAttributes": {}, "created": [],
-                "sequenceAttributes": {key: sequenceNode.GetAttribute(key) for key in sequenceKeys}}
-        for i, result in enumerate(results):
-            node = sequenceNode.GetNthDataNode(i)
-            undo["frameAttributes"][i] = {key: node.GetAttribute(key) for key in frameKeys}
-            if result["image"] is not None:
-                undo["images"][i] = node.GetImageData()
-                node.SetAndObserveImageData(result["image"])
-            node.SetAttribute(MC_PREFIX + "Status", result["status"])
-            if result["shift"] is not None:
-                node.SetAttribute(MC_PREFIX + "ShiftRASMm", mc.vectorText(result["shift"]))
-                node.SetAttribute(MC_PREFIX + "AnglesRASDeg", mc.vectorText(result["angles"]))
-        sequenceNode.SetAttribute(MC_PREFIX + "Method", method)
-        sequenceNode.SetAttribute(MC_PREFIX + "Reference", referenceText)
-        table = self.motionTable(f"{sequenceNode.GetName()} motion", results)
-        table.SetAttribute(MC_PREFIX + "SequenceNodeID", sequenceNode.GetID())
-        sequenceNode.SetAttribute(MC_PREFIX + "TableID", table.GetID())
-        undo["created"].append(table)
+    @staticmethod
+    def correctedName(name):
+        return name if name.endswith(CORRECTED_SUFFIX) else name + CORRECTED_SUFFIX
 
-        summedNode = None
-        if resum:
-            source = summedSource or self.summedVolumeOf(sequenceNode)
-            summedNode = self.resum(sequenceNode, source)
-            sequenceNode.SetAttribute(PREFIX + "SummedVolumeID", summedNode.GetID())
-            undo["created"].append(summedNode)
-        sequenceNode.Modified()
-        self.refreshProxies(sequenceNode)
-        self._placeNextTo(sequenceNode, undo["created"])
-        logging.info(f"Dynamic PET motion correction hardened into '{sequenceNode.GetName()}' ({method}, "
-                     f"{len(undo['images'])} frames changed)")
-        return undo, table, summedNode
+    def harden(self, sequenceNode, results, settings, referenceText, resum=True, summedSource=None):
+        """A new sequence '<name> motion corrected' with every frame of the series: the corrected image of each
+        registered frame and an unchanged copy of the others (reference, low activity, over the limit, failed, not
+        run), with the motion on every frame; its browser; a table of the per-frame motion; with resum, a new summed
+        volume of the corrected frames, as the loader makes it (duration-weighted mean). summedSource is the summed
+        image it replaces (default: the sequence's own). The original sequence and summed image are left as they
+        are (removeOriginals() removes them). Returns (undo record for revert(), new sequence, table, new summed)."""
+        method = " + ".join(mc.transformTypes(settings["method"], settings["twoPass"], settings["secondMethod"]))
+        scene = slicer.mrmlScene
+        name = scene.GenerateUniqueName(self.correctedName(sequenceNode.GetName()))
+        corrected = scene.AddNewNodeByClass("vtkMRMLSequenceNode", name)
+        corrected.SetIndexName(sequenceNode.GetIndexName())
+        corrected.SetIndexUnit(sequenceNode.GetIndexUnit())
+        corrected.SetIndexType(sequenceNode.GetIndexType())
+        for key in sequenceNode.GetAttributeNames() or ():
+            if not key.startswith(MC_PREFIX) and key != PREFIX + "SummedVolumeID":
+                corrected.SetAttribute(key, sequenceNode.GetAttribute(key))
+        for i in range(sequenceNode.GetNumberOfDataNodes()):
+            source = sequenceNode.GetNthDataNode(i)
+            result = results[i] if i < len(results) else {"status": mc.NOT_RUN, "image": None, "shift": None}
+            frame = self._frameCopy(source, result["image"])
+            frame.SetAttribute(MC_PREFIX + "Status", result["status"])
+            if result.get("shift") is not None:
+                frame.SetAttribute(MC_PREFIX + "ShiftRASMm", mc.vectorText(result["shift"]))
+                frame.SetAttribute(MC_PREFIX + "AnglesRASDeg", mc.vectorText(result["angles"]))
+            corrected.SetDataNodeAtValue(frame, sequenceNode.GetNthIndexValue(i))
+        corrected.SetAttribute(MC_PREFIX + "Method", method)
+        corrected.SetAttribute(MC_PREFIX + "Reference", referenceText)
+        corrected.SetAttribute(MC_PREFIX + "OriginalSequence", sequenceNode.GetName())
+        browser, proxy = self._browserOf(corrected, sequenceNode)
+        table = self.motionTable(f"{name} motion", results)
+        table.SetAttribute(MC_PREFIX + "SequenceNodeID", corrected.GetID())
+        corrected.SetAttribute(MC_PREFIX + "TableID", table.GetID())
+
+        source = summedSource or self.summedVolumeOf(sequenceNode)
+        summedNode = self.resum(corrected, source) if resum else None
+        if summedNode is not None:
+            corrected.SetAttribute(PREFIX + "SummedVolumeID", summedNode.GetID())
+        elif source is not None:
+            corrected.SetAttribute(PREFIX + "SummedVolumeID", source.GetID())
+        created = [n for n in (browser, proxy, corrected, table, summedNode) if n is not None]
+        self._placeNextTo(sequenceNode, created)
+        undo = {"original": sequenceNode, "originalSummed": source, "created": created}
+        changed = sum(1 for r in results if r["image"] is not None)
+        logging.info(f"Dynamic PET motion correction: '{name}' made from '{sequenceNode.GetName()}' ({method}, "
+                     f"{changed} of {corrected.GetNumberOfDataNodes()} frames corrected)")
+        return undo, corrected, table, summedNode
+
+    @staticmethod
+    def _frameCopy(source, image=None):
+        """A frame node (not in the scene) with the name, attributes and geometry of source and the given image
+        (default: a copy of the image of source)."""
+        node = getattr(slicer, source.GetClassName())()
+        node.SetName(source.GetName())
+        for key in source.GetAttributeNames() or ():
+            node.SetAttribute(key, source.GetAttribute(key))
+        matrix = vtk.vtkMatrix4x4()
+        source.GetIJKToRASMatrix(matrix)
+        node.SetIJKToRASMatrix(matrix)
+        try:
+            node.SetVoxelValueUnits(source.GetVoxelValueUnits())
+        except Exception:
+            pass
+        if image is None:
+            image = vtk.vtkImageData()
+            image.DeepCopy(source.GetImageData())
+        node.SetAndObserveImageData(image)
+        return node
+
+    def _browserOf(self, sequenceNode, like=None):
+        """Browser and current frame volume of a new sequence, played and shown as the browser of like."""
+        scene, logic = slicer.mrmlScene, slicer.modules.sequences.logic()
+        name = sequenceNode.GetName()
+        browser = scene.AddNewNodeByClass("vtkMRMLSequenceBrowserNode", scene.GenerateUniqueName(f"{name} browser"))
+        logic.AddSynchronizedNode(sequenceNode, None, browser)
+        if hasattr(browser, "SetAndObservePrimarySequenceNodeID"):
+            browser.SetAndObservePrimarySequenceNodeID(sequenceNode.GetID())
+        else:
+            browser.SetAndObserveMasterSequenceNodeID(sequenceNode.GetID())
+        browser.SetPlaybackLooped(True)
+        old = logic.GetFirstBrowserNodeForSequenceNode(like) if like is not None else None
+        oldProxy = old.GetProxyNode(like) if old is not None else None
+        if old is not None:
+            browser.SetPlaybackRateFps(old.GetPlaybackRateFps())
+            browser.SetSelectedItemNumber(old.GetSelectedItemNumber())
+        proxy = browser.GetProxyNode(sequenceNode)
+        if proxy is None:
+            return browser, None
+        proxy.SetName(f"{name} (current frame)")
+        proxy.CreateDefaultDisplayNodes()
+        oldDisplay = oldProxy.GetDisplayNode() if oldProxy is not None else None
+        if oldDisplay is not None and proxy.GetDisplayNode() is not None:
+            proxy.GetDisplayNode().CopyContent(oldDisplay)
+        else:
+            upper = max([float(np.percentile(self.frameArray(sequenceNode, i)[::2, ::2, ::2], 99.9))
+                         for i in range(sequenceNode.GetNumberOfDataNodes())] or [1.0])
+            _setPetDisplay(proxy, upper)
+        return browser, proxy
+
+    def removeOriginals(self, sequenceNode, summedSource=None, removeSummed=True):
+        """Remove the original series from the scene after harden(): the sequence, its browsers and their current
+        frame volumes, and (removeSummed) its summed image: the sequence's own and summedSource when that was
+        summed from the sequence (a summed image picked from elsewhere stays). Returns the names removed."""
+        scene = slicer.mrmlScene
+        summed = []
+        if removeSummed:
+            own = self.summedVolumeOf(sequenceNode)
+            for node in (own, summedSource):
+                if node is not None and node not in summed and (
+                        node is own or node.GetAttribute(PREFIX + "DynamicSequence") == sequenceNode.GetID()):
+                    summed.append(node)
+        removed = []
+        try:
+            logic = slicer.modules.sequences.logic()
+            browsers = vtk.vtkCollection()
+            logic.GetBrowserNodesForSequenceNode(sequenceNode, browsers)
+            for b in [browsers.GetItemAsObject(i) for i in range(browsers.GetNumberOfItems())]:
+                proxy = b.GetProxyNode(sequenceNode)
+                primary = b.GetPrimarySequenceNode() if hasattr(b, "GetPrimarySequenceNode") else \
+                    b.GetMasterSequenceNode()
+                if primary is sequenceNode:
+                    removed.append(b.GetName())
+                    scene.RemoveNode(b)
+                else:
+                    b.RemoveSynchronizedSequenceNode(sequenceNode.GetID())
+                if proxy is not None and scene.IsNodePresent(proxy):
+                    removed.append(proxy.GetName())
+                    scene.RemoveNode(proxy)
+        except Exception:
+            logging.warning("Could not remove the browser of the original sequence", exc_info=True)
+        removed.append(sequenceNode.GetName())
+        scene.RemoveNode(sequenceNode)
+        for node in summed:
+            if scene.IsNodePresent(node):
+                removed.append(node.GetName())
+                scene.RemoveNode(node)
+        logging.info("Dynamic PET motion correction: removed the originals " + ", ".join(f"'{n}'" for n in removed))
+        return removed
 
     def resum(self, sequenceNode, source=None):
         """New summed volume of the frames of the sequence: duration-weighted mean (petseries, as the loader), with
@@ -315,11 +419,13 @@ class DynamicPETMotionCorrectionLogic(ScriptedLoadableModuleLogic):
                 durations.append(None)
         scene = slicer.mrmlScene
         if source is not None:
-            name = f"{source.GetName()} motion corrected"
+            name = self.correctedName(source.GetName())
         else:
             base = sequenceNode.GetName()
-            name = (base.replace(" dynamic ", " summed ", 1) if " dynamic " in base else f"{base} summed") + \
-                " motion corrected"
+            if base.endswith(CORRECTED_SUFFIX):
+                base = base[:-len(CORRECTED_SUFFIX)]
+            name = self.correctedName(base.replace(" dynamic ", " summed ", 1) if " dynamic " in base
+                                      else f"{base} summed")
         summed = scene.AddNewNodeByClass("vtkMRMLScalarVolumeNode", scene.GenerateUniqueName(name))
         array = petseries.durationWeightedMean(arrays, durations).astype(np.float32)
         slicer.util.updateVolumeFromArray(summed, array)
@@ -349,27 +455,11 @@ class DynamicPETMotionCorrectionLogic(ScriptedLoadableModuleLogic):
         return summed
 
     def revert(self, undo):
-        """Undo harden(): the original voxels and attributes back, the table and the new summed volume removed."""
-        sequenceNode = undo["sequence"]
-        for i, image in undo["images"].items():
-            sequenceNode.GetNthDataNode(i).SetAndObserveImageData(image)
-        for i, attributes in undo["frameAttributes"].items():
-            node = sequenceNode.GetNthDataNode(i)
-            for key, value in attributes.items():
-                if value is None:
-                    node.RemoveAttribute(key)
-                else:
-                    node.SetAttribute(key, value)
-        for key, value in undo["sequenceAttributes"].items():
-            if value is None:
-                sequenceNode.RemoveAttribute(key)
-            else:
-                sequenceNode.SetAttribute(key, value)
+        """Undo harden(): remove the new sequence, its browser, the table and the new summed image (the original
+        series was left as it was)."""
         for node in undo["created"]:
             if slicer.mrmlScene.IsNodePresent(node):
                 slicer.mrmlScene.RemoveNode(node)
-        sequenceNode.Modified()
-        self.refreshProxies(sequenceNode)
 
     @staticmethod
     def refreshProxies(sequenceNode):
@@ -810,7 +900,8 @@ class MotionCorrectionSession:
         mainWindow = slicer.util.mainWindow()
         self.dock = qt.QDockWidget("Dynamic PET Motion Correction timeline")
         self.dock.setObjectName("DynamicPETMotionCorrectionTimeline")
-        self.dock.setFeatures(qt.QDockWidget.DockWidgetMovable | qt.QDockWidget.DockWidgetFloatable)
+        self.dock.setFeatures(qt.QDockWidget.DockWidgetMovable | qt.QDockWidget.DockWidgetFloatable
+                              | qt.QDockWidget.DockWidgetClosable)
         container = qt.QWidget()
         layout = qt.QVBoxLayout(container)
         layout.setContentsMargins(6, 4, 6, 4)
@@ -910,6 +1001,7 @@ class DynamicPETMotionCorrectionWidget(ScriptedLoadableModuleWidget, VTKObservat
         self.results = None
         self.resultsSettings = None
         self.undo = None              # harden() record, for Revert
+        self.hardened = False         # the results are hardened into a motion corrected series
         self._updating = False
 
         # --- input and reference
@@ -1098,13 +1190,23 @@ class DynamicPETMotionCorrectionWidget(ScriptedLoadableModuleWidget, VTKObservat
         self.registerButton = qt.QPushButton("Register frames")
         self.registerButton.toolTip = "Register every frame to the reference and show the corrected frames"
         reg.addRow(self.registerButton)
+        self.removeOriginalsCheck = qt.QCheckBox("Keep only the motion corrected series")
+        self.removeOriginalsCheck.checked = True
+        self.removeOriginalsCheck.toolTip = (
+            "On Harden transforms, remove the original series (sequence, browser and current frame volume) and, "
+            "when Resum makes a new summed image, the old summed image, so only the motion corrected ones stay. "
+            "The frames that were not corrected (reference, low activity, over the limit, failed) are in the motion "
+            "corrected series as they were. This cannot be undone. Off: the originals stay next to the new series.")
+        reg.addRow(self.removeOriginalsCheck)
         self.revertButton = qt.QPushButton("Revert changes")
-        self.revertButton.toolTip = ("Before hardening: drop the registration. After hardening: put the original "
-                                     "frames back and remove the motion table and the new summed image.")
+        self.revertButton.toolTip = ("Before hardening: drop the registration. After hardening (originals kept): "
+                                     "remove the motion corrected series, its table and summed image, and go back "
+                                     "to the original series.")
         self.revertButton.enabled = False
         self.hardenButton = qt.QPushButton("Harden transforms")
-        self.hardenButton.toolTip = ("Write the corrected frames into the sequence (over the original frames), with "
-                                     "a table of the per-frame motion and, with Resum, a new summed image")
+        self.hardenButton.toolTip = ("Make the motion corrected series: every frame, corrected or (when it was not "
+                                     "registered) as it was, with a table of the per-frame motion and, with Resum, a "
+                                     "new summed image")
         self.hardenButton.enabled = False
         row = qt.QHBoxLayout()
         row.addWidget(self.revertButton)
@@ -1259,7 +1361,7 @@ class DynamicPETMotionCorrectionWidget(ScriptedLoadableModuleWidget, VTKObservat
                 self.session.setReference(frameIndex=self.referenceFrame())
             if results:
                 self.session.setResults(results, mc.showsMotionRows(self.resultsSettings["method"]),
-                                        hardened=self.undo is not None)
+                                        hardened=self.hardened)
         except Exception as error:
             logging.exception("Could not open Dynamic PET Motion Correction")
             slicer.util.errorDisplay(f"Could not open the motion correction layout:\n{error}")
@@ -1366,6 +1468,7 @@ class DynamicPETMotionCorrectionWidget(ScriptedLoadableModuleWidget, VTKObservat
         self.results = None
         self.resultsSettings = None
         self.undo = None
+        self.hardened = False
         if hasattr(self, "hardenButton"):
             self._updateButtons()
             self.resultLabel.text = "Not registered yet."
@@ -1373,7 +1476,7 @@ class DynamicPETMotionCorrectionWidget(ScriptedLoadableModuleWidget, VTKObservat
             self.session.setResults(None, False)
 
     def _updateButtons(self):
-        pending = bool(self.results) and self.undo is None
+        pending = bool(self.results) and not self.hardened
         self.hardenButton.enabled = pending and any(r["status"] == mc.REGISTERED for r in self.results)
         self.revertButton.enabled = pending or self.undo is not None
         self.showWidget.enabled = pending
@@ -1409,7 +1512,7 @@ class DynamicPETMotionCorrectionWidget(ScriptedLoadableModuleWidget, VTKObservat
         finally:
             qt.QApplication.restoreOverrideCursor()
             dialog.close()
-        self.results, self.resultsSettings, self.undo = results, settings, None
+        self.results, self.resultsSettings, self.undo, self.hardened = results, settings, None, False
         self.session.setResults(results, mc.showsMotionRows(settings["method"]))
         self._updateButtons()
         method = " + ".join(mc.transformTypes(settings["method"], settings["twoPass"], settings["secondMethod"]))
@@ -1420,39 +1523,75 @@ class DynamicPETMotionCorrectionWidget(ScriptedLoadableModuleWidget, VTKObservat
 
     def onHarden(self):
         sequence = self.sequenceSelector.currentNode()
-        if sequence is None or not self.results or self.undo is not None:
+        if sequence is None or not self.results or self.hardened:
             return
-        changed = sum(1 for r in self.results if r["image"] is not None)
+        results, settings = self.results, self.resultsSettings
+        changed = sum(1 for r in results if r["image"] is not None)
         resum = self.resumCheck.checked
-        if not slicer.util.confirmYesNoDisplay(
-                f"This overwrites {changed} frame(s) of '{sequence.GetName()}' with the motion corrected ones"
-                + (" and makes a new summed image" if resum else "") + ".\n\n"
-                "Revert changes can undo it until you pick another series or reference, or close the scene. "
-                "Save the scene to keep the corrected frames.\n\nAre you sure?",
-                windowTitle="Harden transforms"):
-            return
+        removeOriginals = self.removeOriginalsCheck.checked
         summedSource = self.summedSelector.currentNode() or self.logic.summedVolumeOf(sequence)
+        text = (f"This makes the motion corrected series of '{sequence.GetName()}': {changed} corrected frame(s) "
+                f"and the other {len(results) - changed} frame(s) as they are (reference, low activity, ...)"
+                + (", and a new summed image" if resum else "") + ".\n\n")
+        if removeOriginals:
+            text += ("The original series" + (" and its summed image" if resum and summedSource is not None else "")
+                     + " will be DELETED from the scene. This cannot be undone.")
+        else:
+            text += ("The original series stays. Revert changes removes the new one until you pick another series "
+                     "or reference, or close the scene.")
+        text += "\n\nSave the scene to keep the motion corrected series.\n\nAre you sure?"
+        if not slicer.util.confirmYesNoDisplay(text, windowTitle="Harden transforms"):
+            return
+        usedSummed = self.summedSelector.currentNode()
+        referenceIndex = self.referenceCombo.currentIndex
+        referenceText = self.session.referenceText if self.session else ""
         qt.QApplication.setOverrideCursor(qt.Qt.WaitCursor)
         try:
-            self.undo, table, summed = self.logic.harden(sequence, self.results, self.resultsSettings,
-                                                         self.session.referenceText if self.session else "",
-                                                         resum, summedSource)
+            undo, corrected, table, summed = self.logic.harden(sequence, results, settings, referenceText, resum,
+                                                               summedSource)
+            # show the new series (the selectors forget the results, they come back below), then drop the old one
+            self._selectSeries(corrected, (summed or usedSummed) if usedSummed is not None else None,
+                               referenceIndex)
+            removed = []
+            if removeOriginals:
+                removed = self.logic.removeOriginals(sequence, summedSource, removeSummed=summed is not None)
+                undo = None
         except Exception as error:
             logging.exception("Could not harden the motion correction")
             slicer.util.errorDisplay(f"Could not harden the motion correction:\n{error}")
             return
         finally:
             qt.QApplication.restoreOverrideCursor()
+        self.results, self.resultsSettings, self.undo, self.hardened = results, settings, undo, True
         if self.session is not None:
-            self.session.setResults(self.results, mc.showsMotionRows(self.resultsSettings["method"]), hardened=True)
+            self.session.setResults(results, mc.showsMotionRows(settings["method"]), hardened=True)
         self._updateButtons()
-        self.resultLabel.text += (f"\nHardened into '{sequence.GetName()}' (table '{table.GetName()}'"
-                                  + (f", new summed image '{summed.GetName()}'" if summed is not None else "") + ").")
+        method = " + ".join(mc.transformTypes(settings["method"], settings["twoPass"], settings["secondMethod"]))
+        self.resultLabel.text = (f"{method} to {referenceText}: {mc.summaryText([r['status'] for r in results])}."
+                                 f"\nHardened into '{corrected.GetName()}' (table '{table.GetName()}'"
+                                 + (f", new summed image '{summed.GetName()}'" if summed is not None else "") + ")."
+                                 + (f"\nRemoved: {', '.join(removed)}." if removed else ""))
+
+    def _selectSeries(self, sequenceNode, summedNode, referenceIndex):
+        """Pick a series (and its summed image as reference, or the frame referenceIndex) in the selectors."""
+        self.sequenceSelector.setCurrentNode(sequenceNode)
+        if summedNode is not self.summedSelector.currentNode():
+            self.summedSelector.setCurrentNode(summedNode)
+        if summedNode is None and 0 <= referenceIndex < self.referenceCombo.count:
+            self.referenceCombo.setCurrentIndex(referenceIndex)
 
     def onRevert(self):
         if self.undo is not None:
+            undo = self.undo
             try:
-                self.logic.revert(self.undo)
+                original = undo["original"]
+                if slicer.mrmlScene.IsNodePresent(original):
+                    usedSummed = self.summedSelector.currentNode() is not None
+                    summed = undo["originalSummed"] if usedSummed else None
+                    if summed is not None and not slicer.mrmlScene.IsNodePresent(summed):
+                        summed = None
+                    self._selectSeries(original, summed, self.referenceCombo.currentIndex)
+                self.logic.revert(undo)
             except Exception as error:
                 logging.exception("Could not revert the motion correction")
                 slicer.util.errorDisplay(f"Could not revert the motion correction:\n{error}")
@@ -1467,6 +1606,13 @@ class DynamicPETMotionCorrectionWidget(ScriptedLoadableModuleWidget, VTKObservat
         if self.session is None and self.sequenceSelector.currentNode() is not None:
             self.onOpen()
 
+    def exit(self):
+        """Leaving the module: close the layout and its timeline and go back to the four-up layout. The
+        registration is kept: coming back opens the layout with it again."""
+        if self.session is not None:
+            self.onClose()
+            slicer.app.layoutManager().setLayout(slicer.vtkMRMLLayoutNode.SlicerLayoutFourUpView)
+
     def cleanup(self):
         self.onClose()
         self.removeObservers()
@@ -1476,6 +1622,7 @@ class DynamicPETMotionCorrectionWidget(ScriptedLoadableModuleWidget, VTKObservat
         self.onClose()
         self.results = None
         self.undo = None
+        self.hardened = False
 
     @vtk.calldata_type(vtk.VTK_OBJECT)
     def onNodeRemoved(self, caller, event, node):
@@ -1573,25 +1720,49 @@ class DynamicPETMotionCorrectionTest(ScriptedLoadableModuleTest):
         self.assertEqual(limited[3]["status"], mc.OVER_LIMIT)
         self.assertIsNone(limited[3]["image"])
 
-        # harden writes the corrected frames into the sequence, revert puts the originals back
+        # harden makes a motion corrected series with every frame (the low activity one unchanged), the originals
+        # stay; revert removes the new series
         original = slicer.util.arrayFromVolume(sequence.GetNthDataNode(3)).copy()
-        undo, table, summed = logic.harden(sequence, results, logic.defaultSettings(), "frame 1")
-        hardened = slicer.util.arrayFromVolume(sequence.GetNthDataNode(3))
+        lowBefore = slicer.util.arrayFromVolume(sequence.GetNthDataNode(1)).copy()
+        undo, hardenedSequence, table, summed = logic.harden(sequence, results, logic.defaultSettings(), "frame 1")
+        self.assertEqual(hardenedSequence.GetName(), sequence.GetName() + CORRECTED_SUFFIX)
+        self.assertEqual(hardenedSequence.GetNumberOfDataNodes(), 5)
+        self.assertEqual([hardenedSequence.GetNthIndexValue(i) for i in range(5)],
+                         [sequence.GetNthIndexValue(i) for i in range(5)])
+        hardened = slicer.util.arrayFromVolume(hardenedSequence.GetNthDataNode(3))
         self.assertLess(np.abs(hardened - corrected).mean(), 0.5 * before)
-        self.assertEqual(sequence.GetNthDataNode(3).GetAttribute(MC_PREFIX + "Status"), mc.REGISTERED)
-        self.assertEqual(sequence.GetNthDataNode(1).GetAttribute(MC_PREFIX + "Status"), mc.LOW_ACTIVITY)
+        np.testing.assert_array_equal(slicer.util.arrayFromVolume(sequence.GetNthDataNode(3)), original)
+        np.testing.assert_array_equal(slicer.util.arrayFromVolume(hardenedSequence.GetNthDataNode(1)), lowBefore)
+        self.assertEqual(hardenedSequence.GetNthDataNode(3).GetAttribute(MC_PREFIX + "Status"), mc.REGISTERED)
+        self.assertEqual(hardenedSequence.GetNthDataNode(1).GetAttribute(MC_PREFIX + "Status"), mc.LOW_ACTIVITY)
+        self.assertEqual(hardenedSequence.GetNthDataNode(1).GetAttribute(PREFIX + "DurationS"),
+                         sequence.GetNthDataNode(1).GetAttribute(PREFIX + "DurationS"))
+        self.assertIsNotNone(slicer.modules.sequences.logic().GetFirstBrowserNodeForSequenceNode(hardenedSequence))
         self.assertEqual(table.GetNumberOfRows(), 5)
-        self.assertEqual(sequence.GetAttribute(PREFIX + "SummedVolumeID"), summed.GetID())
+        self.assertEqual(hardenedSequence.GetAttribute(PREFIX + "SummedVolumeID"), summed.GetID())
         durations = [60.0] * 5
-        expected = sum(slicer.util.arrayFromVolume(sequence.GetNthDataNode(i)).astype(float) * durations[i]
+        expected = sum(slicer.util.arrayFromVolume(hardenedSequence.GetNthDataNode(i)).astype(float) * durations[i]
                        for i in range(5)) / sum(durations)
         np.testing.assert_allclose(slicer.util.arrayFromVolume(summed), expected, rtol=1e-4, atol=1e-3)
         logic.revert(undo)
-        np.testing.assert_array_equal(slicer.util.arrayFromVolume(sequence.GetNthDataNode(3)), original)
-        self.assertIsNone(sequence.GetNthDataNode(3).GetAttribute(MC_PREFIX + "Status"))
-        self.assertIsNone(sequence.GetAttribute(PREFIX + "SummedVolumeID"))
-        self.assertFalse(slicer.mrmlScene.IsNodePresent(summed))
-        self.assertFalse(slicer.mrmlScene.IsNodePresent(table))
+        for node in [hardenedSequence, summed, table]:
+            self.assertFalse(slicer.mrmlScene.IsNodePresent(node))
+        self.assertTrue(slicer.mrmlScene.IsNodePresent(sequence))
+
+        # with the originals removed only the motion corrected series and summed image stay
+        from DynamicPETEditor import DynamicPETEditorLogic
+        oldSummed = logic.resum(sequence)
+        oldSummed.SetName("Synthetic summed")
+        sequence.SetAttribute(PREFIX + "SummedVolumeID", oldSummed.GetID())
+        browser = DynamicPETEditorLogic.browserFor(sequence)
+        undo, kept, keptTable, keptSummed = logic.harden(sequence, results, logic.defaultSettings(), "frame 1")
+        logic.removeOriginals(sequence, oldSummed)
+        for node in [sequence, oldSummed, browser]:
+            self.assertFalse(slicer.mrmlScene.IsNodePresent(node))
+        self.assertEqual(kept.GetNumberOfDataNodes(), 5)
+        self.assertEqual(keptSummed.GetName(), "Synthetic summed" + CORRECTED_SUFFIX)
+        np.testing.assert_array_equal(slicer.util.arrayFromVolume(kept.GetNthDataNode(1)), lowBefore)
+        sequence = kept
 
         # the layout opens with the reference in the large view and the frames over it
         session = MotionCorrectionSession(sequence)

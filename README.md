@@ -195,6 +195,7 @@ Settings in the panel:
 | Reference frame | frame with the highest activity | the frame shown in the large view; it is kept as it is |
 | Summed image (optional) | none | register to this volume instead (e.g. the series' summed volume); then every frame is registered |
 | Resum the summed image | on | *Harden transforms* also makes a new summed image of the corrected frames |
+| Keep only the motion corrected series | on | *Harden transforms* deletes the original series and old summed image |
 | Method | Rigid | Rigid, Affine or BSpline (BRAINSFit `transformType`, Mattes mutual information, no initialization) |
 | Enable two pass | off; second pass Affine | a second BRAINSFit run (Affine or BSpline) starting from the first |
 | Do not register low activity frames | on, below 1 % | activity = sum of the voxels of the frame; frames below that % of the highest frame are kept as they are |
@@ -210,15 +211,24 @@ correction).
 
 Under *Register frames*:
 
-- **Harden transforms** writes the corrected frames **into the sequence, over the original frames** (it asks first),
-  adds a table *"&lt;series&gt; motion"* with the status, shift and angles of every frame and, with *Resum the summed
-  image*, makes a new summed image *"&lt;summed&gt; motion corrected"* of the corrected frames: the duration-weighted
-  mean, as the DICOM loader makes it, with the attributes and display of the old summed image, which stays. The
-  sequence then points to the new one (`DynamicPET.SummedVolumeID`). Every frame carries
-  `DynamicPET.MotionCorrection.Status` (and `ShiftRASMm` / `AnglesRASDeg` for rigid). Save the scene to keep them.
-- **Revert changes** drops a registration that is not hardened yet; after hardening it puts the original frames
-  back and removes the table and the new summed image. The original frames are kept in memory for this until
-  another series or reference is picked, or the scene is closed.
+- **Harden transforms** (it asks first) makes a new series *"&lt;series&gt; motion corrected"* with **every frame**:
+  the corrected image of each registered frame, and the frames that were not registered (reference, low activity,
+  over the limit, failed) as they were, so the new series has the same frames and times as the original. It gets its
+  own browser and current frame volume, a table *"&lt;series&gt; motion"* with the status, shift and angles of every
+  frame and, with *Resum the summed image*, a new summed image *"&lt;summed&gt; motion corrected"* of the corrected
+  frames: the duration-weighted mean, as the DICOM loader makes it, with the attributes and display of the old summed
+  image. The new series points to it (`DynamicPET.SummedVolumeID`). Every frame carries
+  `DynamicPET.MotionCorrection.Status` (and `ShiftRASMm` / `AnglesRASDeg` for rigid). The module then shows the new
+  series. Save the scene to keep it.
+- **Keep only the motion corrected series** (on by default): Harden also **deletes the original series** (sequence,
+  browser, current frame volume) and, when a new summed image was made, the old summed image, so only the motion
+  corrected ones are left. This cannot be undone. Turn it off to keep the originals next to the new series.
+- **Revert changes** drops a registration that is not hardened yet; after hardening with the originals kept it
+  removes the new series, its table and summed image and goes back to the original series (until another series or
+  reference is picked, or the scene is closed).
+
+Leaving the module closes its layout and timeline and switches to the four-up layout; coming back opens them again,
+with the registration. The timeline can also be closed with its own close button, or with *Close layout*.
 
 ## What is stored on the volumes
 
