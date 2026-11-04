@@ -114,6 +114,25 @@ class DynamicPETEditorLogic(ScriptedLoadableModuleLogic):
         return browser
 
 
+def guardViewVolumes(widget, expected):
+    """Keep the volumes of a slice view as expected() says, (background, foreground, label) node IDs (None: empty):
+    Slicer puts a newly loaded volume into every slice view, also into the editor's frame grid. Returns the
+    (composite node, observer tag) to remove on close."""
+    composite = widget.mrmlSliceCompositeNode()
+
+    def restore(caller=None, event=None):
+        wanted = expected()
+        current = (composite.GetBackgroundVolumeID(), composite.GetForegroundVolumeID(),
+                   composite.GetLabelVolumeID())
+        if tuple(x or None for x in current) != tuple(wanted):
+            composite.SetBackgroundVolumeID(wanted[0])
+            composite.SetForegroundVolumeID(wanted[1])
+            composite.SetLabelVolumeID(wanted[2])
+
+    restore()
+    return composite, composite.AddObserver(vtk.vtkCommand.ModifiedEvent, restore)
+
+
 # ---------------------------------------------------------------------------
 # Spherical ROIs: a point in the large view, a sphere around it and its time-activity curve
 # ---------------------------------------------------------------------------
@@ -652,11 +671,8 @@ class DynamicPETEditorSession:
             widget = self._sliceWidget(dynamicviews.emptyViewName(e))
             if widget is None:
                 continue
-            widget.sliceController().setVisible(False)    # placeholder keeping the grid cells equal
-            composite = widget.mrmlSliceCompositeNode()
-            composite.SetBackgroundVolumeID(None)
-            composite.SetForegroundVolumeID(None)
-            composite.SetLabelVolumeID(None)
+            widget.sliceController().setVisible(False)    # placeholder keeping the grid cells equal, kept empty
+            self.observers.append(guardViewVolumes(widget, lambda: (None, None, None)))
         self.setLinked(self.syncSlices)
 
     def _addOverlay(self, name, widget, fontSize):

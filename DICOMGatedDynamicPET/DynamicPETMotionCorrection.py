@@ -7,7 +7,7 @@ on its own grid.
 
 Layout, like Review/Edit:
     upper 2/3   the reference in a large view on the left (inverted grey) and a near-square grid of small views on
-                the right, one per frame: the frame in hot iron over the reference in inverted grey. All views in
+                the right, one per frame: the frame in PET-Rainbow2 (0.25 opacity) over the reference in inverted grey. All views in
                 one orientation (coronal by default), linked. After registration the views show the corrected
                 frames (or the original ones, to compare).
     lower 1/3   the frame timeline; after a rigid registration two rows above the frame blocks give each frame's
@@ -38,6 +38,7 @@ from DICOMGatedDynamicPETLib import colormaps, dynamicviews  # noqa: E402
 from DICOMGatedDynamicPETLib import motioncorrection as mc  # noqa: E402
 from DICOMGatedDynamicPETLib.motionplot import MotionPlot  # noqa: E402
 from DICOMGatedDynamicPETLib.timeline import FrameTimeline  # noqa: E402
+from DynamicPETEditor import guardViewVolumes  # noqa: E402
 
 LAYOUT_ID = 7802
 MAIN_VIEW = "DynMCMain"
@@ -48,9 +49,9 @@ PREFIX = "DynamicPET."
 MC_PREFIX = "DynamicPET.MotionCorrection."
 HELPER_ATTRIBUTE = "DynamicPETMotionCorrection.Helper"
 DEFAULT_ORIENTATION = "Coronal"
-FRAME_COLORMAP = "PET-HotIron"
+FRAME_COLORMAP = "PET-Rainbow2"
 REFERENCE_COLORMAP = "Inverted grey"
-DEFAULT_OPACITY = 0.6
+DEFAULT_OPACITY = 0.25
 THRESHOLD_FRACTION = 0.03     # frame voxels below 3 % of the frame's window are transparent over the reference
 AUTO_PERCENTILE = 99.9
 
@@ -65,7 +66,7 @@ class DynamicPETMotionCorrection(ScriptedLoadableModule):
         parent.helpText = (
             "Frame-by-frame motion correction of a dynamic PET series with BRAINSFit (rigid, affine or B-spline, "
             "optionally two passes). Pick the dynamic sequence and the reference frame (or a summed image): every "
-            "frame is shown in hot iron over the reference in inverted grey. Register, review the corrected frames "
+            "frame is shown in color over the reference in inverted grey. Register, review the corrected frames "
             "and the detected shift / angles on the timeline (rigid), then save the corrected series.")
         parent.acknowledgementText = ("Part of the DICOM Gated / Dynamic PET extension. Registration by BRAINSFit "
                                       "(Johnson HJ et al., BRAINSFit: Mutual Information Rigid Registrations of "
@@ -409,7 +410,8 @@ class DynamicPETMotionCorrectionLogic(ScriptedLoadableModuleLogic):
     def _placeNextTo(sourceNode, nodes):
         try:
             sh = slicer.vtkMRMLSubjectHierarchyNode.GetSubjectHierarchyNode(slicer.mrmlScene)
-            parent = sh.GetItemParent(sh.GetItemByDataNode(sourceNode))
+            sourceItem = sh.GetItemByDataNode(sourceNode)
+            parent = sh.GetItemParent(sourceItem) if sourceItem else 0
             if not parent:
                 return
             for node in nodes:
@@ -444,7 +446,7 @@ def _percentile(array):
 # Session: layout, views and timeline dock
 # ---------------------------------------------------------------------------
 class MotionCorrectionSession:
-    """The motion correction layout of one sequence: the reference in the large view, every frame (hot iron) over
+    """The motion correction layout of one sequence: the reference in the large view, every frame (PET-Rainbow2) over
     the reference (inverted grey) in the small views, and the timeline dock."""
 
     def __init__(self, sequenceNode, maxViews=64, orientation=DEFAULT_ORIENTATION, linked=True):
@@ -459,6 +461,8 @@ class MotionCorrectionSession:
         self.referenceHelper = None        # hidden volume of the reference frame (None for a summed image)
         self.referenceText = ""
         self.overlays = {}
+        self.observers = []                # (node, tag): view guards
+        self.guarded = False
         self.dock = None
         self.timeline = None
         self.previousLayout = None
@@ -472,6 +476,10 @@ class MotionCorrectionSession:
         self.plots = []                    # shift (mm) and angle (deg) plots, rigid only
         self.showCorrected = True
         self.originalUppers = []
+        self.frameMaximum = 1.0            # highest voxel of the frames (range of the frame window)
+        self.frameWindow = None            # (lower, upper) of all frames; None: 0 - highest 99.9th percentile
+        self.referenceWindow = None        # (lower, upper) of the reference; None: 0 - its 99.9th percentile
+        self.referenceMaximum = 1.0
         self.correctedUppers = []
 
     # --- open / close ---------------------------------------------------------------------------
@@ -480,14 +488,20 @@ class MotionCorrectionSession:
         logic = DynamicPETEditorLogic()
         self.intervals = logic.frameIntervals(self.sequenceNode)
         self.viewFrames = logic.shownFrames(len(self.intervals), self.maxViews)
-        self.originalUppers = [_percentile(DynamicPETMotionCorrectionLogic.frameArray(self.sequenceNode, i))
-                               for i in range(self.sequenceNode.GetNumberOfDataNodes())]
+        arrays = [DynamicPETMotionCorrectionLogic.frameArray(self.sequenceNode, i)
+                  for i in range(self.sequenceNode.GetNumberOfDataNodes())]
+        self.originalUppers = [_percentile(array) for array in arrays]
+        self.frameMaximum = max([float(np.nanmax(array)) for array in arrays if array.size] or [1.0])
         self._makeFrameVolumes()
         self._setLayout()
         self._makeDock()
         self._setupViews()
 
     def close(self):
+        for node, tag in self.observers:
+            node.RemoveObserver(tag)
+        self.observers = []
+        self.guarded = False
         for sliceView, renderer, actor in self.overlays.values():
             renderer.RemoveActor2D(actor)
             sliceView.scheduleRender()
@@ -525,9 +539,7 @@ class MotionCorrectionSession:
         """The reference: a frame of the series (frameIndex) or another volume (the summed image). It is shown (and
         registered to) through a hidden helper volume sharing its voxels, in inverted grey, so the user's own
         volume keeps its display."""
-        if self.referenceHelper is not None:
-            slicer.mrmlScene.RemoveNode(self.referenceHelper)
-            self.referenceHelper = None
+        oldHelper, self.referenceHelper = self.referenceHelper, None
         if volume is None:
             frameIndex = min(max(0, frameIndex or 0), len(self.intervals) - 1)
             source = self.sequenceNode.GetNthDataNode(frameIndex)
@@ -541,10 +553,15 @@ class MotionCorrectionSession:
         display = helper.GetDisplayNode()
         display.SetAndObserveColorNodeID(colormaps.colorNodeForLabel(self.referenceColor).GetID())
         display.AutoWindowLevelOff()
-        display.SetWindowLevelMinMax(0.0, _percentile(slicer.util.arrayFromVolume(helper)))
+        array = slicer.util.arrayFromVolume(helper)
+        self.referenceMaximum = float(np.nanmax(array)) if array.size else 1.0
+        self.referenceWindow = (0.0, _percentile(array))
+        display.SetWindowLevelMinMax(*self.referenceWindow)
         display.SetInterpolate(True)
         self.referenceVolume = helper
         self._assignVolumes()
+        if oldHelper is not None:       # removed after the views show the new one
+            slicer.mrmlScene.RemoveNode(oldHelper)
 
     # --- layout and views ----------------------------------------------------------------------
     def _setLayout(self):
@@ -600,10 +617,20 @@ class MotionCorrectionSession:
             if widget is None:
                 continue
             widget.sliceController().setVisible(False)
-            composite = widget.mrmlSliceCompositeNode()
-            composite.SetBackgroundVolumeID(None)
-            composite.SetForegroundVolumeID(None)
-            composite.SetLabelVolumeID(None)
+            self.observers.append(guardViewVolumes(widget, lambda: (None, None, None)))
+
+    def _guardVolumes(self):
+        """The reference and frame views keep their volumes when Slicer shows a newly loaded volume everywhere."""
+        if self.guarded or self.referenceVolume is None:
+            return
+        self.guarded = True
+        main = self._widget(MAIN_VIEW)
+        if main is not None:
+            self.observers.append(guardViewVolumes(main, lambda: (self.referenceVolume.GetID(), None, None)))
+        for widget, volume in self._frameWidgets():
+            if widget is not None:
+                self.observers.append(guardViewVolumes(
+                    widget, lambda volume=volume: (self.referenceVolume.GetID(), volume.GetID(), None)))
 
     def _assignVolumes(self):
         """Reference as background of every view, the frames as foreground of the small views. The views are
@@ -631,6 +658,7 @@ class MotionCorrectionSession:
             self._link(self.linked)
         self._applyFrameWindows()
         self._updateOverlays()
+        self._guardVolumes()
 
     def setOrientation(self, orientation, link=True):
         self.orientation = orientation
@@ -665,6 +693,25 @@ class MotionCorrectionSession:
         if self.referenceHelper is not None:
             self.referenceHelper.GetDisplayNode().SetAndObserveColorNodeID(colormaps.colorNodeForLabel(label).GetID())
 
+    def setReferenceWindow(self, lower, upper):
+        if upper <= lower:
+            return
+        self.referenceWindow = (float(lower), float(upper))
+        if self.referenceHelper is not None:
+            display = self.referenceHelper.GetDisplayNode()
+            display.AutoWindowLevelOff()
+            display.SetWindowLevelMinMax(lower, upper)
+
+    def setFrameWindow(self, lower, upper):
+        """One window for all frames (used while each frame its own window is off)."""
+        if upper <= lower:
+            return
+        self.frameWindow = (float(lower), float(upper))
+        self._applyFrameWindows()
+
+    def autoFrameWindow(self):
+        return 0.0, max(self.originalUppers or [1.0])
+
     def setFrameWindows(self, perFrame):
         self.frameWindows = perFrame
         self._applyFrameWindows()
@@ -672,16 +719,16 @@ class MotionCorrectionSession:
     def _applyFrameWindows(self):
         uppers = self.correctedUppers if (self.results and (self.showCorrected or self.hardened)
                                           and self.correctedUppers) else self.originalUppers
-        common = max(uppers or [1.0])
+        common = self.frameWindow or (0.0, max(uppers or [1.0]))
         for volume, index in zip(self.frameVolumes, self.viewFrames):
             display = volume.GetDisplayNode()
-            upper = uppers[index] if self.frameWindows else common
-            upper = upper if upper > 0 else 1.0
+            lower, upper = (0.0, uppers[index]) if self.frameWindows else common
+            upper = upper if upper > lower else lower + 1.0
             display.AutoWindowLevelOff()
-            display.SetWindowLevelMinMax(0.0, upper)
-            display.SetApplyThreshold(True)
-            display.SetLowerThreshold(THRESHOLD_FRACTION * upper)
-            display.SetUpperThreshold(max(common, upper) * 1e6)
+            display.SetWindowLevelMinMax(lower, upper)
+            display.SetApplyThreshold(True)       # below the window (or 3 % of it): transparent over the reference
+            display.SetLowerThreshold(max(lower, THRESHOLD_FRACTION * upper))
+            display.SetUpperThreshold(max(abs(upper), self.frameMaximum, 1.0) * 1e6)
 
     # --- results ---------------------------------------------------------------------------------
     def setResults(self, results, motionRows, hardened=False):
@@ -916,12 +963,24 @@ class DynamicPETMotionCorrectionWidget(ScriptedLoadableModuleWidget, VTKObservat
         self.opacitySlider.minimum, self.opacitySlider.maximum = 0.0, 1.0
         self.opacitySlider.singleStep, self.opacitySlider.decimals = 0.05, 2
         self.opacitySlider.value = DEFAULT_OPACITY
-        self.opacitySlider.toolTip = "Opacity of the frames (hot iron) over the reference (inverted grey)"
+        self.opacitySlider.toolTip = "Opacity of the frames over the reference (inverted grey)"
         view.addRow("Frame opacity:", self.opacitySlider)
         self.frameWindowCheck = qt.QCheckBox("Each frame its own window (0 - 99.9th percentile)")
         self.frameWindowCheck.checked = False
         self.frameWindowCheck.toolTip = "Off: one window for all frames, so early low-count frames look faint"
         view.addRow(self.frameWindowCheck)
+        self.frameWindowRange = ctk.ctkRangeWidget()
+        self.frameWindowRange.decimals = 2
+        self.frameWindowRange.toolTip = ("Display range of all frames (when each frame its own window is off); frame "
+                                         "voxels below it are transparent over the reference")
+        view.addRow("Frame window:", self.frameWindowRange)
+        self.referenceWindowRange = ctk.ctkRangeWidget()
+        self.referenceWindowRange.decimals = 2
+        self.referenceWindowRange.toolTip = "Display range of the reference (large view and under every frame)"
+        view.addRow("Reference window:", self.referenceWindowRange)
+        self.autoWindowButton = qt.QPushButton("Auto windows")
+        self.autoWindowButton.toolTip = "Both windows back to 0 - 99.9th percentile"
+        view.addRow(self.autoWindowButton)
         self.frameColorCombo = qt.QComboBox()
         self.referenceColorCombo = qt.QComboBox()
         for combo, default in ((self.frameColorCombo, FRAME_COLORMAP), (self.referenceColorCombo, REFERENCE_COLORMAP)):
@@ -1063,6 +1122,9 @@ class DynamicPETMotionCorrectionWidget(ScriptedLoadableModuleWidget, VTKObservat
         self.opacitySlider.connect("valueChanged(double)", self.onOpacityChanged)
         self.frameWindowCheck.connect("toggled(bool)", self.onFrameWindowToggled)
         self.frameColorCombo.connect("currentIndexChanged(int)", self.onFrameColorChanged)
+        self.frameWindowRange.connect("valuesChanged(double,double)", self.onFrameWindowChanged)
+        self.referenceWindowRange.connect("valuesChanged(double,double)", self.onReferenceWindowChanged)
+        self.autoWindowButton.connect("clicked()", self.onAutoWindows)
         self.referenceColorCombo.connect("currentIndexChanged(int)", self.onReferenceColorChanged)
         self.linkCheck.connect("toggled(bool)", self.onLinkToggled)
         self.showCorrectedRadio.connect("toggled(bool)", self.onShowCorrectedToggled)
@@ -1161,6 +1223,7 @@ class DynamicPETMotionCorrectionWidget(ScriptedLoadableModuleWidget, VTKObservat
         self._clearResults()
         if self.session is not None and self.summedSelector.currentNode() is None and index >= 0:
             self.session.setReference(frameIndex=index)
+            self._syncWindowWidgets()
 
     def onSummedChanged(self, node):
         self.referenceCombo.enabled = node is None
@@ -1170,6 +1233,7 @@ class DynamicPETMotionCorrectionWidget(ScriptedLoadableModuleWidget, VTKObservat
                 self.session.setReference(frameIndex=self.referenceFrame())
             else:
                 self.session.setReference(volume=node)
+            self._syncWindowWidgets()
 
     # --- layout --------------------------------------------------------------------------------
     def onOpen(self):
@@ -1201,6 +1265,7 @@ class DynamicPETMotionCorrectionWidget(ScriptedLoadableModuleWidget, VTKObservat
             slicer.util.errorDisplay(f"Could not open the motion correction layout:\n{error}")
             self._closeSession()
         self.closeButton.enabled = self.session is not None
+        self._syncWindowWidgets()
 
     def _closeSession(self):
         if self.session is not None:
@@ -1211,6 +1276,7 @@ class DynamicPETMotionCorrectionWidget(ScriptedLoadableModuleWidget, VTKObservat
         self._closeSession()
         if hasattr(self, "closeButton"):
             self.closeButton.enabled = False
+            self._syncWindowWidgets()
 
     @staticmethod
     def _closeReviewEdit():
@@ -1231,8 +1297,52 @@ class DynamicPETMotionCorrectionWidget(ScriptedLoadableModuleWidget, VTKObservat
             self.session.setOpacity(value)
 
     def onFrameWindowToggled(self, checked):
+        self.frameWindowRange.enabled = self.session is not None and not checked
         if self.session is not None:
             self.session.setFrameWindows(checked)
+
+    def _syncWindowWidgets(self, auto=False):
+        """The window sliders: their range from the volumes, their values from the session."""
+        session = self.session
+        for widget in (self.frameWindowRange, self.referenceWindowRange, self.autoWindowButton):
+            widget.enabled = session is not None
+        if session is None:
+            return
+        if auto:
+            session.frameWindow = None
+        frame = session.frameWindow or session.autoFrameWindow()
+        for widget, maximum, values in ((self.frameWindowRange, session.frameMaximum, frame),
+                                        (self.referenceWindowRange, session.referenceMaximum,
+                                         session.referenceWindow or (0.0, 1.0))):
+            widget.blockSignals(True)
+            try:
+                top = max(maximum, values[1], 1e-6)
+                widget.singleStep = max(top / 1000.0, 1e-4)
+                widget.setRange(min(0.0, values[0]), top)
+                widget.setValues(*values)
+            finally:
+                widget.blockSignals(False)
+        self.frameWindowRange.enabled = not self.frameWindowCheck.checked
+
+    def onFrameWindowChanged(self, lower, upper):
+        if self.session is not None:
+            self.session.setFrameWindow(lower, upper)
+
+    def onReferenceWindowChanged(self, lower, upper):
+        if self.session is not None:
+            self.session.setReferenceWindow(lower, upper)
+
+    def onAutoWindows(self):
+        if self.session is None:
+            return
+        self.session.frameWindow = None
+        self.session.setFrameWindows(self.frameWindowCheck.checked)
+        reference = self.summedSelector.currentNode()
+        if reference is not None:
+            self.session.setReference(volume=reference)
+        else:
+            self.session.setReference(frameIndex=self.referenceFrame())
+        self._syncWindowWidgets(auto=True)
 
     def onFrameColorChanged(self, index):
         if self.session is not None:
@@ -1501,6 +1611,16 @@ class DynamicPETMotionCorrectionTest(ScriptedLoadableModuleTest):
             session.setFrameColor("Hel")
             self.assertEqual(session.frameVolumes[0].GetDisplayNode().GetColorNodeID(),
                              colormaps.colorNodeForLabel("Hel").GetID())
+            # a volume shown everywhere (as when one is loaded) stays out of the editor's views
+            slicer.util.setSliceViewerLayers(background=reference, foreground=None)
+            empty = layoutManager.sliceWidget(dynamicviews.emptyViewName(0, EMPTY_VIEW_PREFIX))
+            self.assertIsNone(empty.mrmlSliceCompositeNode().GetBackgroundVolumeID())
+            self.assertEqual(main.mrmlSliceCompositeNode().GetBackgroundVolumeID(), session.referenceVolume.GetID())
+            self.assertEqual(view.mrmlSliceCompositeNode().GetForegroundVolumeID(), session.frameVolumes[3].GetID())
+            session.setReferenceWindow(10.0, 500.0)
+            self.assertEqual(session.referenceVolume.GetDisplayNode().GetWindowLevelMax(), 500.0)
+            session.setFrameWindow(0.0, 300.0)
+            self.assertEqual(session.frameVolumes[0].GetDisplayNode().GetWindowLevelMax(), 300.0)
             session.setOrientation("Axial")
             self.assertEqual(view.mrmlSliceNode().GetOrientation(), "Axial")
             self.delayDisplay("Dynamic PET Motion Correction open")
