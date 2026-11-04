@@ -33,6 +33,16 @@ FAILED = "failed"
 NOT_RUN = "not run"
 UNCHANGED = (REFERENCE, LOW_ACTIVITY, OVER_LIMIT, FAILED, NOT_RUN)   # frames kept as they were
 
+# the six rigid motion components of the motion plots: (key, component, label, colour)
+COMPONENTS = (
+    ("shift", 0, "x (R)", "#D62728"),
+    ("shift", 1, "y (A)", "#2CA02C"),
+    ("shift", 2, "z (S)", "#1F77B4"),
+    ("angles", 0, "pitch (about R)", "#FF7F0E"),
+    ("angles", 1, "roll (about A)", "#9467BD"),
+    ("angles", 2, "yaw (about S)", "#17BECF"),
+)
+
 STATUS_SHORT = {REFERENCE: "ref", LOW_ACTIVITY: "low", OVER_LIMIT: "limit", FAILED: "failed", NOT_RUN: ""}
 
 
@@ -207,12 +217,19 @@ def summaryText(statuses):
     return ", ".join(f"{n} {s}" for s, n in counts if n)
 
 
-def durationWeightedMean(arrays, durations):
-    """Summed image of the frames: the mean weighted by the frame durations (plain mean when a duration is
-    missing), as the loader makes the dynamic summed volume."""
-    weighted = durations is not None and all(d is not None and d > 0 for d in durations)
-    weights = np.asarray(durations if weighted else [1.0] * len(arrays), dtype=np.float64)
-    total = np.zeros(np.asarray(arrays[0]).shape, dtype=np.float64)
-    for array, w in zip(arrays, weights):
-        total += np.asarray(array, dtype=np.float64) * w
-    return (total / weights.sum()).astype(np.float32)
+def plotLimit(values, minimum):
+    """Half height of a motion plot axis that is symmetric about 0: the largest absolute value plus 10 %, at
+    least minimum."""
+    largest = max([abs(v) for v in values] or [0.0])
+    return max(minimum, largest * 1.1)
+
+
+def plotTicks(limit, count=3):
+    """Ticks of a symmetric axis -limit..limit: 0 and about count round steps either side."""
+    if not limit > 0:
+        return [0.0]
+    rough = limit / float(count)
+    magnitude = 10.0 ** math.floor(math.log10(rough))
+    step = next(m * magnitude for m in (1, 2, 2.5, 5, 10) if m * magnitude >= rough * (1 - 1e-9))
+    n = int(math.floor(limit / step + 1e-9))
+    return [float(f"{i * step:.10g}") for i in range(-n, n + 1)]

@@ -222,3 +222,11 @@ def zoomRange(start, end, center, factor, lowest, highest, minimumSpan=1.0):
     newStart = center - ratio * span
     newStart = min(max(newStart, lowest), highest - span)
     return newStart, newStart + span
+
+
+def panRange(start, end, steps, lowest, highest, fraction=0.1):
+    """Time window [start, end] moved by steps x fraction of its width (positive: earlier), kept inside
+    [lowest, highest]."""
+    span = end - start
+    newStart = min(max(start - steps * fraction * span, lowest), max(lowest, highest - span))
+    return newStart, newStart + span

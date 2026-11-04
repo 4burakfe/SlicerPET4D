@@ -36,6 +36,7 @@ if globals().get("__file__") and _MODULE_DIR not in sys.path:
 
 from DICOMGatedDynamicPETLib import colormaps, dynamicviews  # noqa: E402
 from DICOMGatedDynamicPETLib import motioncorrection as mc  # noqa: E402
+from DICOMGatedDynamicPETLib.motionplot import MotionPlot  # noqa: E402
 from DICOMGatedDynamicPETLib.timeline import FrameTimeline  # noqa: E402
 
 LAYOUT_ID = 7802
@@ -253,93 +254,133 @@ class DynamicPETMotionCorrectionLogic(ScriptedLoadableModuleLogic):
                      + mc.summaryText([r["status"] for r in results]))
         return results
 
-    # --- saving -----------------------------------------------------------------------------------
-    def saveCorrected(self, sequenceNode, results, settings, referenceText, summed=True):
-        """A new sequence (with browser) of the corrected frames, a table of the per-frame motion and, optionally,
-        the duration-weighted summed volume of the corrected frames. Returns (sequence, table, summed or None)."""
-        scene = slicer.mrmlScene
-        baseName = scene.GenerateUniqueName(f"{sequenceNode.GetName()} motion corrected")
+    # --- harden / revert --------------------------------------------------------------------------
+    @staticmethod
+    def summedVolumeOf(sequenceNode):
+        nodeID = sequenceNode.GetAttribute(PREFIX + "SummedVolumeID")
+        return slicer.mrmlScene.GetNodeByID(nodeID) if nodeID else None
+
+    def harden(self, sequenceNode, results, settings, referenceText, resum=True, summedSource=None):
+        """Write the corrected frames into the sequence (over the original voxels), with the motion on every frame
+        and a table of the per-frame motion; with resum, a new summed volume of the corrected frames, as the loader
+        makes it (duration-weighted mean). summedSource is the summed image it replaces (default: the sequence's
+        own). Returns the undo record for revert(); it keeps the original voxels in memory."""
         method = " + ".join(mc.transformTypes(settings["method"], settings["twoPass"], settings["secondMethod"]))
-        newSequence = scene.AddNewNodeByClass("vtkMRMLSequenceNode", baseName)
-        newSequence.SetIndexName(sequenceNode.GetIndexName())
-        newSequence.SetIndexUnit(sequenceNode.GetIndexUnit())
-        newSequence.SetIndexType(sequenceNode.GetIndexType())
-        for name in sequenceNode.GetAttributeNames() or ():
-            if name not in (PREFIX + "SummedVolumeID",):
-                newSequence.SetAttribute(name, sequenceNode.GetAttribute(name))
-        newSequence.SetAttribute(MC_PREFIX + "Source", sequenceNode.GetID())
-        newSequence.SetAttribute(MC_PREFIX + "Method", method)
-        newSequence.SetAttribute(MC_PREFIX + "Reference", referenceText)
-        arrays, durations, upper = [], [], 0.0
+        frameKeys = [MC_PREFIX + key for key in ("Status", "ShiftRASMm", "AnglesRASDeg")]
+        sequenceKeys = [MC_PREFIX + key for key in ("Method", "Reference", "TableID")] + [PREFIX + "SummedVolumeID"]
+        undo = {"sequence": sequenceNode, "images": {}, "frameAttributes": {}, "created": [],
+                "sequenceAttributes": {key: sequenceNode.GetAttribute(key) for key in sequenceKeys}}
         for i, result in enumerate(results):
-            source = sequenceNode.GetNthDataNode(i)
-            node = scene.AddNewNodeByClass("vtkMRMLScalarVolumeNode", f"{baseName} F{i + 1}")
-            image = vtk.vtkImageData()
-            image.DeepCopy(result["image"] if result["image"] is not None else source.GetImageData())
-            node.SetAndObserveImageData(image)
-            matrix = vtk.vtkMatrix4x4()
-            source.GetIJKToRASMatrix(matrix)
-            node.SetIJKToRASMatrix(matrix)
-            for name in source.GetAttributeNames() or ():
-                node.SetAttribute(name, source.GetAttribute(name))
-            try:
-                node.SetVoxelValueUnits(source.GetVoxelValueUnits())
-            except Exception:
-                pass
+            node = sequenceNode.GetNthDataNode(i)
+            undo["frameAttributes"][i] = {key: node.GetAttribute(key) for key in frameKeys}
+            if result["image"] is not None:
+                undo["images"][i] = node.GetImageData()
+                node.SetAndObserveImageData(result["image"])
             node.SetAttribute(MC_PREFIX + "Status", result["status"])
             if result["shift"] is not None:
                 node.SetAttribute(MC_PREFIX + "ShiftRASMm", mc.vectorText(result["shift"]))
                 node.SetAttribute(MC_PREFIX + "AnglesRASDeg", mc.vectorText(result["angles"]))
-            array = slicer.util.arrayFromVolume(node)
-            arrays.append(array.copy())
-            upper = max(upper, float(np.percentile(array, AUTO_PERCENTILE)) if array.size else 0.0)
-            try:
-                durations.append(float(source.GetAttribute(PREFIX + "DurationS")))
-            except (TypeError, ValueError):
-                durations.append(None)
-            newSequence.SetDataNodeAtValue(node, sequenceNode.GetNthIndexValue(i))
-            scene.RemoveNode(node)
-
-        browser = scene.AddNewNodeByClass("vtkMRMLSequenceBrowserNode", f"{baseName} browser")
-        slicer.modules.sequences.logic().AddSynchronizedNode(newSequence, None, browser)
-        if hasattr(browser, "SetAndObservePrimarySequenceNodeID"):
-            browser.SetAndObservePrimarySequenceNodeID(newSequence.GetID())
-        else:
-            browser.SetAndObserveMasterSequenceNodeID(newSequence.GetID())
-        browser.SetPlaybackLooped(True)
-        proxy = browser.GetProxyNode(newSequence)
-        proxy.SetName(f"{baseName} (current frame)")
-        _setPetDisplay(proxy, upper)
-
-        table = self.motionTable(f"{baseName} motion", results)
-        table.SetAttribute(MC_PREFIX + "SequenceNodeID", newSequence.GetID())
-        newSequence.SetAttribute(MC_PREFIX + "TableID", table.GetID())
+        sequenceNode.SetAttribute(MC_PREFIX + "Method", method)
+        sequenceNode.SetAttribute(MC_PREFIX + "Reference", referenceText)
+        table = self.motionTable(f"{sequenceNode.GetName()} motion", results)
+        table.SetAttribute(MC_PREFIX + "SequenceNodeID", sequenceNode.GetID())
+        sequenceNode.SetAttribute(MC_PREFIX + "TableID", table.GetID())
+        undo["created"].append(table)
 
         summedNode = None
-        if summed and arrays:
-            name = sequenceNode.GetName()
-            summedName = name.replace(" dynamic ", " summed ", 1) if " dynamic " in name else f"{name} summed"
-            summedNode = scene.AddNewNodeByClass("vtkMRMLScalarVolumeNode",
-                                                 scene.GenerateUniqueName(f"{summedName} motion corrected"))
-            slicer.util.updateVolumeFromArray(summedNode, mc.durationWeightedMean(arrays, durations))
-            matrix = vtk.vtkMatrix4x4()
-            sequenceNode.GetNthDataNode(0).GetIJKToRASMatrix(matrix)
-            summedNode.SetIJKToRASMatrix(matrix)
-            first = sequenceNode.GetNthDataNode(0)
-            for name in ("DICOM.Modality", PREFIX + "Units"):
-                if first.GetAttribute(name):
-                    summedNode.SetAttribute(name, first.GetAttribute(name))
-            try:
-                summedNode.SetVoxelValueUnits(first.GetVoxelValueUnits())
-            except Exception:
-                pass
-            summedNode.SetAttribute(PREFIX + "StaticFrom", f"{len(arrays)} motion corrected frames summed")
-            summedNode.SetAttribute(PREFIX + "DynamicSequence", newSequence.GetID())
-            newSequence.SetAttribute(PREFIX + "SummedVolumeID", summedNode.GetID())
-            _setPetDisplay(summedNode, float(np.percentile(slicer.util.arrayFromVolume(summedNode), AUTO_PERCENTILE)))
+        if resum:
+            source = summedSource or self.summedVolumeOf(sequenceNode)
+            summedNode = self.resum(sequenceNode, source)
+            sequenceNode.SetAttribute(PREFIX + "SummedVolumeID", summedNode.GetID())
+            undo["created"].append(summedNode)
+        sequenceNode.Modified()
+        self.refreshProxies(sequenceNode)
+        self._placeNextTo(sequenceNode, undo["created"])
+        logging.info(f"Dynamic PET motion correction hardened into '{sequenceNode.GetName()}' ({method}, "
+                     f"{len(undo['images'])} frames changed)")
+        return undo, table, summedNode
 
-        self._placeNextTo(sequenceNode, [newSequence, browser, proxy, table] + ([summedNode] if summedNode else []))
-        return newSequence, table, summedNode
+    def resum(self, sequenceNode, source=None):
+        """New summed volume of the frames of the sequence: duration-weighted mean (petseries, as the loader), with
+        the attributes and display of the summed image it replaces."""
+        from DICOMGatedDynamicPETLib import petseries
+        count = sequenceNode.GetNumberOfDataNodes()
+        arrays = [self.frameArray(sequenceNode, i) for i in range(count)]
+        durations = []
+        for i in range(count):
+            try:
+                durations.append(float(sequenceNode.GetNthDataNode(i).GetAttribute(PREFIX + "DurationS")))
+            except (TypeError, ValueError):
+                durations.append(None)
+        scene = slicer.mrmlScene
+        if source is not None:
+            name = f"{source.GetName()} motion corrected"
+        else:
+            base = sequenceNode.GetName()
+            name = (base.replace(" dynamic ", " summed ", 1) if " dynamic " in base else f"{base} summed") + \
+                " motion corrected"
+        summed = scene.AddNewNodeByClass("vtkMRMLScalarVolumeNode", scene.GenerateUniqueName(name))
+        array = petseries.durationWeightedMean(arrays, durations).astype(np.float32)
+        slicer.util.updateVolumeFromArray(summed, array)
+        first = sequenceNode.GetNthDataNode(0)
+        matrix = vtk.vtkMatrix4x4()
+        first.GetIJKToRASMatrix(matrix)
+        summed.SetIJKToRASMatrix(matrix)
+        template = source if source is not None else first
+        for key in template.GetAttributeNames() or ():
+            summed.SetAttribute(key, template.GetAttribute(key))
+        try:
+            summed.SetVoxelValueUnits(template.GetVoxelValueUnits())
+        except Exception:
+            pass
+        weighted = all(d and d > 0 for d in durations)
+        summed.SetAttribute(PREFIX + "StaticFrom", f"{count} motion corrected frames summed, "
+                            + ("duration weighted" if weighted else "frame durations unknown, plain mean"))
+        summed.SetAttribute(PREFIX + "SummedFrames", str(count))
+        summed.SetAttribute(PREFIX + "DynamicSequence", sequenceNode.GetID())
+        summed.SetAttribute(MC_PREFIX + "Method", sequenceNode.GetAttribute(MC_PREFIX + "Method") or "")
+        summed.CreateDefaultDisplayNodes()
+        sourceDisplay = source.GetDisplayNode() if source is not None else None
+        if sourceDisplay is not None:
+            summed.GetDisplayNode().CopyContent(sourceDisplay)
+        else:
+            _setPetDisplay(summed, float(np.percentile(array, AUTO_PERCENTILE)) if array.size else 1.0)
+        return summed
+
+    def revert(self, undo):
+        """Undo harden(): the original voxels and attributes back, the table and the new summed volume removed."""
+        sequenceNode = undo["sequence"]
+        for i, image in undo["images"].items():
+            sequenceNode.GetNthDataNode(i).SetAndObserveImageData(image)
+        for i, attributes in undo["frameAttributes"].items():
+            node = sequenceNode.GetNthDataNode(i)
+            for key, value in attributes.items():
+                if value is None:
+                    node.RemoveAttribute(key)
+                else:
+                    node.SetAttribute(key, value)
+        for key, value in undo["sequenceAttributes"].items():
+            if value is None:
+                sequenceNode.RemoveAttribute(key)
+            else:
+                sequenceNode.SetAttribute(key, value)
+        for node in undo["created"]:
+            if slicer.mrmlScene.IsNodePresent(node):
+                slicer.mrmlScene.RemoveNode(node)
+        sequenceNode.Modified()
+        self.refreshProxies(sequenceNode)
+
+    @staticmethod
+    def refreshProxies(sequenceNode):
+        """The browsers of the sequence show the frames as they are now."""
+        try:
+            logic = slicer.modules.sequences.logic()
+            browsers = vtk.vtkCollection()
+            logic.GetBrowserNodesForSequenceNode(sequenceNode, browsers)
+            for b in range(browsers.GetNumberOfItems()):
+                logic.UpdateProxyNodesFromSequences(browsers.GetItemAsObject(b))
+        except Exception:
+            logging.warning("Could not refresh the sequence browser", exc_info=True)
 
     @staticmethod
     def motionTable(name, results):
@@ -423,8 +464,12 @@ class MotionCorrectionSession:
         self.previousLayout = None
         self.currentIndex = 0
         self.opacity = DEFAULT_OPACITY
-        self.frameWindows = True           # each frame its own window
+        self.frameWindows = False          # each frame its own window
+        self.frameColor = FRAME_COLORMAP
+        self.referenceColor = REFERENCE_COLORMAP
         self.results = None
+        self.hardened = False              # the corrections are in the sequence itself
+        self.plots = []                    # shift (mm) and angle (deg) plots, rigid only
         self.showCorrected = True
         self.originalUppers = []
         self.correctedUppers = []
@@ -455,6 +500,7 @@ class MotionCorrectionSession:
             self.dock.deleteLater()
             self.dock = None
             self.timeline = None
+            self.plots = []
         if self.previousLayout is not None and layoutManager.layout == LAYOUT_ID:
             layoutManager.setLayout(self.previousLayout)
         for node in self.frameVolumes + [self.referenceHelper]:
@@ -465,7 +511,7 @@ class MotionCorrectionSession:
 
     # --- volumes ---------------------------------------------------------------------------------
     def _makeFrameVolumes(self):
-        frameColor = colormaps.colorNodeForLabel(FRAME_COLORMAP).GetID()
+        frameColor = colormaps.colorNodeForLabel(self.frameColor).GetID()
         for index in self.viewFrames:
             volume = DynamicPETMotionCorrectionLogic.helperVolume(
                 f"{self.sequenceNode.GetName()} MC view F{index + 1}", self.sequenceNode.GetNthDataNode(index))
@@ -493,7 +539,7 @@ class MotionCorrectionSession:
             f"{self.sequenceNode.GetName()} MC reference", source)
         helper.CreateDefaultDisplayNodes()
         display = helper.GetDisplayNode()
-        display.SetAndObserveColorNodeID(colormaps.colorNodeForLabel(REFERENCE_COLORMAP).GetID())
+        display.SetAndObserveColorNodeID(colormaps.colorNodeForLabel(self.referenceColor).GetID())
         display.AutoWindowLevelOff()
         display.SetWindowLevelMinMax(0.0, _percentile(slicer.util.arrayFromVolume(helper)))
         display.SetInterpolate(True)
@@ -608,13 +654,24 @@ class MotionCorrectionSession:
         finally:
             self._link(self.linked)
 
+    def setFrameColor(self, label):
+        self.frameColor = label
+        colorID = colormaps.colorNodeForLabel(label).GetID()
+        for volume in self.frameVolumes:
+            volume.GetDisplayNode().SetAndObserveColorNodeID(colorID)
+
+    def setReferenceColor(self, label):
+        self.referenceColor = label
+        if self.referenceHelper is not None:
+            self.referenceHelper.GetDisplayNode().SetAndObserveColorNodeID(colormaps.colorNodeForLabel(label).GetID())
+
     def setFrameWindows(self, perFrame):
         self.frameWindows = perFrame
         self._applyFrameWindows()
 
     def _applyFrameWindows(self):
-        uppers = self.correctedUppers if (self.results and self.showCorrected and self.correctedUppers) \
-            else self.originalUppers
+        uppers = self.correctedUppers if (self.results and (self.showCorrected or self.hardened)
+                                          and self.correctedUppers) else self.originalUppers
         common = max(uppers or [1.0])
         for volume, index in zip(self.frameVolumes, self.viewFrames):
             display = volume.GetDisplayNode()
@@ -627,9 +684,11 @@ class MotionCorrectionSession:
             display.SetUpperThreshold(max(common, upper) * 1e6)
 
     # --- results ---------------------------------------------------------------------------------
-    def setResults(self, results, motionRows):
-        """Registration results (DynamicPETMotionCorrectionLogic.registerFrames), or None to clear them."""
+    def setResults(self, results, motionRows, hardened=False):
+        """Registration results (DynamicPETMotionCorrectionLogic.registerFrames), or None to clear them. hardened:
+        the corrected frames are in the sequence itself (the views show the sequence, the motion stays shown)."""
         self.results = results
+        self.hardened = bool(results) and hardened
         self.correctedUppers = []
         if results:
             from vtk.util import numpy_support
@@ -639,16 +698,20 @@ class MotionCorrectionSession:
                     continue
                 values = numpy_support.vtk_to_numpy(result["image"].GetPointData().GetScalars())
                 self.correctedUppers.append(_percentile(values))
+        entries = [{k: r[k] for k in ("status", "shift", "angles", "message")} for r in results] \
+            if results and motionRows else []
         if self.timeline is not None:
-            self.timeline.setMotion([{k: r[k] for k in ("status", "shift", "angles", "message")} for r in results]
-                                    if results and motionRows else [])
+            self.timeline.setMotion(entries)
+        for plot in self.plots:
+            plot.setMotion(entries)
+            plot.setVisible(bool(entries))
         self.setShowCorrected(self.showCorrected)
         self._updateToolbar()
 
     def setShowCorrected(self, corrected):
         self.showCorrected = corrected
         for volume, index in zip(self.frameVolumes, self.viewFrames):
-            result = self.results[index] if self.results else None
+            result = self.results[index] if (self.results and not self.hardened) else None
             image = result["image"] if (corrected and result and result["image"] is not None) else None
             volume.SetAndObserveImageData(image if image is not None
                                           else self.sequenceNode.GetNthDataNode(index).GetImageData())
@@ -682,7 +745,7 @@ class MotionCorrectionSession:
                 status = self.results[index]["status"]
                 if status != mc.REGISTERED:
                     text += f"\n{status}"
-                elif not self.showCorrected:
+                elif not self.showCorrected and not self.hardened:
                     text += "\noriginal"
             actor.SetInput(text)
             highlight = index == self.currentIndex
@@ -715,22 +778,35 @@ class MotionCorrectionSession:
         self.frameLabel.setMinimumWidth(320)
         self.summaryLabel = qt.QLabel()
         showAllButton = qt.QPushButton("Show all")
-        showAllButton.toolTip = "Show the whole series in the timeline (the mouse wheel over the timeline zooms)"
+        showAllButton.toolTip = ("Show the whole series (mouse wheel: zoom in time, Shift + wheel: pan, Ctrl + wheel "
+                                 "over the motion plot: zoom its values, double click: reset)")
         for widget in (previousButton, nextButton, self.frameLabel):
             toolbar.addWidget(widget)
         toolbar.addStretch(1)
         toolbar.addWidget(self.summaryLabel)
         toolbar.addWidget(showAllButton)
         layout.addLayout(toolbar)
+        self.plots = [MotionPlot("shift"), MotionPlot("angles")]
+        for plot in self.plots:
+            plot.setFrames(self.intervals)
+            plot.onCurrentFrameChanged = self.setCurrentIndex
+            plot.onViewRangeChanged = self._onViewRangeChanged
+            plot.setVisible(False)       # shown after a rigid registration
         self.timeline = FrameTimeline()
         self.timeline.setFrames(self.intervals)
         self.timeline.onCurrentFrameChanged = self.setCurrentIndex
-        layout.addWidget(self.timeline, 1)
+        self.timeline.onViewRangeChanged = self._onViewRangeChanged
+        splitter = qt.QSplitter(qt.Qt.Vertical)
+        for plot in self.plots:
+            splitter.addWidget(plot)
+        splitter.addWidget(self.timeline)
+        splitter.setChildrenCollapsible(False)
+        layout.addWidget(splitter, 1)
         self.dock.setWidget(container)
         previousButton.connect("clicked()", lambda: self.setCurrentIndex(max(0, self.currentIndex - 1)))
         nextButton.connect("clicked()", lambda: self.setCurrentIndex(min(len(self.intervals) - 1,
                                                                          self.currentIndex + 1)))
-        showAllButton.connect("clicked()", lambda: self.timeline.setViewRange(*self.timeline.fullRange()))
+        showAllButton.connect("clicked()", lambda: self._onViewRangeChanged(*self.timeline.fullRange()))
         mainWindow.addDockWidget(qt.Qt.BottomDockWidgetArea, self.dock)
         try:
             mainWindow.resizeDocks([self.dock], [max(170, int(mainWindow.height / 3))], qt.Qt.Vertical)
@@ -738,11 +814,19 @@ class MotionCorrectionSession:
             self.dock.setMinimumHeight(max(170, int(mainWindow.height / 3)))
         self._updateToolbar()
 
+    def _onViewRangeChanged(self, start, end):
+        """The time window changed in the plot or the timeline: both show it."""
+        for widget in [self.timeline] + self.plots:
+            if widget is not None:
+                widget.setViewRange(start, end)
+
     def setCurrentIndex(self, index):
         if 0 <= index < len(self.intervals):
             self.currentIndex = index
             if self.timeline is not None:
                 self.timeline.setCurrentIndex(index)
+            for plot in self.plots:
+                plot.setCurrentIndex(index)
             self._updateOverlays()
             self._updateToolbar()
 
@@ -778,6 +862,7 @@ class DynamicPETMotionCorrectionWidget(ScriptedLoadableModuleWidget, VTKObservat
         self.activities = []
         self.results = None
         self.resultsSettings = None
+        self.undo = None              # harden() record, for Revert
         self._updating = False
 
         # --- input and reference
@@ -808,6 +893,11 @@ class DynamicPETMotionCorrectionWidget(ScriptedLoadableModuleWidget, VTKObservat
         self.summedSelector.toolTip = ("Optional: register to this volume (e.g. the summed image of the series) "
                                        "instead of a frame. All frames are then registered.")
         form.addRow("Summed image (optional):", self.summedSelector)
+        self.resumCheck = qt.QCheckBox("Resum the summed image")
+        self.resumCheck.checked = True
+        self.resumCheck.toolTip = ("On Harden transforms, make a new summed image of the corrected frames "
+                                   "(duration-weighted mean, as the DICOM loader) next to the old one")
+        form.addRow(self.resumCheck)
         self.infoLabel = qt.QLabel()
         self.infoLabel.wordWrap = True
         form.addRow(self.infoLabel)
@@ -829,9 +919,19 @@ class DynamicPETMotionCorrectionWidget(ScriptedLoadableModuleWidget, VTKObservat
         self.opacitySlider.toolTip = "Opacity of the frames (hot iron) over the reference (inverted grey)"
         view.addRow("Frame opacity:", self.opacitySlider)
         self.frameWindowCheck = qt.QCheckBox("Each frame its own window (0 - 99.9th percentile)")
-        self.frameWindowCheck.checked = True
+        self.frameWindowCheck.checked = False
         self.frameWindowCheck.toolTip = "Off: one window for all frames, so early low-count frames look faint"
         view.addRow(self.frameWindowCheck)
+        self.frameColorCombo = qt.QComboBox()
+        self.referenceColorCombo = qt.QComboBox()
+        for combo, default in ((self.frameColorCombo, FRAME_COLORMAP), (self.referenceColorCombo, REFERENCE_COLORMAP)):
+            for label in colormaps.LABELS:
+                combo.addItem(label)
+            combo.setCurrentIndex(max(0, combo.findText(default)))
+        self.frameColorCombo.toolTip = "Color map of the frames (small views)"
+        self.referenceColorCombo.toolTip = "Color map of the reference (large view, and under every frame)"
+        view.addRow("Frame colors:", self.frameColorCombo)
+        view.addRow("Reference colors:", self.referenceColorCombo)
         self.linkCheck = qt.QCheckBox("Link views (slice, zoom, pan)")
         self.linkCheck.checked = True
         view.addRow(self.linkCheck)
@@ -939,23 +1039,22 @@ class DynamicPETMotionCorrectionWidget(ScriptedLoadableModuleWidget, VTKObservat
         self.registerButton = qt.QPushButton("Register frames")
         self.registerButton.toolTip = "Register every frame to the reference and show the corrected frames"
         reg.addRow(self.registerButton)
-        self.layout.addWidget(regBox)
-
-        # --- result
-        resultBox = qt.QGroupBox("Result")
-        result = qt.QFormLayout(resultBox)
+        self.revertButton = qt.QPushButton("Revert changes")
+        self.revertButton.toolTip = ("Before hardening: drop the registration. After hardening: put the original "
+                                     "frames back and remove the motion table and the new summed image.")
+        self.revertButton.enabled = False
+        self.hardenButton = qt.QPushButton("Harden transforms")
+        self.hardenButton.toolTip = ("Write the corrected frames into the sequence (over the original frames), with "
+                                     "a table of the per-frame motion and, with Resum, a new summed image")
+        self.hardenButton.enabled = False
+        row = qt.QHBoxLayout()
+        row.addWidget(self.revertButton)
+        row.addWidget(self.hardenButton)
+        reg.addRow(row)
         self.resultLabel = qt.QLabel("Not registered yet.")
         self.resultLabel.wordWrap = True
-        result.addRow(self.resultLabel)
-        self.summedCheck = qt.QCheckBox("Also make the summed volume of the corrected frames")
-        self.summedCheck.checked = True
-        result.addRow(self.summedCheck)
-        self.saveButton = qt.QPushButton("Save motion corrected series")
-        self.saveButton.toolTip = ("A new sequence of the corrected frames (same timing), a table of the per-frame "
-                                   "motion and, optionally, its summed volume")
-        self.saveButton.enabled = False
-        result.addRow(self.saveButton)
-        self.layout.addWidget(resultBox)
+        reg.addRow(self.resultLabel)
+        self.layout.addWidget(regBox)
         self.layout.addStretch(1)
 
         self.referenceCombo.connect("currentIndexChanged(int)", self.onReferenceChanged)
@@ -963,6 +1062,8 @@ class DynamicPETMotionCorrectionWidget(ScriptedLoadableModuleWidget, VTKObservat
         self.orientationCombo.connect("currentIndexChanged(int)", self.onOrientationChanged)
         self.opacitySlider.connect("valueChanged(double)", self.onOpacityChanged)
         self.frameWindowCheck.connect("toggled(bool)", self.onFrameWindowToggled)
+        self.frameColorCombo.connect("currentIndexChanged(int)", self.onFrameColorChanged)
+        self.referenceColorCombo.connect("currentIndexChanged(int)", self.onReferenceColorChanged)
         self.linkCheck.connect("toggled(bool)", self.onLinkToggled)
         self.showCorrectedRadio.connect("toggled(bool)", self.onShowCorrectedToggled)
         self.openButton.connect("clicked()", self.onOpen)
@@ -973,7 +1074,8 @@ class DynamicPETMotionCorrectionWidget(ScriptedLoadableModuleWidget, VTKObservat
         self.lowActivitySpin.connect("valueChanged(double)", self._updateInfo)
         self.limitCheck.connect("toggled(bool)", lambda on: setattr(self.limitSpin, "enabled", on))
         self.registerButton.connect("clicked()", self.onRegister)
-        self.saveButton.connect("clicked()", self.onSave)
+        self.revertButton.connect("clicked()", self.onRevert)
+        self.hardenButton.connect("clicked()", self.onHarden)
         self.addObserver(slicer.mrmlScene, slicer.mrmlScene.StartCloseEvent, self.onSceneClose)
         self.addObserver(slicer.mrmlScene, slicer.mrmlScene.NodeRemovedEvent, self.onNodeRemoved)
         self.onMethodChanged()
@@ -1082,6 +1184,8 @@ class DynamicPETMotionCorrectionWidget(ScriptedLoadableModuleWidget, VTKObservat
                                                    self.linkCheck.checked)
             self.session.opacity = self.opacitySlider.value
             self.session.frameWindows = self.frameWindowCheck.checked
+            self.session.frameColor = self.frameColorCombo.currentText
+            self.session.referenceColor = self.referenceColorCombo.currentText
             self.session.showCorrected = self.showCorrectedRadio.checked
             self.session.open()
             summed = self.summedSelector.currentNode()
@@ -1090,7 +1194,8 @@ class DynamicPETMotionCorrectionWidget(ScriptedLoadableModuleWidget, VTKObservat
             else:
                 self.session.setReference(frameIndex=self.referenceFrame())
             if results:
-                self.session.setResults(results, mc.showsMotionRows(self.resultsSettings["method"]))
+                self.session.setResults(results, mc.showsMotionRows(self.resultsSettings["method"]),
+                                        hardened=self.undo is not None)
         except Exception as error:
             logging.exception("Could not open Dynamic PET Motion Correction")
             slicer.util.errorDisplay(f"Could not open the motion correction layout:\n{error}")
@@ -1129,6 +1234,14 @@ class DynamicPETMotionCorrectionWidget(ScriptedLoadableModuleWidget, VTKObservat
         if self.session is not None:
             self.session.setFrameWindows(checked)
 
+    def onFrameColorChanged(self, index):
+        if self.session is not None:
+            self.session.setFrameColor(self.frameColorCombo.currentText)
+
+    def onReferenceColorChanged(self, index):
+        if self.session is not None:
+            self.session.setReferenceColor(self.referenceColorCombo.currentText)
+
     def onLinkToggled(self, checked):
         if self.session is not None:
             self.session.setLinked(checked)
@@ -1139,14 +1252,21 @@ class DynamicPETMotionCorrectionWidget(ScriptedLoadableModuleWidget, VTKObservat
 
     # --- registration --------------------------------------------------------------------------
     def _clearResults(self):
+        """Forget the registration (and, after hardening, the chance to revert it: the sequence stays hardened)."""
         self.results = None
         self.resultsSettings = None
-        if hasattr(self, "saveButton"):
-            self.saveButton.enabled = False
-            self.showWidget.enabled = False
+        self.undo = None
+        if hasattr(self, "hardenButton"):
+            self._updateButtons()
             self.resultLabel.text = "Not registered yet."
         if getattr(self, "session", None) is not None:
             self.session.setResults(None, False)
+
+    def _updateButtons(self):
+        pending = bool(self.results) and self.undo is None
+        self.hardenButton.enabled = pending and any(r["status"] == mc.REGISTERED for r in self.results)
+        self.revertButton.enabled = pending or self.undo is not None
+        self.showWidget.enabled = pending
 
     def onRegister(self):
         sequence = self.sequenceSelector.currentNode()
@@ -1179,30 +1299,56 @@ class DynamicPETMotionCorrectionWidget(ScriptedLoadableModuleWidget, VTKObservat
         finally:
             qt.QApplication.restoreOverrideCursor()
             dialog.close()
-        self.results, self.resultsSettings = results, settings
+        self.results, self.resultsSettings, self.undo = results, settings, None
         self.session.setResults(results, mc.showsMotionRows(settings["method"]))
-        self.showWidget.enabled = True
-        self.saveButton.enabled = any(r["status"] == mc.REGISTERED for r in results)
+        self._updateButtons()
         method = " + ".join(mc.transformTypes(settings["method"], settings["twoPass"], settings["secondMethod"]))
         self.resultLabel.text = (f"{method} to {self.session.referenceText}: "
                                  f"{mc.summaryText([r['status'] for r in results])}.")
         if any(r["status"] == mc.NOT_RUN for r in results):
             self.resultLabel.text += " Stopped before the last frame."
 
-    def onSave(self):
+    def onHarden(self):
         sequence = self.sequenceSelector.currentNode()
-        if sequence is None or not self.results:
+        if sequence is None or not self.results or self.undo is not None:
             return
+        changed = sum(1 for r in self.results if r["image"] is not None)
+        resum = self.resumCheck.checked
+        if not slicer.util.confirmYesNoDisplay(
+                f"This overwrites {changed} frame(s) of '{sequence.GetName()}' with the motion corrected ones"
+                + (" and makes a new summed image" if resum else "") + ".\n\n"
+                "Revert changes can undo it until you pick another series or reference, or close the scene. "
+                "Save the scene to keep the corrected frames.\n\nAre you sure?",
+                windowTitle="Harden transforms"):
+            return
+        summedSource = self.summedSelector.currentNode() or self.logic.summedVolumeOf(sequence)
+        qt.QApplication.setOverrideCursor(qt.Qt.WaitCursor)
         try:
-            newSequence, table, summed = self.logic.saveCorrected(sequence, self.results, self.resultsSettings,
-                                                                  self.session.referenceText if self.session else "",
-                                                                  self.summedCheck.checked)
+            self.undo, table, summed = self.logic.harden(sequence, self.results, self.resultsSettings,
+                                                         self.session.referenceText if self.session else "",
+                                                         resum, summedSource)
         except Exception as error:
-            logging.exception("Could not save the motion corrected series")
-            slicer.util.errorDisplay(f"Could not save the motion corrected series:\n{error}")
+            logging.exception("Could not harden the motion correction")
+            slicer.util.errorDisplay(f"Could not harden the motion correction:\n{error}")
             return
-        self.resultLabel.text += f"\nSaved as '{newSequence.GetName()}' with the table '{table.GetName()}'" + \
-            (f" and '{summed.GetName()}'." if summed is not None else ".")
+        finally:
+            qt.QApplication.restoreOverrideCursor()
+        if self.session is not None:
+            self.session.setResults(self.results, mc.showsMotionRows(self.resultsSettings["method"]), hardened=True)
+        self._updateButtons()
+        self.resultLabel.text += (f"\nHardened into '{sequence.GetName()}' (table '{table.GetName()}'"
+                                  + (f", new summed image '{summed.GetName()}'" if summed is not None else "") + ").")
+
+    def onRevert(self):
+        if self.undo is not None:
+            try:
+                self.logic.revert(self.undo)
+            except Exception as error:
+                logging.exception("Could not revert the motion correction")
+                slicer.util.errorDisplay(f"Could not revert the motion correction:\n{error}")
+                return
+        self._clearResults()
+        self.resultLabel.text = "Reverted: the original frames are shown."
 
     # --- scene ---------------------------------------------------------------------------------
     def enter(self):
@@ -1219,6 +1365,7 @@ class DynamicPETMotionCorrectionWidget(ScriptedLoadableModuleWidget, VTKObservat
     def onSceneClose(self, caller, event):
         self.onClose()
         self.results = None
+        self.undo = None
 
     @vtk.calldata_type(vtk.VTK_OBJECT)
     def onNodeRemoved(self, caller, event, node):
@@ -1316,12 +1463,25 @@ class DynamicPETMotionCorrectionTest(ScriptedLoadableModuleTest):
         self.assertEqual(limited[3]["status"], mc.OVER_LIMIT)
         self.assertIsNone(limited[3]["image"])
 
-        newSequence, table, summed = logic.saveCorrected(sequence, results, logic.defaultSettings(), "frame 1")
-        self.assertEqual(newSequence.GetNumberOfDataNodes(), 5)
-        self.assertEqual(newSequence.GetNthDataNode(3).GetAttribute(MC_PREFIX + "Status"), mc.REGISTERED)
-        self.assertEqual(newSequence.GetNthDataNode(0).GetAttribute(PREFIX + "StartFromStudyStartS"), "0.0")
+        # harden writes the corrected frames into the sequence, revert puts the originals back
+        original = slicer.util.arrayFromVolume(sequence.GetNthDataNode(3)).copy()
+        undo, table, summed = logic.harden(sequence, results, logic.defaultSettings(), "frame 1")
+        hardened = slicer.util.arrayFromVolume(sequence.GetNthDataNode(3))
+        self.assertLess(np.abs(hardened - corrected).mean(), 0.5 * before)
+        self.assertEqual(sequence.GetNthDataNode(3).GetAttribute(MC_PREFIX + "Status"), mc.REGISTERED)
+        self.assertEqual(sequence.GetNthDataNode(1).GetAttribute(MC_PREFIX + "Status"), mc.LOW_ACTIVITY)
         self.assertEqual(table.GetNumberOfRows(), 5)
-        self.assertIsNotNone(summed)
+        self.assertEqual(sequence.GetAttribute(PREFIX + "SummedVolumeID"), summed.GetID())
+        durations = [60.0] * 5
+        expected = sum(slicer.util.arrayFromVolume(sequence.GetNthDataNode(i)).astype(float) * durations[i]
+                       for i in range(5)) / sum(durations)
+        np.testing.assert_allclose(slicer.util.arrayFromVolume(summed), expected, rtol=1e-4, atol=1e-3)
+        logic.revert(undo)
+        np.testing.assert_array_equal(slicer.util.arrayFromVolume(sequence.GetNthDataNode(3)), original)
+        self.assertIsNone(sequence.GetNthDataNode(3).GetAttribute(MC_PREFIX + "Status"))
+        self.assertIsNone(sequence.GetAttribute(PREFIX + "SummedVolumeID"))
+        self.assertFalse(slicer.mrmlScene.IsNodePresent(summed))
+        self.assertFalse(slicer.mrmlScene.IsNodePresent(table))
 
         # the layout opens with the reference in the large view and the frames over it
         session = MotionCorrectionSession(sequence)
@@ -1337,6 +1497,10 @@ class DynamicPETMotionCorrectionTest(ScriptedLoadableModuleTest):
             view = layoutManager.sliceWidget(dynamicviews.frameViewName(3, FRAME_VIEW_PREFIX))
             self.assertEqual(view.mrmlSliceCompositeNode().GetForegroundVolumeID(), session.frameVolumes[3].GetID())
             self.assertEqual(len(session.timeline.motion), 5)
+            self.assertEqual([len(plot.motion) for plot in session.plots], [5, 5])
+            session.setFrameColor("Hel")
+            self.assertEqual(session.frameVolumes[0].GetDisplayNode().GetColorNodeID(),
+                             colormaps.colorNodeForLabel("Hel").GetID())
             session.setOrientation("Axial")
             self.assertEqual(view.mrmlSliceNode().GetOrientation(), "Axial")
             self.delayDisplay("Dynamic PET Motion Correction open")

@@ -95,7 +95,10 @@ sequence (the most recent one is picked for you) and press *Open Review/Edit*:
   x90, 1 s = 1:30). It plays the timeline's time window and loops.
 - **Time window:** a two-handle slider with spin boxes (seconds from the study start), like a volume's display
   range, zooms the timeline into part of the series. The mouse wheel over the timeline also zooms, around the
-  cursor. *Show all* goes back to the whole series.
+  cursor, and Shift + wheel pans in time. *Show all* (or a double click on the timeline outside the curves) goes
+  back to the whole series.
+- **Curve zoom:** Ctrl + wheel over the time-activity curves zooms their value axis (from 0 up; points above the
+  top are cut off), and a double click on the curves resets it.
 - **Overlays:** each view shows its frame number and its start - end time from the study start in the top
   left corner. The current frame is highlighted.
 - **Window** (module panel): one display range for all frames (min / max slider, *Auto* = 0 to the highest
@@ -170,12 +173,18 @@ dynamic sequence (the most recent one is picked for you); the layout opens by it
   one per frame: the frame in **hot iron over the reference in inverted grey** (frame voxels below 3 % of the frame's
   window are transparent). All views use one orientation (**coronal** by default; axial / coronal / sagittal in the
   panel) and are linked. After registration the small views show the corrected frames; *Show frames: Original /
-  Motion corrected* switches back and forth.
+  Motion corrected* switches back and forth. The color maps of the frames and of the reference can be changed
+  (*Frame colors*, *Reference colors*), and *Each frame its own window* (off by default) scales every frame to its
+  own 0 - 99.9th percentile.
 - **Lower 1/3:** the frame timeline (click a block to highlight that frame, Left / Right to step, the mouse wheel
-  zooms). After a **rigid** registration two rows sit right above the frame blocks: each frame's **shift** (mm along
-  R, A, S) and **angles** (degrees about R, A, S), coloured by size (shift: green < 2 mm, amber < 5 mm, red;
-  angles: < 1 deg, < 3 deg). Narrow blocks show the largest value; hover for all of them. Frames that were not
-  registered say why (ref, low, limit, failed).
+  zooms in time, Shift + wheel pans). After a **rigid** registration two rows sit right above the frame blocks: each
+  frame's **shift** (mm along R, A, S) and **angles** (degrees about R, A, S), coloured by size (shift: green < 2 mm,
+  amber < 5 mm, red; angles: < 1 deg, < 3 deg). Narrow blocks show the largest value; hover for all of them. Frames
+  that were not registered say why (ref, low, limit, failed).
+- **Motion plots** (above the timeline, rigid only): the same motion over time on a white background, one point per
+  frame in its middle, in two plots: the shifts x (R), y (A), z (S) in mm, and below it the angles pitch (about R),
+  roll (about A), yaw (about S) in degrees, each component in its own colour. Their time axis follows the
+  timeline's. Click a legend entry to hide / show a line, Ctrl + wheel zooms the values, a double click resets them.
 
 Settings in the panel:
 
@@ -183,6 +192,7 @@ Settings in the panel:
 |---|---|---|
 | Reference frame | frame with the highest activity | the frame shown in the large view; it is kept as it is |
 | Summed image (optional) | none | register to this volume instead (e.g. the series' summed volume); then every frame is registered |
+| Resum the summed image | on | *Harden transforms* also makes a new summed image of the corrected frames |
 | Method | Rigid | Rigid, Affine or BSpline (BRAINSFit `transformType`, Mattes mutual information, no initialization) |
 | Enable two pass | off; second pass Affine | a second BRAINSFit run (Affine or BSpline) starting from the first |
 | Do not register low activity frames | on, below 1 % | activity = sum of the voxels of the frame; frames below that % of the highest frame are kept as they are |
@@ -196,10 +206,17 @@ shift is the displacement of the centre of the reference volume (not the matrix 
 the RAS origin is), and the values are the *motion* of the frame relative to the reference (the inverse of the
 correction).
 
-*Save motion corrected series* makes a new sequence *"&lt;series&gt; motion corrected"* (same index values and frame
-attributes, so Review/Edit opens it with the same timeline), a table *"... motion"* with the status, shift and angles
-of every frame, and (optional) the duration-weighted summed volume of the corrected frames. Every frame carries
-`DynamicPET.MotionCorrection.Status` (and `ShiftRASMm` / `AnglesRASDeg` for rigid).
+Under *Register frames*:
+
+- **Harden transforms** writes the corrected frames **into the sequence, over the original frames** (it asks first),
+  adds a table *"&lt;series&gt; motion"* with the status, shift and angles of every frame and, with *Resum the summed
+  image*, makes a new summed image *"&lt;summed&gt; motion corrected"* of the corrected frames: the duration-weighted
+  mean, as the DICOM loader makes it, with the attributes and display of the old summed image, which stays. The
+  sequence then points to the new one (`DynamicPET.SummedVolumeID`). Every frame carries
+  `DynamicPET.MotionCorrection.Status` (and `ShiftRASMm` / `AnglesRASDeg` for rigid). Save the scene to keep them.
+- **Revert changes** drops a registration that is not hardened yet; after hardening it puts the original frames
+  back and removes the table and the new summed image. The original frames are kept in memory for this until
+  another series or reference is picked, or the scene is closed.
 
 ## What is stored on the volumes
 

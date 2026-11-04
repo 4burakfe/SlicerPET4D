@@ -104,10 +104,19 @@ def test_texts():
         "2 registered, 1 reference, 1 low activity"
 
 
-def test_duration_weighted_mean():
-    arrays = [np.full((2, 2), 10.0), np.full((2, 2), 40.0)]
-    np.testing.assert_allclose(mc.durationWeightedMean(arrays, [30.0, 10.0]), 17.5)
-    np.testing.assert_allclose(mc.durationWeightedMean(arrays, [30.0, None]), 25.0)
+def test_plot_axis():
+    assert mc.plotLimit([], 2.0) == 2.0
+    assert mc.plotLimit([-10.0, 3.0], 2.0) == pytest.approx(11.0)
+    assert mc.plotTicks(11.0) == [-10.0, -5.0, 0.0, 5.0, 10.0]
+    assert mc.plotTicks(2.0) == [-2.0, -1.0, 0.0, 1.0, 2.0]
+    assert mc.plotTicks(0.0) == [0.0]
+
+
+def test_pan_range():
+    assert dv.panRange(100.0, 200.0, 1, 0.0, 1000.0) == (90.0, 190.0)
+    assert dv.panRange(100.0, 200.0, -2, 0.0, 1000.0) == (120.0, 220.0)
+    assert dv.panRange(5.0, 105.0, 1, 0.0, 1000.0) == (0.0, 100.0)
+    assert dv.panRange(890.0, 990.0, -5, 0.0, 1000.0) == (900.0, 1000.0)
 
 
 def test_layout_orientation_and_names():

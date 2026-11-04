@@ -11,6 +11,7 @@ set(MODULE_PYTHON_SCRIPTS
   ${MODULE_NAME}Lib/timeline.py
   ${MODULE_NAME}Lib/roicurves.py
   ${MODULE_NAME}Lib/motioncorrection.py
+  ${MODULE_NAME}Lib/motionplot.py
   ${MODULE_NAME}Lib/colortables.py
   ${MODULE_NAME}Lib/colormaps.py
   )
