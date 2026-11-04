@@ -170,12 +170,14 @@ reference with Slicer's built-in **BRAINSFit** and resamples it on its own grid 
 dynamic sequence (the most recent one is picked for you); the layout opens by itself:
 
 - **Upper 2/3:** the **reference** in a large view on the left (inverted grey), and a near-square grid of small views,
-  one per frame: the frame in **hot iron over the reference in inverted grey** (frame voxels below 3 % of the frame's
-  window are transparent). All views use one orientation (**coronal** by default; axial / coronal / sagittal in the
+  one per frame: the frame in **PET-Rainbow2 at 0.25 opacity over the reference in inverted grey** (frame voxels
+  below the frame window, or below 3 % of it, are transparent). The empty cells that fill the last grid row stay
+  empty, and the views keep their volumes when another volume (a CT / MR) is loaded. All views use one orientation (**coronal** by default; axial / coronal / sagittal in the
   panel) and are linked. After registration the small views show the corrected frames; *Show frames: Original /
   Motion corrected* switches back and forth. The color maps of the frames and of the reference can be changed
-  (*Frame colors*, *Reference colors*), and *Each frame its own window* (off by default) scales every frame to its
-  own 0 - 99.9th percentile.
+  (*Frame colors*, *Reference colors*), and so can their display ranges (*Frame window*: one range for all frames,
+  *Reference window*; *Auto windows*: 0 - 99.9th percentile). *Each frame its own window* (off by default) scales
+  every frame to its own 0 - 99.9th percentile instead.
 - **Lower 1/3:** the frame timeline (click a block to highlight that frame, Left / Right to step, the mouse wheel
   zooms in time, Shift + wheel pans). After a **rigid** registration two rows sit right above the frame blocks: each
   frame's **shift** (mm along R, A, S) and **angles** (degrees about R, A, S), coloured by size (shift: green < 2 mm,
