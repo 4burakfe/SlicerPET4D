@@ -70,7 +70,10 @@ set(MC_MODULE_NAME DynamicPETMotionCorrection)
 slicerMacroBuildScriptedModule(
   NAME ${MC_MODULE_NAME}
   SCRIPTS ${MC_MODULE_NAME}.py
-  RESOURCES Resources/Icons/${MC_MODULE_NAME}.png
+  RESOURCES
+    Resources/Icons/${MC_MODULE_NAME}.png
+    Resources/Images/MotionShift.png
+    Resources/Images/MotionAngles.png
   WITH_GENERIC_TESTS
   )
 
