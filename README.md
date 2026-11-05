@@ -198,6 +198,21 @@ dynamic sequence (the most recent one is picked for you); the layout opens by it
   frame in its middle, in two plots: the shifts x (R), y (A), z (S) in mm, and below it the angles pitch (about R),
   roll (about A), yaw (about S) in degrees, each component in its own colour. Their time axis follows the
   timeline's. Click a legend entry to hide / show a line, Ctrl + wheel zooms the values, a double click resets them.
+  A small figure of the axes sits on the right of each plot (hover it for the meaning), and the timeline keeps an
+  empty space of the same width there, so the time axes of the plots and the timeline stay lined up.
+- **Time window:** a two-handle slider with spin boxes (seconds from the study start) under the timeline, as in
+  Review/Edit, zooms the timeline and the motion plots together. The mouse wheel over either of them zooms too
+  (Shift + wheel pans) and the slider follows; *Show all* goes back to the whole series.
+
+The axes follow the patient (RAS): forward is anterior (where the nose points) and up is superior. Positive shifts
+point toward R, A and S; positive angles are counterclockwise looking from the tip of the axis (right-hand rule):
+pitch is nodding, roll is tilting the head toward a shoulder, yaw is turning it left / right.
+
+<p>
+  <img src="Docs/MotionShift.png" alt="Shifts x, y, z along R, A, S" width="320">
+  <img src="Docs/MotionAngles.png" alt="Angles pitch, roll, yaw about R, A, S" width="320">
+</p>
+
 - **View options:** Slicer's volume names in the corners of the views (*B:*, *F:*) are off (*Volume names in the
   views*), and *Bottom panel: Motion plots / Frame timeline* show or hide the plots and the timeline (with both off
   the panel closes).

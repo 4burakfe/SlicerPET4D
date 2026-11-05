@@ -11,7 +11,9 @@ Layout, like Review/Edit:
                 one orientation (coronal by default), linked. After registration the views show the corrected
                 frames (or the original ones, to compare).
     lower 1/3   the frame timeline; after a rigid registration two rows above the frame blocks give each frame's
-                shift (mm along R, A, S) and angles (degrees about R, A, S).
+                shift (mm along R, A, S) and angles (degrees about R, A, S), and two plots of them above it,
+                each with a figure of the axes on its right (the timeline keeps an equal space there, so the time
+                axes line up). A time window slider under the timeline zooms the timeline and the plots together.
 The reference is a frame of the series or, optionally, another volume (the summed image). Frames with less than a
 percentage of the highest frame activity are not registered (kept as they are), and a registration that moves any
 point of the middle of the volume further than the motion limit along R, A or S is rejected (the frame is kept).
@@ -653,6 +655,52 @@ def _percentile(array):
     return float(np.percentile(sample, AUTO_PERCENTILE)) if sample.size else 1.0
 
 
+# Figures of the axes on the right of the motion plots (pitch / roll / yaw about R / A / S, shifts along R, A, S)
+FIGURE_WIDTH = 132
+MOTION_FIGURES = {
+    "shift": ("MotionShift.png", "Shifts in mm along the patient axes: x toward the right (R), y toward anterior "
+                                 "(A, where the nose points), z toward superior (S)"),
+    "angles": ("MotionAngles.png", "Angles in degrees about the patient axes: pitch about R (nodding), roll about A "
+                                   "(tilting toward a shoulder), yaw about S (turning left / right); positive is "
+                                   "counterclockwise looking from the arrow tip (right-hand rule)"),
+}
+
+
+def _axesFigure(fileName, toolTip):
+    """Label with a figure of the axes, FIGURE_WIDTH wide, sharp on high DPI screens."""
+    label = qt.QLabel()
+    label.setFixedWidth(FIGURE_WIDTH)
+    label.alignment = qt.Qt.AlignCenter
+    label.toolTip = toolTip
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Resources", "Images", fileName)
+    pixmap = qt.QPixmap(path)
+    if pixmap.isNull():
+        logging.warning(f"Dynamic PET Motion Correction: figure not found: {path}")
+        return label
+    try:
+        ratio = float(slicer.util.mainWindow().devicePixelRatioF())
+    except Exception:
+        ratio = 1.0
+    pixmap = pixmap.scaledToWidth(int(round((FIGURE_WIDTH - 4) * ratio)), qt.Qt.SmoothTransformation)
+    try:
+        pixmap.setDevicePixelRatio(ratio)
+    except Exception:
+        pass
+    label.setPixmap(pixmap)
+    return label
+
+
+def _panelRow(widget, side):
+    """Row of the dock's splitter: the widget stretched, a fixed width widget on its right."""
+    row = qt.QWidget()
+    rowLayout = qt.QHBoxLayout(row)
+    rowLayout.setContentsMargins(0, 0, 0, 0)
+    rowLayout.setSpacing(4)
+    rowLayout.addWidget(widget, 1)
+    rowLayout.addWidget(side)
+    return row
+
+
 # ---------------------------------------------------------------------------
 # Session: layout, views and timeline dock
 # ---------------------------------------------------------------------------
@@ -685,6 +733,11 @@ class MotionCorrectionSession:
         self.results = None
         self.hardened = False              # the corrections are in the sequence itself
         self.plots = []                    # shift (mm) and angle (deg) plots, rigid only
+        self.plotRows = []                 # each plot with its axes figure
+        self.timelineRow = None            # the timeline with a space as wide as the figures
+        self.rangeWidget = None            # time window slider of the timeline and the plots
+        self.windowLabel = None
+        self.viewRangeUpdating = False
         self.showCorrected = True
         self.showNames = False             # Slicer's volume names (B:, F:) in the corners of the views
         self.showPlots = True              # motion plots in the dock (when there is rigid motion to plot)
@@ -734,6 +787,10 @@ class MotionCorrectionSession:
             self.dock = None
             self.timeline = None
             self.plots = []
+            self.plotRows = []
+            self.timelineRow = None
+            self.rangeWidget = None
+            self.windowLabel = None
         if self.previousLayout is not None and layoutManager.layout == LAYOUT_ID:
             layoutManager.setLayout(self.previousLayout)
         for node in self.frameVolumes + [self.referenceHelper]:
@@ -854,10 +911,10 @@ class MotionCorrectionSession:
             self.showPlots = bool(plots)
         if timeline is not None:
             self.showTimeline = bool(timeline)
-        for plot in self.plots:
-            plot.setVisible(self.showPlots and bool(plot.motion))
-        if self.timeline is not None:
-            self.timeline.setVisible(self.showTimeline)
+        for plot, row in zip(self.plots, self.plotRows):
+            row.setVisible(self.showPlots and bool(plot.motion))
+        if self.timelineRow is not None:
+            self.timelineRow.setVisible(self.showTimeline)
         if self.dock is not None:
             self.dock.setVisible(self.showPlots or self.showTimeline)
 
@@ -1067,36 +1124,65 @@ class MotionCorrectionSession:
         self.frameLabel = qt.QLabel()
         self.frameLabel.setMinimumWidth(320)
         self.summaryLabel = qt.QLabel()
-        showAllButton = qt.QPushButton("Show all")
-        showAllButton.toolTip = ("Show the whole series (mouse wheel: zoom in time, Shift + wheel: pan, Ctrl + wheel "
-                                 "over the motion plot: zoom its values, double click: reset)")
         for widget in (previousButton, nextButton, self.frameLabel):
             toolbar.addWidget(widget)
         toolbar.addStretch(1)
         toolbar.addWidget(self.summaryLabel)
-        toolbar.addWidget(showAllButton)
         layout.addLayout(toolbar)
         self.plots = [MotionPlot("shift"), MotionPlot("angles")]
+        self.plotRows = []
         for plot in self.plots:
             plot.setFrames(self.intervals)
             plot.onCurrentFrameChanged = self.setCurrentIndex
             plot.onViewRangeChanged = self._onViewRangeChanged
-            plot.setVisible(False)       # shown after a rigid registration
+            # each plot with its figure of the axes on its right
+            figure = _axesFigure(*MOTION_FIGURES[plot.kind])
+            row = _panelRow(plot, figure)
+            row.setVisible(False)        # shown after a rigid registration
+            self.plotRows.append(row)
         self.timeline = FrameTimeline()
         self.timeline.setFrames(self.intervals)
         self.timeline.onCurrentFrameChanged = self.setCurrentIndex
         self.timeline.onViewRangeChanged = self._onViewRangeChanged
+        # an empty space as wide as the figures keeps the timeline's time axis under the plots' axes
+        spacer = qt.QWidget()
+        spacer.setFixedWidth(FIGURE_WIDTH)
+        self.timelineRow = _panelRow(self.timeline, spacer)
         splitter = qt.QSplitter(qt.Qt.Vertical)
-        for plot in self.plots:
-            splitter.addWidget(plot)
-        splitter.addWidget(self.timeline)
+        for row in self.plotRows:
+            splitter.addWidget(row)
+        splitter.addWidget(self.timelineRow)
         splitter.setChildrenCollapsible(False)
         layout.addWidget(splitter, 1)
+
+        # time window: two-handle slider with spin boxes, as in Review/Edit; it zooms the timeline and the plots
+        zoomRow = qt.QHBoxLayout()
+        zoomRow.addWidget(qt.QLabel("Time window:"))
+        start, end = self.timeline.fullRange()
+        self.rangeWidget = ctk.ctkRangeWidget()
+        self.rangeWidget.decimals = 1
+        self.rangeWidget.singleStep = 1.0
+        self.rangeWidget.suffix = " s"
+        self.rangeWidget.setRange(start, end)
+        self.rangeWidget.setValues(start, end)
+        self.rangeWidget.toolTip = ("Part of the series shown in the timeline and the motion plots, seconds from the "
+                                    "study start (mouse wheel: zoom in time, Shift + wheel: pan, Ctrl + wheel over a "
+                                    "motion plot: zoom its values, double click: reset)")
+        zoomRow.addWidget(self.rangeWidget, 1)
+        self.windowLabel = qt.QLabel()
+        self.windowLabel.setMinimumWidth(150)
+        zoomRow.addWidget(self.windowLabel)
+        showAllButton = qt.QPushButton("Show all")
+        showAllButton.toolTip = "Show the whole series in the timeline and the motion plots"
+        zoomRow.addWidget(showAllButton)
+        layout.addLayout(zoomRow)
         self.dock.setWidget(container)
         previousButton.connect("clicked()", lambda: self.setCurrentIndex(max(0, self.currentIndex - 1)))
         nextButton.connect("clicked()", lambda: self.setCurrentIndex(min(len(self.intervals) - 1,
                                                                          self.currentIndex + 1)))
+        self.rangeWidget.connect("valuesChanged(double,double)", self._onViewRangeChanged)
         showAllButton.connect("clicked()", lambda: self._onViewRangeChanged(*self.timeline.fullRange()))
+        self._onViewRangeChanged(start, end)
         mainWindow.addDockWidget(qt.Qt.BottomDockWidgetArea, self.dock)
         try:
             mainWindow.resizeDocks([self.dock], [max(170, int(mainWindow.height / 3))], qt.Qt.Vertical)
@@ -1106,10 +1192,22 @@ class MotionCorrectionSession:
         self.setPanels()
 
     def _onViewRangeChanged(self, start, end):
-        """The time window changed in the plot or the timeline: both show it."""
-        for widget in [self.timeline] + self.plots:
-            if widget is not None:
-                widget.setViewRange(start, end)
+        """The time window changed in a plot, the timeline or the time window slider: all of them show it."""
+        if self.viewRangeUpdating or end - start <= 1e-6:
+            return
+        self.viewRangeUpdating = True
+        try:
+            for widget in [self.timeline] + self.plots:
+                if widget is not None:
+                    widget.setViewRange(start, end)
+            if self.rangeWidget is not None:
+                # the slider rounds to 0.1 s; it follows without sending the rounded window back
+                wasBlocked = self.rangeWidget.blockSignals(True)
+                self.rangeWidget.setValues(start, end)
+                self.rangeWidget.blockSignals(wasBlocked)
+                self.windowLabel.text = f"{dynamicviews.formatTime(start)} - {dynamicviews.formatTime(end)}"
+        finally:
+            self.viewRangeUpdating = False
 
     def setCurrentIndex(self, index):
         if 0 <= index < len(self.intervals):
@@ -2018,6 +2116,18 @@ class DynamicPETMotionCorrectionTest(ScriptedLoadableModuleTest):
             self.assertFalse(session.dock.visible)
             session.setPanels(plots=True, timeline=True)
             self.assertTrue(session.dock.visible and session.plots[0].visible)
+            # the time window slider zooms the timeline and the plots together, and follows their zoom
+            start, end = session.timeline.fullRange()
+            session.rangeWidget.setValues(start, start + (end - start) / 2.0)
+            self.assertAlmostEqual(session.timeline.viewEnd, session.plots[0].viewEnd, places=6)
+            self.assertAlmostEqual(session.plots[1].viewStart, session.timeline.viewStart, places=6)
+            self.assertLess(session.timeline.viewEnd, end)
+            session._onViewRangeChanged(start + 1.0, end - 1.0)       # as a wheel zoom over a plot
+            self.assertAlmostEqual(session.rangeWidget.maximumValue, end - 1.0, places=1)
+            self.assertAlmostEqual(session.timeline.viewStart, start + 1.0, places=6)
+            # the figures sit right of the plots and the timeline keeps an equal space: the time axes line up
+            self.assertEqual(session.plotRows[0].layout().itemAt(1).widget().width,
+                             session.timelineRow.layout().itemAt(1).widget().width)
             session.setOrientation("Axial")
             self.assertEqual(view.mrmlSliceNode().GetOrientation(), "Axial")
             self.delayDisplay("Dynamic PET Motion Correction open")
