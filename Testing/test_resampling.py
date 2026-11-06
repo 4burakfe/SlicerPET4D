@@ -103,3 +103,16 @@ def test_grid_step_and_coarse_displacement_grid():
     finally:
         resampling.MAX_GRID_POINTS = old
     np.testing.assert_allclose(array(coarse.resample(image(source))), linear, atol=1e-3)
+
+
+def test_smoothing_before_downsampling():
+    rng = np.random.default_rng(0)
+    noise = rng.normal(100.0, 20.0, (16, 16, 16)).astype(np.float32)
+    ijk = np.eye(4)
+    dims, grid = reg.outputGrid((16, 16, 16), ijk, (4.0, 4.0, 4.0))
+    resampler = resampling.Resampler(ijk, dims, grid)
+    plain = array(resampler.resample(image(noise)))
+    smooth = array(resampler.resample(image(noise), reg.smoothingSigmas((1, 1, 1), (4, 4, 4))))
+    assert smooth.shape == plain.shape == (4, 4, 4)
+    assert smooth[1:-1, 1:-1, 1:-1].std() < 0.5 * plain[1:-1, 1:-1, 1:-1].std()       # less aliased noise
+    assert abs(smooth.mean() - 100.0) < 5.0

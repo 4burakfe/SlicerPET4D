@@ -148,12 +148,15 @@ class DynamicPETRegistrationLogic(ScriptedLoadableModuleLogic):
         steps                BRAINSFit transform types run one after the other (reg.validateSteps)
         initialization       BRAINSFit initializeTransformMode of the first step (geometric centres by default)
         samplingPercentage, bsplineGrid    BRAINSFit details
+        workingVoxelMm       voxel size of the CT/MR copy registered to (0: the PET voxel size; a CT/MR that is not
+                             finer is used as it is), see workingFixed()
     """
 
     @staticmethod
     def defaultSettings():
         return {"steps": list(reg.DEFAULT_STEPS), "initialization": reg.DEFAULT_INITIALIZATION,
-                "samplingPercentage": reg.DEFAULT_SAMPLING, "bsplineGrid": reg.DEFAULT_BSPLINE_GRID}
+                "samplingPercentage": reg.DEFAULT_SAMPLING, "bsplineGrid": reg.DEFAULT_BSPLINE_GRID,
+                "workingVoxelMm": reg.DEFAULT_WORKING_VOXEL_MM}
 
     @staticmethod
     def helperVolume(name, source=None):
@@ -215,6 +218,25 @@ class DynamicPETRegistrationLogic(ScriptedLoadableModuleLogic):
             raise
         return output
 
+    def workingFixed(self, fixed, petSource, voxelMm=None):
+        """The CT/MR BRAINSFit registers to: a hidden copy smoothed and resampled to the PET voxel size (or voxelMm)
+        over the same field of view, or None when the CT/MR is not finer (it is used as it is). A sub-millimetre MR
+        otherwise makes the B-spline step use tens of GB of memory."""
+        fixedMatrix = _ijkToRas(fixed)
+        fixedSpacing = reg.gridSpacing(fixedMatrix)
+        spacing = reg.workingSpacing(fixedSpacing, reg.gridSpacing(_ijkToRas(petSource)), voxelMm)
+        if spacing is None:
+            return None
+        dims, matrix = reg.outputGrid(fixed.GetImageData().GetDimensions(), fixedMatrix, spacing)
+        resampler = resampling.Resampler(fixedMatrix, dims, matrix)
+        working = self.helperVolume(f"{fixed.GetName()} registration working copy")
+        working.SetAndObserveImageData(resampler.resample(fixed.GetImageData(),
+                                                          reg.smoothingSigmas(fixedSpacing, spacing)))
+        working.SetIJKToRASMatrix(_vtkMatrix(matrix))
+        logging.info(f"Dynamic PET to CT/MR registration: '{fixed.GetName()}' registered at "
+                     f"{', '.join(f'{v:.3g}' for v in spacing)} mm ({dims[0]} x {dims[1]} x {dims[2]})")
+        return working
+
     def register(self, fixed, petSource, settings, progress=None):
         """Register petSource (a PET volume, not under a transform) to fixed (CT/MR) in the settings' steps. Every
         step starts where the previous ended: the linear steps are chained by moving the PET's geometry (lossless),
@@ -225,6 +247,8 @@ class DynamicPETRegistrationLogic(ScriptedLoadableModuleLogic):
         steps = reg.validateSteps(settings["steps"])
         if fixed.GetParentTransformNode() is not None:
             raise ValueError(f"The CT/MR '{fixed.GetName()}' is under a transform. Harden or remove it first.")
+        working = self.workingFixed(fixed, petSource, settings.get("workingVoxelMm") or None)
+        target = working if working is not None else fixed
         moving = self.helperVolume("PET registration moving", petSource)
         original = _ijkToRas(petSource)
         current = np.eye(4)
@@ -238,7 +262,7 @@ class DynamicPETRegistrationLogic(ScriptedLoadableModuleLogic):
                     break
                 moving.SetIJKToRASMatrix(_vtkMatrix(current @ original))
                 initialization = settings.get("initialization", reg.DEFAULT_INITIALIZATION) if index == 0 else "Off"
-                transform = self.registerStep(fixed, moving, step, settings, initialization)
+                transform = self.registerStep(target, moving, step, settings, initialization)
                 if reg.isLinearStep(step):
                     matrix = vtk.vtkMatrix4x4()
                     transform.GetMatrixTransformToParent(matrix)
@@ -260,6 +284,8 @@ class DynamicPETRegistrationLogic(ScriptedLoadableModuleLogic):
             raise
         finally:
             slicer.mrmlScene.RemoveNode(moving)
+            if working is not None:
+                slicer.mrmlScene.RemoveNode(working)
         logging.info(f"Dynamic PET to CT/MR registration of '{petSource.GetName()}' to '{fixed.GetName()}': "
                      + "; ".join(reg.summaryLines(result["steps"], result["linear"], result["center"],
                                                   result["deformation"])))
@@ -838,6 +864,19 @@ class DynamicPETRegistrationWidget(ScriptedLoadableModuleWidget, VTKObservationM
         self.gridSpin.value = reg.DEFAULT_BSPLINE_GRID
         self.gridSpin.toolTip = "B-spline control grid size along each axis"
         advancedForm.addRow("B-spline grid:", self.gridSpin)
+        self.workingVoxelSpin = qt.QDoubleSpinBox()
+        self.workingVoxelSpin.setRange(0.0, 10.0)
+        self.workingVoxelSpin.setDecimals(1)
+        self.workingVoxelSpin.setSingleStep(0.5)
+        self.workingVoxelSpin.setSuffix(" mm")
+        self.workingVoxelSpin.specialValueText = "PET voxel size"
+        self.workingVoxelSpin.value = reg.DEFAULT_WORKING_VOXEL_MM
+        self.workingVoxelSpin.toolTip = (
+            "The CT/MR is smoothed and resampled to this voxel size for the registration only (the views and Harden "
+            "use it as it is). Default: the PET voxel size, which is all the PET can match; a sub-millimetre MR at "
+            "full resolution makes the B-spline step take many GB of memory. A CT/MR that is not finer is used as "
+            "it is.")
+        advancedForm.addRow("Register CT/MR at:", self.workingVoxelSpin)
         regForm.addRow(advanced)
         self.stepsNote = qt.QLabel()
         self.stepsNote.wordWrap = True
@@ -989,7 +1028,8 @@ class DynamicPETRegistrationWidget(ScriptedLoadableModuleWidget, VTKObservationM
         return {"steps": reg.validateSteps(self.steps()),
                 "initialization": self.initializationCombo.itemData(self.initializationCombo.currentIndex) or
                 reg.DEFAULT_INITIALIZATION,
-                "samplingPercentage": self.samplingSpin.value, "bsplineGrid": self.gridSpin.value}
+                "samplingPercentage": self.samplingSpin.value, "bsplineGrid": self.gridSpin.value,
+                "workingVoxelMm": self.workingVoxelSpin.value}
 
     def onStepsChanged(self, *args):
         try:
@@ -1485,6 +1525,12 @@ class DynamicPETRegistrationTest(ScriptedLoadableModuleTest):
         self.assertLess(max(abs(shift[1]), abs(shift[2])), 1.5)
         self.assertEqual([n for n in slicer.util.getNodesByClass("vtkMRMLScalarVolumeNode")
                           if n.GetAttribute(HELPER_ATTRIBUTE)], [])
+
+        # a CT finer than the PET is registered through a coarser working copy (removed afterwards)
+        working = logic.workingFixed(ct, summed, 8.0)
+        self.assertEqual(slicer.util.arrayFromVolume(working).shape, (20, 24, 24))
+        slicer.mrmlScene.RemoveNode(working)
+        self.assertIsNone(logic.workingFixed(ct, summed))          # same voxel size as the PET: used as it is
 
         # a rigid + B-spline run (geometric centres) also finishes and reports the deformation
         both = logic.register(ct, summed, dict(logic.defaultSettings(), steps=["Rigid", "BSpline"]))

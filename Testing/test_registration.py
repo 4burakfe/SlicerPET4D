@@ -114,3 +114,11 @@ def test_percentile_window():
     assert lower == pytest.approx(9.99, abs=0.1) and upper == pytest.approx(994.0, abs=1.0)
     assert reg.percentileWindow(np.array([])) == (0.0, 1.0)
     assert reg.percentileWindow(np.full(10, 3.0)) == (3.0, 4.0)
+
+
+def test_working_spacing():
+    # a 0.5 mm MR and a 2 mm PET: registered at 2 mm; a 3 mm slice axis stays 3 mm
+    assert reg.workingSpacing((0.5, 0.5, 3.0), (2.0, 2.0, 2.0)) == (2.0, 2.0, 3.0)
+    assert reg.workingSpacing((0.5, 0.5, 1.0), (2.0, 2.0, 2.0), 4.0) == (4.0, 4.0, 4.0)
+    assert reg.workingSpacing((4.0, 4.0, 4.0), (2.0, 2.0, 2.0)) is None           # CT coarser than PET: as it is
+    assert reg.smoothingSigmas((0.5, 0.5, 3.0), (2.0, 2.0, 3.0)) == (2.0, 2.0, 0.0)

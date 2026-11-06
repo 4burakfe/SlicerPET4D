@@ -24,6 +24,7 @@ DEFAULT_BSPLINE_GRID = 5
 DEFAULT_INITIALIZATION = mc.DEFAULT_INITIALIZATION      # geometric centres, as in Motion Correction
 INITIALIZATIONS = mc.INITIALIZATIONS
 DEFAULT_CHECKER_MM = 20.0
+DEFAULT_WORKING_VOXEL_MM = 0.0          # 0: register to the CT/MR at the PET voxel size
 # output grid of Harden: always the CT/MR field of view and directions, with one of these voxel sizes
 OUTPUT_PET_SPACING = "petSpacing"       # keep the PET voxel size (default)
 OUTPUT_FIXED_GRID = "fixedGrid"         # the CT/MR grid itself
@@ -175,6 +176,26 @@ def outputSpacing(mode, petSpacing, fixedSpacing, customSpacing=None):
             raise ValueError("Give a positive voxel size along i, j and k.")
         return values
     raise ValueError(f"Unknown output grid {mode!r}")
+
+
+def workingSpacing(fixedSpacing, petSpacing, voxelMm=None):
+    """Voxel size (i, j, k) of the CT/MR copy BRAINSFit registers to: the PET voxel size (or voxelMm along every
+    axis), never finer than the CT/MR itself. None when the CT/MR is not finer than that along any axis (it is used
+    as it is). A fine MR (0.5 mm) makes the B-spline step use many GB of memory; the PET resolution limits what
+    the registration can match anyway."""
+    fixedSpacing = np.asarray(fixedSpacing, dtype=float)
+    target = np.full(3, float(voxelMm)) if voxelMm else np.asarray(petSpacing, dtype=float)
+    spacing = np.maximum(fixedSpacing, target)
+    if np.allclose(spacing, fixedSpacing, rtol=1e-3):
+        return None
+    return tuple(float(v) for v in spacing)
+
+
+def smoothingSigmas(inputSpacing, outputSpacing):
+    """Gaussian standard deviations (voxels of the input, i, j, k) against aliasing before resampling to a coarser
+    grid: half the ratio of the voxel sizes along each axis that gets coarser, 0 elsewhere."""
+    ratio = np.asarray(outputSpacing, dtype=float) / np.asarray(inputSpacing, dtype=float)
+    return tuple(float(0.5 * r) if r > 1.0 + 1e-6 else 0.0 for r in ratio)
 
 
 def outputGrid(fixedDims, fixedIjkToRas, petSpacing):
