@@ -146,15 +146,18 @@ def _looksLikeCT(node):
 class DynamicPETRegistrationLogic(ScriptedLoadableModuleLogic):
     """Registration of a PET reference image to a CT/MR and Harden of the whole series. Settings (dict):
         steps                BRAINSFit transform types run one after the other (reg.validateSteps)
+        resample             per step: register to the CT/MR resampled to the PET voxel size (reg.resampleFlags;
+                             default only the B-spline)
         initialization       BRAINSFit initializeTransformMode of the first step (geometric centres by default)
         samplingPercentage, bsplineGrid    BRAINSFit details
-        workingVoxelMm       voxel size of the CT/MR copy registered to (0: the PET voxel size; a CT/MR that is not
-                             finer is used as it is), see workingFixed()
+        workingVoxelMm       voxel size of the CT/MR copy the resampled steps register to (0: the PET voxel size; a
+                             CT/MR that is not finer is used as it is), see workingFixed()
     """
 
     @staticmethod
     def defaultSettings():
-        return {"steps": list(reg.DEFAULT_STEPS), "initialization": reg.DEFAULT_INITIALIZATION,
+        return {"steps": list(reg.DEFAULT_STEPS), "resample": reg.resampleFlags(reg.DEFAULT_STEPS),
+                "initialization": reg.DEFAULT_INITIALIZATION,
                 "samplingPercentage": reg.DEFAULT_SAMPLING, "bsplineGrid": reg.DEFAULT_BSPLINE_GRID,
                 "workingVoxelMm": reg.DEFAULT_WORKING_VOXEL_MM}
 
@@ -247,8 +250,8 @@ class DynamicPETRegistrationLogic(ScriptedLoadableModuleLogic):
         steps = reg.validateSteps(settings["steps"])
         if fixed.GetParentTransformNode() is not None:
             raise ValueError(f"The CT/MR '{fixed.GetName()}' is under a transform. Harden or remove it first.")
-        working = self.workingFixed(fixed, petSource, settings.get("workingVoxelMm") or None)
-        target = working if working is not None else fixed
+        flags = reg.resampleFlags(steps, settings.get("resample"))
+        working = self.workingFixed(fixed, petSource, settings.get("workingVoxelMm") or None) if any(flags) else None
         moving = self.helperVolume("PET registration moving", petSource)
         original = _ijkToRas(petSource)
         current = np.eye(4)
@@ -262,6 +265,7 @@ class DynamicPETRegistrationLogic(ScriptedLoadableModuleLogic):
                     break
                 moving.SetIJKToRASMatrix(_vtkMatrix(current @ original))
                 initialization = settings.get("initialization", reg.DEFAULT_INITIALIZATION) if index == 0 else "Off"
+                target = working if flags[index] and working is not None else fixed
                 transform = self.registerStep(target, moving, step, settings, initialization)
                 if reg.isLinearStep(step):
                     matrix = vtk.vtkMatrix4x4()
@@ -840,6 +844,7 @@ class DynamicPETRegistrationWidget(ScriptedLoadableModuleWidget, VTKObservationM
         regBox = qt.QGroupBox("Registration (BRAINSFit)")
         regForm = qt.QFormLayout(regBox)
         self.stepCombos = []
+        self.resampleChecks = []
         for index, default in enumerate(reg.DEFAULT_STEPS):
             combo = qt.QComboBox()
             if index > 0:
@@ -849,8 +854,17 @@ class DynamicPETRegistrationWidget(ScriptedLoadableModuleWidget, VTKObservationM
             combo.setCurrentIndex(combo.findData(default))
             combo.toolTip = ("Steps run one after the other, each from where the previous ended. Rigid: shifts and "
                              "angles. Affine: adds scaling and shear. BSpline: local deformation (last step only).")
+            check = qt.QCheckBox("Resample CT/MR to PET")
+            check.checked = reg.RESAMPLE_BY_DEFAULT[default]
+            check.toolTip = ("Register this step to a copy of the CT/MR smoothed and resampled to the PET voxel size "
+                             "(Advanced: Register CT/MR at). Default on for BSpline only: a sub-millimetre MR at full "
+                             "resolution makes the B-spline take many GB of memory.")
+            row = qt.QHBoxLayout()
+            row.addWidget(combo, 1)
+            row.addWidget(check)
             self.stepCombos.append(combo)
-            regForm.addRow(f"Step {index + 1}:", combo)
+            self.resampleChecks.append(check)
+            regForm.addRow(f"Step {index + 1}:", row)
         self.initializationCombo = qt.QComboBox()
         for title, mode in reg.INITIALIZATIONS:
             self.initializationCombo.addItem(title, mode)
@@ -884,8 +898,8 @@ class DynamicPETRegistrationWidget(ScriptedLoadableModuleWidget, VTKObservationM
         self.workingVoxelSpin.specialValueText = "PET voxel size"
         self.workingVoxelSpin.value = reg.DEFAULT_WORKING_VOXEL_MM
         self.workingVoxelSpin.toolTip = (
-            "The CT/MR is smoothed and resampled to this voxel size for the registration only (the views and Harden "
-            "use it as it is). Default: the PET voxel size, which is all the PET can match; a sub-millimetre MR at "
+            "Steps with 'Resample CT/MR to PET' register to the CT/MR smoothed and resampled to this voxel size (the "
+            "views and Harden use it as it is). Default: the PET voxel size, which is all the PET can match; a sub-millimetre MR at "
             "full resolution makes the B-spline step take many GB of memory. A CT/MR that is not finer is used as "
             "it is.")
         advancedForm.addRow("Register CT/MR at:", self.workingVoxelSpin)
@@ -996,8 +1010,9 @@ class DynamicPETRegistrationWidget(ScriptedLoadableModuleWidget, VTKObservationM
 
         self.referenceCombo.connect("currentIndexChanged(int)", self.onReferenceChanged)
         self.fixedSelector.connect("currentNodeChanged(vtkMRMLNode*)", self.onFixedChanged)
-        for combo in self.stepCombos:
-            combo.connect("currentIndexChanged(int)", self.onStepsChanged)
+        for combo, check in zip(self.stepCombos, self.resampleChecks):
+            combo.connect("currentIndexChanged(int)", lambda i, combo=combo, check=check: self.onStepTypeChanged(
+                combo, check))
         self.registerButton.connect("clicked()", self.onRegister)
         self.manualButton.connect("toggled(bool)", self.onManualToggled)
         self.resetManualButton.connect("clicked()", self.onResetManual)
@@ -1036,8 +1051,21 @@ class DynamicPETRegistrationWidget(ScriptedLoadableModuleWidget, VTKObservationM
     def steps(self):
         return [combo.itemData(combo.currentIndex) for combo in self.stepCombos]
 
+    def resampleFlags(self):
+        """The resample check of each step that is not (none)."""
+        return [check.checked for combo, check in zip(self.stepCombos, self.resampleChecks)
+                if combo.itemData(combo.currentIndex)]
+
+    def onStepTypeChanged(self, combo, check):
+        """A new step type gets its default resample check (on for BSpline only)."""
+        step = combo.itemData(combo.currentIndex)
+        check.enabled = bool(step)
+        if step:
+            check.checked = reg.RESAMPLE_BY_DEFAULT[step]
+        self.onStepsChanged()
+
     def settings(self):
-        return {"steps": reg.validateSteps(self.steps()),
+        return {"steps": reg.validateSteps(self.steps()), "resample": self.resampleFlags(),
                 "initialization": self.initializationCombo.itemData(self.initializationCombo.currentIndex) or
                 reg.DEFAULT_INITIALIZATION,
                 "samplingPercentage": self.samplingSpin.value, "bsplineGrid": self.gridSpin.value,
@@ -1489,7 +1517,8 @@ class DynamicPETRegistrationTest(ScriptedLoadableModuleTest):
         self.test_Register()
 
     def test_Helpers(self):
-        self.assertEqual(reg.validateSteps(["Rigid", "Affine", "BSpline"]), ["Rigid", "Affine", "BSpline"])
+        self.assertEqual(reg.validateSteps(["Rigid", "BSpline"]), ["Rigid", "BSpline"])
+        self.assertEqual(reg.resampleFlags(["Rigid", "BSpline"]), [False, True])
         with self.assertRaises(ValueError):
             reg.validateSteps(["BSpline", "Rigid"])
 
@@ -1545,7 +1574,8 @@ class DynamicPETRegistrationTest(ScriptedLoadableModuleTest):
         self.assertIsNone(logic.workingFixed(ct, summed))          # same voxel size as the PET: used as it is
 
         # a rigid + B-spline run (geometric centres) also finishes and reports the deformation
-        both = logic.register(ct, summed, dict(logic.defaultSettings(), steps=["Rigid", "BSpline"]))
+        both = logic.register(ct, summed, dict(logic.defaultSettings(), steps=["Rigid", "BSpline"], resample=None,
+                                               workingVoxelMm=8.0))
         self.assertIsNotNone(both["bspline"])
         self.assertIsNotNone(both["deformation"])
         slicer.mrmlScene.RemoveNode(both["bspline"])

@@ -345,15 +345,15 @@ summed image** of the series.
 - **Dynamic sequence** (the most recent one is picked), **Reference frame** (the series' summed image when it has one,
   else the frame with the highest activity; any frame can be picked) and **CT / MR** (a CT or MR loaded from DICOM is
   picked for you).
-- **Steps:** up to three BRAINSFit steps run one after the other, each starting where the previous one ended:
-  **Rigid, then Affine, then BSpline** by default. Step 2 and 3 can be *(none)* (one or two steps) or another type; a
+- **Steps:** up to two BRAINSFit steps run one after the other, the second starting where the first ended:
+  **Rigid, then Affine** by default. BSpline can be picked (as the last step); step 2 can be *(none)*. A
   B-spline can only be the last step and a rigid step cannot follow an affine one. The first step starts from the
   **geometric centres** (as Motion Correction; *Initialization* also offers the centres of mass or none, e.g. for a
   PET/CT of the same scanner). Mattes mutual information; sampling 0.05 and B-spline grid 5 under *Advanced*.
-  BRAINSFit registers to a copy of the CT/MR **smoothed and resampled to the PET voxel size** (*Register CT/MR at*
-  under *Advanced*; a CT/MR that is not finer is used as it is): a sub-millimetre MR at full resolution makes the
-  B-spline step take tens of GB of memory, and the PET resolution limits what can be matched anyway. The views and
-  Harden use the CT/MR as it is.
+  Each step has a **Resample CT/MR to PET** check: that step registers to a copy of the CT/MR **smoothed and
+  resampled to the PET voxel size** (*Register CT/MR at* under *Advanced*; a CT/MR that is not finer is used as it
+  is). It is **off for Rigid and Affine** and **on for BSpline** by default (a sub-millimetre MR at full resolution
+  makes the B-spline step take tens of GB of memory). The views and Harden use the CT/MR as it is.
 - **Layout:** two rows, **axial on top and coronal below**, and three columns: **PET alone** (left, inverted grey),
   **PET over the CT/MR** (fusion, middle, PET-DICOM at 0.5 opacity; PET voxels below the window or 3 % of it are
   transparent) and **CT/MR alone** (right, grey). The views of a row are linked (slice, zoom, pan). After a

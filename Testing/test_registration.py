@@ -11,11 +11,11 @@ from DICOMGatedDynamicPETLib import registration as reg  # noqa: E402
 
 
 def test_steps():
-    assert reg.validateSteps(reg.DEFAULT_STEPS) == ["Rigid", "Affine", "BSpline"]
+    assert reg.validateSteps(reg.DEFAULT_STEPS) == ["Rigid", "Affine"]
     assert reg.validateSteps(["Rigid", None, ""]) == ["Rigid"]
     assert reg.validateSteps(["Affine", "BSpline"]) == ["Affine", "BSpline"]
     assert reg.validateSteps(["Rigid", "Rigid"]) == ["Rigid", "Rigid"]
-    for bad in ([], ["BSpline", "Rigid"], ["Affine", "Rigid"], ["Rigid"] * 4, ["Foo"]):
+    for bad in ([], ["BSpline", "Rigid"], ["Affine", "Rigid"], ["Rigid", "Affine", "BSpline"], ["Foo"]):
         with pytest.raises(ValueError):
             reg.validateSteps(bad)
     assert reg.stepsText(["Rigid", "Affine"]) == "Rigid, then Affine"
@@ -140,3 +140,10 @@ def test_closest_axis():
     coronalScan = np.array([[1, 0, 0, 0], [0, 0, 3, 0], [0, -1, 0, 0], [0, 0, 0, 1]], dtype=float)   # k -> A
     assert reg.closestAxis(coronalScan, reg.SLICE_NORMALS["Coronal"]) == 2
     assert reg.closestAxis(coronalScan, reg.SLICE_NORMALS["Axial"]) == 1
+
+
+def test_resample_flags():
+    assert reg.resampleFlags(reg.DEFAULT_STEPS) == [False, False]          # linear steps on the CT/MR as it is
+    assert reg.resampleFlags(["Rigid", "BSpline"]) == [False, True]
+    assert reg.resampleFlags(["Rigid", "BSpline"], [True, False]) == [True, False]
+    assert reg.resampleFlags(["Affine", "BSpline"], [True]) == [True, True]

@@ -17,8 +17,11 @@ import numpy as np
 from . import motioncorrection as mc
 
 STEP_TYPES = ("Rigid", "Affine", "BSpline")
-DEFAULT_STEPS = ("Rigid", "Affine", "BSpline")
-MAX_STEPS = 3
+DEFAULT_STEPS = ("Rigid", "Affine")
+MAX_STEPS = 2
+# whether a step registers to the CT/MR resampled to the PET voxel size (workingSpacing), by default: only the B-spline,
+# which takes tens of GB of memory on a sub-millimetre MR; the linear steps run on the CT/MR as it is
+RESAMPLE_BY_DEFAULT = {"Rigid": False, "Affine": False, "BSpline": True}
 DEFAULT_SAMPLING = 0.05
 DEFAULT_BSPLINE_GRID = 5
 DEFAULT_INITIALIZATION = mc.DEFAULT_INITIALIZATION      # geometric centres, as in Motion Correction
@@ -48,7 +51,7 @@ AUTO_WINDOW = "Auto (1 - 99.5 %)"
 # ---------------------------------------------------------------------------
 def validateSteps(steps):
     """The steps (BRAINSFit transform types, run one after the other, each starting from the previous) as a list.
-    1 to 3 steps; a B-spline only as the last step, and no rigid step after an affine one (it would undo the
+    1 to MAX_STEPS steps; a B-spline only as the last step, and no rigid step after an affine one (it would undo the
     scaling). Raises ValueError otherwise."""
     steps = [s for s in steps if s]
     if not steps:
@@ -64,6 +67,14 @@ def validateSteps(steps):
         if previous == "Affine" and step == "Rigid":
             raise ValueError("A rigid step cannot follow an affine step.")
     return steps
+
+
+def resampleFlags(steps, flags=None):
+    """Per step: register to the CT/MR resampled to the PET voxel size (True) or as it is. flags: given per step
+    (missing ones default to RESAMPLE_BY_DEFAULT)."""
+    flags = list(flags or [])
+    return [bool(flags[i]) if i < len(flags) and flags[i] is not None else RESAMPLE_BY_DEFAULT[step]
+            for i, step in enumerate(steps)]
 
 
 def stepsText(steps):
