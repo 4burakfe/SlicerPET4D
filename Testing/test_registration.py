@@ -122,3 +122,21 @@ def test_working_spacing():
     assert reg.workingSpacing((0.5, 0.5, 1.0), (2.0, 2.0, 2.0), 4.0) == (4.0, 4.0, 4.0)
     assert reg.workingSpacing((4.0, 4.0, 4.0), (2.0, 2.0, 2.0)) is None           # CT coarser than PET: as it is
     assert reg.smoothingSigmas((0.5, 0.5, 3.0), (2.0, 2.0, 3.0)) == (2.0, 2.0, 0.0)
+
+
+def test_checkerboard_columns():
+    board = reg.checkerboard((6, 8, 10), (2.0, 2.0, 2.0), 4.0, columnAxis=2)      # columns along k
+    for k in range(6):
+        np.testing.assert_array_equal(board[k], board[0])
+    assert board[0, 0, 0] != board[0, 0, 2] and board[0, 0, 0] != board[0, 2, 0]
+    coronal = reg.checkerboard((6, 8, 10), (2.0, 2.0, 2.0), 4.0, columnAxis=1)    # columns along j
+    np.testing.assert_array_equal(coronal[:, 0, :], coronal[:, 7, :])
+
+
+def test_closest_axis():
+    lps = np.diag([-1.0, -1.0, 2.0, 1.0])                 # i -> -R, j -> -A, k -> S
+    assert reg.closestAxis(lps, reg.SLICE_NORMALS["Axial"]) == 2
+    assert reg.closestAxis(lps, reg.SLICE_NORMALS["Coronal"]) == 1
+    coronalScan = np.array([[1, 0, 0, 0], [0, 0, 3, 0], [0, -1, 0, 0], [0, 0, 0, 1]], dtype=float)   # k -> A
+    assert reg.closestAxis(coronalScan, reg.SLICE_NORMALS["Coronal"]) == 2
+    assert reg.closestAxis(coronalScan, reg.SLICE_NORMALS["Axial"]) == 1

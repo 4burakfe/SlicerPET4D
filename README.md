@@ -359,7 +359,8 @@ summed image** of the series.
   transparent) and **CT/MR alone** (right, grey). The views of a row are linked (slice, zoom, pan). After a
   registration a **checkerboard column** is added on the left (2 x 4): a checkerboard made on the **PET grid** (20 mm
   squares, green) and moved by the **same transform**, over the PET, so a B-spline deformation shows as bent
-  squares. It can be turned off, and its square size and opacity changed.
+  squares. Each row has its own: in columns along S for the axial row and along A for the coronal row, so every
+  slice shows the same flat 2D checkerboard (not the cross-section of cubes). It can be turned off, and its square size and opacity changed.
 - **View:** *PET colors* (PET column) and *Fusion colors* (any of the Review/Edit color maps), *PET window* (both
   columns), *Fusion opacity*, *CT/MR preset* (soft tissue, brain, bone, lung, or automatic 1 - 99.5 % for MR) and
   *CT/MR window*, *Auto windows*. The module shows the images through hidden helper volumes, so the display of your

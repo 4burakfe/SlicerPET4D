@@ -148,15 +148,30 @@ def summaryLines(steps, linear, center, deformation=None, manual=None, manualCen
 # ---------------------------------------------------------------------------
 # Checkerboard and output grid
 # ---------------------------------------------------------------------------
-def checkerboard(shape, spacing, squareMm=DEFAULT_CHECKER_MM):
-    """uint8 array of shape (k, j, i): 1 and 0 in squares (cubes) squareMm wide; spacing (i, j, k) in mm."""
+def checkerboard(shape, spacing, squareMm=DEFAULT_CHECKER_MM, columnAxis=None):
+    """uint8 array of shape (k, j, i): 1 and 0 in squares squareMm wide; spacing (i, j, k) in mm. columnAxis (0 = i,
+    1 = j, 2 = k): the pattern does not change along that axis (columns through the volume, so every slice across
+    it shows the same 2D checkerboard); None: cubes."""
     if squareMm <= 0:
         raise ValueError("The checkerboard square size must be positive.")
     k, j, i = (np.arange(n) for n in shape)
-    ci = np.floor(i * float(spacing[0]) / squareMm).astype(int)
-    cj = np.floor(j * float(spacing[1]) / squareMm).astype(int)
-    ck = np.floor(k * float(spacing[2]) / squareMm).astype(int)
+    cells = [np.floor(index * float(spacing[a]) / squareMm).astype(int) for a, index in enumerate((i, j, k))]
+    if columnAxis is not None:
+        cells[columnAxis] = np.zeros_like(cells[columnAxis])
+    ci, cj, ck = cells
     return ((ck[:, None, None] + cj[None, :, None] + ci[None, None, :]) % 2).astype(np.uint8)
+
+
+# the patient axis across the slices of a view: S for axial, A for coronal, R for sagittal (0 = R, 1 = A, 2 = S)
+SLICE_NORMALS = {"Axial": 2, "Coronal": 1, "Sagittal": 0}
+
+
+def closestAxis(ijkToRas, rasAxis):
+    """Index (0 = i, 1 = j, 2 = k) of the grid axis that runs closest to the patient axis rasAxis (0 = R, 1 = A,
+    2 = S)."""
+    m = np.asarray(ijkToRas, dtype=float)[:3, :3]
+    directions = m / np.linalg.norm(m, axis=0)
+    return int(np.argmax(np.abs(directions[rasAxis, :])))
 
 
 def gridSpacing(ijkToRas):
