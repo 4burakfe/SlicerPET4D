@@ -77,8 +77,10 @@ class Resampler:
             grid.SetInterpolationModeToLinear()
             self.transform = grid
 
-    def resample(self, image):
-        """New vtkImageData (float) on the output grid (origin 0, spacing 1, as Slicer keeps the voxels)."""
+    def resample(self, image, smoothSigmas=None):
+        """New vtkImageData (float) on the output grid (origin 0, spacing 1, as Slicer keeps the voxels).
+        smoothSigmas: Gaussian standard deviations (input voxels, i, j, k) applied first, against aliasing when the
+        output is coarser."""
         info = vtk.vtkImageChangeInformation()
         info.SetInputData(image)
         info.SetOutputOrigin(0.0, 0.0, 0.0)
@@ -86,8 +88,16 @@ class Resampler:
         cast = vtk.vtkImageCast()
         cast.SetInputConnection(info.GetOutputPort())
         cast.SetOutputScalarTypeToFloat()
+        last = cast
+        if smoothSigmas is not None and max(smoothSigmas) > 0:
+            smooth = vtk.vtkImageGaussianSmooth()
+            smooth.SetInputConnection(cast.GetOutputPort())
+            smooth.SetDimensionality(3)
+            smooth.SetStandardDeviations(*[float(v) for v in smoothSigmas])
+            smooth.SetRadiusFactors(2.0, 2.0, 2.0)
+            last = smooth
         reslice = vtk.vtkImageReslice()
-        reslice.SetInputConnection(cast.GetOutputPort())
+        reslice.SetInputConnection(last.GetOutputPort())
         reslice.SetResliceTransform(self.transform)
         getattr(reslice, f"SetInterpolationModeTo{INTERPOLATION_MODES[self.interpolation]}")()
         reslice.SetOutputOrigin(0.0, 0.0, 0.0)

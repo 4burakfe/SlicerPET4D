@@ -24,6 +24,7 @@ DEFAULT_BSPLINE_GRID = 5
 DEFAULT_INITIALIZATION = mc.DEFAULT_INITIALIZATION      # geometric centres, as in Motion Correction
 INITIALIZATIONS = mc.INITIALIZATIONS
 DEFAULT_CHECKER_MM = 20.0
+DEFAULT_WORKING_VOXEL_MM = 0.0          # 0: register to the CT/MR at the PET voxel size
 # output grid of Harden: always the CT/MR field of view and directions, with one of these voxel sizes
 OUTPUT_PET_SPACING = "petSpacing"       # keep the PET voxel size (default)
 OUTPUT_FIXED_GRID = "fixedGrid"         # the CT/MR grid itself
@@ -147,15 +148,30 @@ def summaryLines(steps, linear, center, deformation=None, manual=None, manualCen
 # ---------------------------------------------------------------------------
 # Checkerboard and output grid
 # ---------------------------------------------------------------------------
-def checkerboard(shape, spacing, squareMm=DEFAULT_CHECKER_MM):
-    """uint8 array of shape (k, j, i): 1 and 0 in squares (cubes) squareMm wide; spacing (i, j, k) in mm."""
+def checkerboard(shape, spacing, squareMm=DEFAULT_CHECKER_MM, columnAxis=None):
+    """uint8 array of shape (k, j, i): 1 and 0 in squares squareMm wide; spacing (i, j, k) in mm. columnAxis (0 = i,
+    1 = j, 2 = k): the pattern does not change along that axis (columns through the volume, so every slice across
+    it shows the same 2D checkerboard); None: cubes."""
     if squareMm <= 0:
         raise ValueError("The checkerboard square size must be positive.")
     k, j, i = (np.arange(n) for n in shape)
-    ci = np.floor(i * float(spacing[0]) / squareMm).astype(int)
-    cj = np.floor(j * float(spacing[1]) / squareMm).astype(int)
-    ck = np.floor(k * float(spacing[2]) / squareMm).astype(int)
+    cells = [np.floor(index * float(spacing[a]) / squareMm).astype(int) for a, index in enumerate((i, j, k))]
+    if columnAxis is not None:
+        cells[columnAxis] = np.zeros_like(cells[columnAxis])
+    ci, cj, ck = cells
     return ((ck[:, None, None] + cj[None, :, None] + ci[None, None, :]) % 2).astype(np.uint8)
+
+
+# the patient axis across the slices of a view: S for axial, A for coronal, R for sagittal (0 = R, 1 = A, 2 = S)
+SLICE_NORMALS = {"Axial": 2, "Coronal": 1, "Sagittal": 0}
+
+
+def closestAxis(ijkToRas, rasAxis):
+    """Index (0 = i, 1 = j, 2 = k) of the grid axis that runs closest to the patient axis rasAxis (0 = R, 1 = A,
+    2 = S)."""
+    m = np.asarray(ijkToRas, dtype=float)[:3, :3]
+    directions = m / np.linalg.norm(m, axis=0)
+    return int(np.argmax(np.abs(directions[rasAxis, :])))
 
 
 def gridSpacing(ijkToRas):
@@ -175,6 +191,26 @@ def outputSpacing(mode, petSpacing, fixedSpacing, customSpacing=None):
             raise ValueError("Give a positive voxel size along i, j and k.")
         return values
     raise ValueError(f"Unknown output grid {mode!r}")
+
+
+def workingSpacing(fixedSpacing, petSpacing, voxelMm=None):
+    """Voxel size (i, j, k) of the CT/MR copy BRAINSFit registers to: the PET voxel size (or voxelMm along every
+    axis), never finer than the CT/MR itself. None when the CT/MR is not finer than that along any axis (it is used
+    as it is). A fine MR (0.5 mm) makes the B-spline step use many GB of memory; the PET resolution limits what
+    the registration can match anyway."""
+    fixedSpacing = np.asarray(fixedSpacing, dtype=float)
+    target = np.full(3, float(voxelMm)) if voxelMm else np.asarray(petSpacing, dtype=float)
+    spacing = np.maximum(fixedSpacing, target)
+    if np.allclose(spacing, fixedSpacing, rtol=1e-3):
+        return None
+    return tuple(float(v) for v in spacing)
+
+
+def smoothingSigmas(inputSpacing, outputSpacing):
+    """Gaussian standard deviations (voxels of the input, i, j, k) against aliasing before resampling to a coarser
+    grid: half the ratio of the voxel sizes along each axis that gets coarser, 0 elsewhere."""
+    ratio = np.asarray(outputSpacing, dtype=float) / np.asarray(inputSpacing, dtype=float)
+    return tuple(float(0.5 * r) if r > 1.0 + 1e-6 else 0.0 for r in ratio)
 
 
 def outputGrid(fixedDims, fixedIjkToRas, petSpacing):

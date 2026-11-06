@@ -148,12 +148,15 @@ class DynamicPETRegistrationLogic(ScriptedLoadableModuleLogic):
         steps                BRAINSFit transform types run one after the other (reg.validateSteps)
         initialization       BRAINSFit initializeTransformMode of the first step (geometric centres by default)
         samplingPercentage, bsplineGrid    BRAINSFit details
+        workingVoxelMm       voxel size of the CT/MR copy registered to (0: the PET voxel size; a CT/MR that is not
+                             finer is used as it is), see workingFixed()
     """
 
     @staticmethod
     def defaultSettings():
         return {"steps": list(reg.DEFAULT_STEPS), "initialization": reg.DEFAULT_INITIALIZATION,
-                "samplingPercentage": reg.DEFAULT_SAMPLING, "bsplineGrid": reg.DEFAULT_BSPLINE_GRID}
+                "samplingPercentage": reg.DEFAULT_SAMPLING, "bsplineGrid": reg.DEFAULT_BSPLINE_GRID,
+                "workingVoxelMm": reg.DEFAULT_WORKING_VOXEL_MM}
 
     @staticmethod
     def helperVolume(name, source=None):
@@ -215,6 +218,25 @@ class DynamicPETRegistrationLogic(ScriptedLoadableModuleLogic):
             raise
         return output
 
+    def workingFixed(self, fixed, petSource, voxelMm=None):
+        """The CT/MR BRAINSFit registers to: a hidden copy smoothed and resampled to the PET voxel size (or voxelMm)
+        over the same field of view, or None when the CT/MR is not finer (it is used as it is). A sub-millimetre MR
+        otherwise makes the B-spline step use tens of GB of memory."""
+        fixedMatrix = _ijkToRas(fixed)
+        fixedSpacing = reg.gridSpacing(fixedMatrix)
+        spacing = reg.workingSpacing(fixedSpacing, reg.gridSpacing(_ijkToRas(petSource)), voxelMm)
+        if spacing is None:
+            return None
+        dims, matrix = reg.outputGrid(fixed.GetImageData().GetDimensions(), fixedMatrix, spacing)
+        resampler = resampling.Resampler(fixedMatrix, dims, matrix)
+        working = self.helperVolume(f"{fixed.GetName()} registration working copy")
+        working.SetAndObserveImageData(resampler.resample(fixed.GetImageData(),
+                                                          reg.smoothingSigmas(fixedSpacing, spacing)))
+        working.SetIJKToRASMatrix(_vtkMatrix(matrix))
+        logging.info(f"Dynamic PET to CT/MR registration: '{fixed.GetName()}' registered at "
+                     f"{', '.join(f'{v:.3g}' for v in spacing)} mm ({dims[0]} x {dims[1]} x {dims[2]})")
+        return working
+
     def register(self, fixed, petSource, settings, progress=None):
         """Register petSource (a PET volume, not under a transform) to fixed (CT/MR) in the settings' steps. Every
         step starts where the previous ended: the linear steps are chained by moving the PET's geometry (lossless),
@@ -225,6 +247,8 @@ class DynamicPETRegistrationLogic(ScriptedLoadableModuleLogic):
         steps = reg.validateSteps(settings["steps"])
         if fixed.GetParentTransformNode() is not None:
             raise ValueError(f"The CT/MR '{fixed.GetName()}' is under a transform. Harden or remove it first.")
+        working = self.workingFixed(fixed, petSource, settings.get("workingVoxelMm") or None)
+        target = working if working is not None else fixed
         moving = self.helperVolume("PET registration moving", petSource)
         original = _ijkToRas(petSource)
         current = np.eye(4)
@@ -238,7 +262,7 @@ class DynamicPETRegistrationLogic(ScriptedLoadableModuleLogic):
                     break
                 moving.SetIJKToRASMatrix(_vtkMatrix(current @ original))
                 initialization = settings.get("initialization", reg.DEFAULT_INITIALIZATION) if index == 0 else "Off"
-                transform = self.registerStep(fixed, moving, step, settings, initialization)
+                transform = self.registerStep(target, moving, step, settings, initialization)
                 if reg.isLinearStep(step):
                     matrix = vtk.vtkMatrix4x4()
                     transform.GetMatrixTransformToParent(matrix)
@@ -260,6 +284,8 @@ class DynamicPETRegistrationLogic(ScriptedLoadableModuleLogic):
             raise
         finally:
             slicer.mrmlScene.RemoveNode(moving)
+            if working is not None:
+                slicer.mrmlScene.RemoveNode(working)
         logging.info(f"Dynamic PET to CT/MR registration of '{petSource.GetName()}' to '{fixed.GetName()}': "
                      + "; ".join(reg.summaryLines(result["steps"], result["linear"], result["center"],
                                                   result["deformation"])))
@@ -433,7 +459,7 @@ class RegistrationSession:
         self.petView = None         # PET column (and under the checkerboard)
         self.petFusion = None       # PET over the CT/MR
         self.fixedHelper = None     # CT/MR in grey with the module's window
-        self.checker = None         # checkerboard on the PET grid
+        self.checkers = {}          # orientation -> checkerboard on the PET grid, in columns across that row's slices
         self.linear = None          # linear transform of the automatic steps
         self.bspline = None         # B-spline of the last step (owned by the widget's result)
         self.manual = None          # manual correction (handles)
@@ -485,10 +511,12 @@ class RegistrationSession:
                 layoutManager.setLayout(self.previousLayout)
         if self.bspline is not None and slicer.mrmlScene.IsNodePresent(self.bspline):
             self.bspline.SetAndObserveTransformNodeID(None)
-        for node in (self.petView, self.petFusion, self.checker, self.fixedHelper, self.linear, self.manual):
+        for node in [self.petView, self.petFusion, self.fixedHelper, self.linear, self.manual] + \
+                list(self.checkers.values()):
             if node is not None and slicer.mrmlScene.IsNodePresent(node):
                 slicer.mrmlScene.RemoveNode(node)
-        self.petView = self.petFusion = self.checker = self.fixedHelper = self.linear = self.manual = None
+        self.petView = self.petFusion = self.fixedHelper = self.linear = self.manual = None
+        self.checkers = {}
         self.bspline = None
 
     # --- volumes --------------------------------------------------------------------------------
@@ -496,7 +524,7 @@ class RegistrationSession:
         """The PET reference shown (and registered): its voxels shared by the PET, fusion and checkerboard helpers,
         all under the registration chain."""
         logic = DynamicPETRegistrationLogic
-        old = [self.petView, self.petFusion, self.checker]
+        old = [self.petView, self.petFusion]
         self.petView = logic.helperVolume(f"{source.GetName()} registration PET", source)
         self.petFusion = logic.helperVolume(f"{source.GetName()} registration fusion", source)
         array = slicer.util.arrayFromVolume(source)
@@ -516,24 +544,34 @@ class RegistrationSession:
                 slicer.mrmlScene.RemoveNode(node)
 
     def _makeChecker(self, source):
-        old = self.checker
-        self.checker = DynamicPETRegistrationLogic.helperVolume(f"{source.GetName()} registration checkerboard")
+        """One checkerboard per row, on the PET grid: columns along the grid axis closest to the row's slice normal
+        (S for axial, A for coronal), so every slice of the row shows the same flat 2D checkerboard, bent only by the
+        transform."""
+        old = list(self.checkers.values())
+        self.checkers = {}
         dims = source.GetImageData().GetDimensions()
-        spacing = reg.gridSpacing(_ijkToRas(source))
-        slicer.util.updateVolumeFromArray(self.checker, reg.checkerboard(dims[::-1], spacing, self.checkerMm))
-        self.checker.SetIJKToRASMatrix(_vtkMatrix(_ijkToRas(source)))
-        self.checker.CreateDefaultDisplayNodes()
-        display = self.checker.GetDisplayNode()
-        display.SetAndObserveColorNodeID(CHECKER_COLOR_ID)
-        display.AutoWindowLevelOff()
-        display.SetWindowLevelMinMax(0.0, 1.0)
-        display.SetApplyThreshold(True)           # the 0 squares are transparent
-        display.SetLowerThreshold(0.5)
-        display.SetUpperThreshold(10.0)
-        display.SetInterpolate(False)
-        self.checker.SetAndObserveTransformNodeID(self.linear.GetID())
-        if old is not None and old is not self.checker and slicer.mrmlScene.IsNodePresent(old):
-            slicer.mrmlScene.RemoveNode(old)
+        matrix = _ijkToRas(source)
+        spacing = reg.gridSpacing(matrix)
+        for orientation, _ in reg.ROWS:
+            column = reg.closestAxis(matrix, reg.SLICE_NORMALS[orientation])
+            checker = DynamicPETRegistrationLogic.helperVolume(
+                f"{source.GetName()} registration checkerboard {orientation.lower()}")
+            slicer.util.updateVolumeFromArray(checker, reg.checkerboard(dims[::-1], spacing, self.checkerMm, column))
+            checker.SetIJKToRASMatrix(_vtkMatrix(matrix))
+            checker.CreateDefaultDisplayNodes()
+            display = checker.GetDisplayNode()
+            display.SetAndObserveColorNodeID(CHECKER_COLOR_ID)
+            display.AutoWindowLevelOff()
+            display.SetWindowLevelMinMax(0.0, 1.0)
+            display.SetApplyThreshold(True)           # the 0 squares are transparent
+            display.SetLowerThreshold(0.5)
+            display.SetUpperThreshold(10.0)
+            display.SetInterpolate(False)
+            checker.SetAndObserveTransformNodeID(self.linear.GetID())
+            self.checkers[orientation] = checker
+        for node in old:
+            if slicer.mrmlScene.IsNodePresent(node):
+                slicer.mrmlScene.RemoveNode(node)
 
     def setCheckerSize(self, squareMm):
         self.checkerMm = float(squareMm)
@@ -701,10 +739,10 @@ class RegistrationSession:
         self.linked = bool(linked)
         self._link(self.linked)
 
-    def _expected(self, column):
-        """(background, foreground, opacity) of a column."""
+    def _expected(self, column, orientation):
+        """(background, foreground, opacity) of a view."""
         if column == "Checker":
-            return self.petView, self.checker, self.checkerOpacity
+            return self.petView, self.checkers.get(orientation), self.checkerOpacity
         if column == "PET":
             return self.petView, None, 0.0
         if column == "Fusion":
@@ -724,7 +762,7 @@ class RegistrationSession:
         self._link(False)
         try:
             for orientation, column, widget in self._views():
-                background, foreground, opacity = self._expected(column)
+                background, foreground, opacity = self._expected(column, orientation)
                 composite = widget.mrmlSliceCompositeNode()
                 composite.SetBackgroundVolumeID(background.GetID() if background else None)
                 composite.SetForegroundVolumeID(foreground.GetID() if foreground else None)
@@ -743,9 +781,9 @@ class RegistrationSession:
                     anat.sliceController().fitSliceToBackground()
             for widget in self._allWidgets():
                 widget.mrmlSliceNode().JumpSliceByCentering(*center)
-        for _, column, widget in self._views():
-            self.observers.append(guardViewVolumes(widget, lambda column=column: tuple(
-                n.GetID() if n is not None else None for n in self._expected(column)[:2]) + (None,)))
+        for orientation, column, widget in self._views():
+            self.observers.append(guardViewVolumes(widget, lambda column=column, orientation=orientation: tuple(
+                n.GetID() if n is not None else None for n in self._expected(column, orientation)[:2]) + (None,)))
         self.guarded = True
 
 
@@ -838,6 +876,19 @@ class DynamicPETRegistrationWidget(ScriptedLoadableModuleWidget, VTKObservationM
         self.gridSpin.value = reg.DEFAULT_BSPLINE_GRID
         self.gridSpin.toolTip = "B-spline control grid size along each axis"
         advancedForm.addRow("B-spline grid:", self.gridSpin)
+        self.workingVoxelSpin = qt.QDoubleSpinBox()
+        self.workingVoxelSpin.setRange(0.0, 10.0)
+        self.workingVoxelSpin.setDecimals(1)
+        self.workingVoxelSpin.setSingleStep(0.5)
+        self.workingVoxelSpin.setSuffix(" mm")
+        self.workingVoxelSpin.specialValueText = "PET voxel size"
+        self.workingVoxelSpin.value = reg.DEFAULT_WORKING_VOXEL_MM
+        self.workingVoxelSpin.toolTip = (
+            "The CT/MR is smoothed and resampled to this voxel size for the registration only (the views and Harden "
+            "use it as it is). Default: the PET voxel size, which is all the PET can match; a sub-millimetre MR at "
+            "full resolution makes the B-spline step take many GB of memory. A CT/MR that is not finer is used as "
+            "it is.")
+        advancedForm.addRow("Register CT/MR at:", self.workingVoxelSpin)
         regForm.addRow(advanced)
         self.stepsNote = qt.QLabel()
         self.stepsNote.wordWrap = True
@@ -989,7 +1040,8 @@ class DynamicPETRegistrationWidget(ScriptedLoadableModuleWidget, VTKObservationM
         return {"steps": reg.validateSteps(self.steps()),
                 "initialization": self.initializationCombo.itemData(self.initializationCombo.currentIndex) or
                 reg.DEFAULT_INITIALIZATION,
-                "samplingPercentage": self.samplingSpin.value, "bsplineGrid": self.gridSpin.value}
+                "samplingPercentage": self.samplingSpin.value, "bsplineGrid": self.gridSpin.value,
+                "workingVoxelMm": self.workingVoxelSpin.value}
 
     def onStepsChanged(self, *args):
         try:
@@ -1486,6 +1538,12 @@ class DynamicPETRegistrationTest(ScriptedLoadableModuleTest):
         self.assertEqual([n for n in slicer.util.getNodesByClass("vtkMRMLScalarVolumeNode")
                           if n.GetAttribute(HELPER_ATTRIBUTE)], [])
 
+        # a CT finer than the PET is registered through a coarser working copy (removed afterwards)
+        working = logic.workingFixed(ct, summed, 8.0)
+        self.assertEqual(slicer.util.arrayFromVolume(working).shape, (20, 24, 24))
+        slicer.mrmlScene.RemoveNode(working)
+        self.assertIsNone(logic.workingFixed(ct, summed))          # same voxel size as the PET: used as it is
+
         # a rigid + B-spline run (geometric centres) also finishes and reports the deformation
         both = logic.register(ct, summed, dict(logic.defaultSettings(), steps=["Rigid", "BSpline"]))
         self.assertIsNotNone(both["bspline"])
@@ -1505,8 +1563,13 @@ class DynamicPETRegistrationTest(ScriptedLoadableModuleTest):
             session.setShowCheckerboard(True)
             self.assertEqual(layoutManager.layout, CHECKER_LAYOUT_ID)
             checker = layoutManager.sliceWidget(reg.viewName("Coronal", "Checker")).mrmlSliceCompositeNode()
-            self.assertEqual(checker.GetForegroundVolumeID(), session.checker.GetID())
-            self.assertEqual(session.checker.GetParentTransformNode(), session.linear)
+            self.assertEqual(checker.GetForegroundVolumeID(), session.checkers["Coronal"].GetID())
+            self.assertEqual(session.checkers["Axial"].GetParentTransformNode(), session.linear)
+            # axial: columns along S (k here), coronal: along A (j)
+            axial = slicer.util.arrayFromVolume(session.checkers["Axial"])
+            coronal = slicer.util.arrayFromVolume(session.checkers["Coronal"])
+            np.testing.assert_array_equal(axial[0], axial[-1])
+            np.testing.assert_array_equal(coronal[:, 0, :], coronal[:, -1, :])
             # the manual handles move the PET on top of the registration
             session.setManualHandles(True)
             manual = np.eye(4)
