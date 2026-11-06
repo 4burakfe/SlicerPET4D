@@ -153,6 +153,8 @@ built from several static scans (add them, then *Save as...*). The bar above the
 - **Remove**: the selected frames are left out. The other frames keep their values: decay correction is to a
   fixed reference time, not to the first frame, and that time is written to the saved series.
 - **Discard changes**: back to the original series (after a question).
+- **Undo** / **Redo** (Ctrl+Z, Ctrl+Y): every edit above, Discard changes too, can be undone and redone until the
+  series is saved.
 
 Once something is edited, the original timeline stays at the bottom at half height, **locked** (it zooms and pans
 with the edited one, but frames cannot be clicked; the frames of the current edited frame are outlined), and the
@@ -163,6 +165,8 @@ original sequence is not changed.
   volume (weighted as the original's), next to the original in the subject hierarchy.
 - **Overwrite original** (after a question) replaces the frames of the sequence, its frame timing table and its
   summed volume. A series opened from a static volume can only be saved as a new one.
+
+- **Export to DICOM...** (when there are no unsaved edits): see *DICOM export* below.
 
 After saving, the saved series is opened again with a plain timeline. Edited frames carry
 `DynamicPET.EditSources` (what they are made of, e.g. *F2 + F3 (merged)*), the timing tags are written again
@@ -217,6 +221,27 @@ place of the weight (`SUVMethod`, `LeanBodyMassKg`, `BodySurfaceAreaM2` are stor
 - Philips counts images use the Philips SUV and activity scale factors; GML images are already in SUVbw.
 - When SUV cannot be computed (no weight, dose or times) only Bq/ml is offered, and the reason is in the
   tooltip.
+
+### DICOM export
+
+*Export to DICOM...* in Review/Edit (the series that is open) and in Motion Correction (the selected series, e.g. the
+motion corrected one after *Harden transforms*) writes the series as a **new DICOM series in the study of the
+original series** and adds it to the DICOM database, so the DICOM browser lists it under the same patient and study.
+It asks for the series description (default: the sequence name).
+
+- PET Image Storage, one image per slice and frame, Series Type DYNAMIC\IMAGE, Number of Time Slices, Image Index,
+  Acquisition Date / Time = frame start, Actual Frame Duration, Frame Reference Time and Decay Factor, so this
+  extension (and other software) loads it back with the same frames and timing.
+- Patient, study, frame of reference, tracer (Radiopharmaceutical Information Sequence) and scanner are copied
+  from an image of the original series; the Series Number is one above the highest of the study.
+- Units BQML (Bq/ml) or GML (SUVbw); SUVlbm / SUVbsa series cannot be exported (open the Bq/ml loadable).
+  Every image has its own rescale slope (16 bit).
+- Decay correction START with the series' decay reference as Series Time and Decay Correction DateTime (the frames
+  corrected by the loader and series aligned in Review/Edit are START too); NONE when the frames are not decay
+  corrected.
+- Image Type DERIVED\PRIMARY; Derivation Description says what was done (edited in Review/Edit, motion corrected)
+  and, per frame, what the frame is made of.
+- The original series must be in the DICOM database (its study is where the new series goes).
 
 ## Dynamic PET Motion Correction
 
@@ -301,6 +326,8 @@ Under *Register frames*:
 - **Revert changes** drops a registration that is not hardened yet; after hardening with the originals kept it
   removes the new series, its table and summed image and goes back to the original series (until another series or
   reference is picked, or the scene is closed).
+- **Export to DICOM...** writes the selected series (after *Harden transforms*: the motion corrected one) as a new
+  DICOM series in the study of the original and adds it to the DICOM browser (see *DICOM export* above).
 
 Leaving the module closes its layout and timeline and switches to the four-up layout; coming back opens them again,
 with the registration. The timeline can also be closed with its own close button, or with *Close layout*.
@@ -362,7 +389,8 @@ DICOMGatedDynamicPET/
     dynamicviews.py, timeline.py   Review/Edit layout helpers and the timeline widget
     roicurves.py                   spherical ROIs: sphere voxels, time-activity curves (numpy, no Slicer imports)
     frameedit.py                   Review/Edit frame editing: merge / split / remove / add, series comparison and
-                                   decay alignment, timing of the saved series (numpy, no Slicer imports)
+                                   decay alignment, timing of the saved series, undo (numpy, no Slicer imports)
+    dicomexport.py                 DICOM export of a dynamic series (pydicom + numpy, no Slicer imports)
     motioncorrection.py            Motion Correction: low activity frames, rigid shift / angles, motion limit (numpy)
     petseries.py                   PET DICOM: kind, frame ordering, geometry, SUV, tracer, decay, frame timing,
                                    ECG gating, synthetic test series (pydicom + numpy, no Slicer imports)

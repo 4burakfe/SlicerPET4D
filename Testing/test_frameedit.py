@@ -156,3 +156,28 @@ def test_timing_rows():
     assert rows[3]["StartDateTime"] == "2026-01-01T11:00:00"
     assert rows[3]["StartFromStudyStartS"] == 3600 and rows[3]["EndFromInjectionS"] == 4260
     assert "merged" in rows[0]["StartSource"]
+
+
+def test_undo_redo():
+    edit = fe.FrameEdit(originals())
+    assert not edit.canUndo()
+    edit.merge([0, 1])
+    edit.add("Late", [{"start": 3600.0, "duration": 600.0, "label": "L"}], scaleExisting=1.5)
+    edit.remove([0])
+    assert edit.undoText() == "Remove"
+    assert edit.undo() == "Remove" and len(edit.frames) == 4
+    assert edit.undo() == "Add Late" and len(edit.frames) == 3 and edit.scale("o3") == 1.0
+    assert edit.redoText() == "Add Late"
+    assert edit.redo() == "Add Late" and edit.frames[-1] == ["a1.1"] and edit.scale("o3") == 1.5
+    edit.discard()
+    assert not edit.isEdited() and edit.undo() == "Discard changes" and edit.isEdited()
+    assert edit.undo() == "Add Late" and edit.canRedo()
+    # a new operation clears the redo history; keys of added series are never used twice
+    assert edit.nextAddedKeys(2) == ["a2.1", "a2.2"]
+    edit.add("Other", [{"start": 5000.0, "duration": 60.0, "label": "O"}])
+    assert not edit.canRedo() and edit.frames[-1] == ["a2.1"]
+    assert edit.undo() == "Add Other"
+    assert edit.undo() == "Merge" and not edit.isEdited() and not edit.canUndo()
+    edit.merge([0, 1])
+    edit.reset()
+    assert not edit.canUndo()

@@ -1296,7 +1296,12 @@ class DynamicPETEditorSession:
         self.removeButton.toolTip = "Remove the selected frames from the edited series"
         self.discardButton = qt.QPushButton("Discard changes")
         self.discardButton.toolTip = "Drop every edit: back to the original series"
-        for button in (self.mergeButton, self.splitButton, self.removeButton, self.discardButton):
+        self.undoButton = qt.QToolButton()
+        self.undoButton.text = "Undo"
+        self.redoButton = qt.QToolButton()
+        self.redoButton.text = "Redo"
+        for button in (self.mergeButton, self.splitButton, self.removeButton, self.discardButton, self.undoButton,
+                       self.redoButton):
             row.addWidget(button)
         row.addStretch(1)
         self.saveAsButton = qt.QPushButton("Save as...")
@@ -1304,14 +1309,27 @@ class DynamicPETEditorSession:
                                      "and summed volume); the original stays")
         self.overwriteButton = qt.QPushButton("Overwrite original")
         self.overwriteButton.toolTip = "Replace the frames of the original sequence (and its summed volume) by the edit"
+        self.exportButton = qt.QPushButton("Export to DICOM...")
+        self.exportButton.toolTip = ("Write the series as a new DICOM series in the study of the original one and add "
+                                     "it to the DICOM browser (save the edits first)")
         row.addWidget(self.saveAsButton)
         row.addWidget(self.overwriteButton)
+        row.addWidget(self.exportButton)
         self.addButton.connect("clicked()", self.onAddClicked)
         self.mergeButton.connect("clicked()", self.onMergeClicked)
         self.splitButton.connect("clicked()", self.onSplitClicked)
         self.removeButton.connect("clicked()", self.onRemoveClicked)
         self.discardButton.connect("clicked()", self.onDiscardClicked)
+        self.undoButton.connect("clicked()", self.undo)
+        self.redoButton.connect("clicked()", self.redo)
+        self.shortcuts = []
+        for keys, action in (("Ctrl+Z", self.undo), ("Ctrl+Y", self.redo), ("Ctrl+Shift+Z", self.redo)):
+            shortcut = qt.QShortcut(qt.QKeySequence(keys), self.dock)
+            shortcut.setContext(qt.Qt.WidgetWithChildrenShortcut)
+            shortcut.connect("activated()", action)
+            self.shortcuts.append(shortcut)
         self.saveAsButton.connect("clicked()", self.onSaveAsClicked)
+        self.exportButton.connect("clicked()", self.onExportClicked)
         self.overwriteButton.connect("clicked()", self.onOverwriteClicked)
         return row
 
@@ -1454,8 +1472,17 @@ class DynamicPETEditorSession:
         self.splitButton.enabled = editing and self.edit.canSplit(selected)
         self.removeButton.enabled = bool(selected) and len(selected) < self.frameCount()
         self.discardButton.enabled = editing
+        canUndo, canRedo = self.edit is not None and self.edit.canUndo(), self.edit is not None and self.edit.canRedo()
+        self.undoButton.enabled, self.redoButton.enabled = canUndo, canRedo
+        self.undoButton.toolTip = f"Undo {self.edit.undoText()} (Ctrl+Z)" if canUndo else "Nothing to undo"
+        self.redoButton.toolTip = f"Redo {self.edit.redoText()} (Ctrl+Y)" if canRedo else "Nothing to redo"
         self.saveAsButton.enabled = editing
         self.overwriteButton.enabled = editing and not self.temporarySequence
+        self.exportButton.enabled = not editing and not self.temporarySequence
+        self.exportButton.toolTip = (
+            "Save the edits first (Save as... or Overwrite original), then export the saved series" if editing else
+            "Save the series first (Save as...)" if self.temporarySequence else
+            "Write the series as a new DICOM series in the study of the original one and add it to the DICOM browser")
         self.overwriteButton.toolTip = (
             "The series was opened from a static volume: use Save as..." if self.temporarySequence else
             "Replace the frames of the original sequence (and its summed volume) by the edit")
@@ -1482,10 +1509,22 @@ class DynamicPETEditorSession:
         self._applyEdits([])
 
     def discardEdits(self):
+        """Back to the original series (Undo brings the edits back)."""
         if self.edit is not None:
-            self.edit.reset()
-        self.editArrays = {}
+            self.edit.discard()
         self._applyEdits([])
+
+    def undo(self):
+        label = self.edit.undo() if self.edit is not None else None
+        if label is not None:
+            self._applyEdits([])
+        return label
+
+    def redo(self):
+        label = self.edit.redo() if self.edit is not None else None
+        if label is not None:
+            self._applyEdits([])
+        return label
 
     def _grid(self):
         first = self.sequenceNode.GetNthDataNode(0)
@@ -1545,9 +1584,8 @@ class DynamicPETEditorSession:
                     raise fe.EditError(f"'{frameNode.GetName()}' has no image.")
                 arrays.append((np.array(array, dtype=np.float32),
                                slicer.util.arrayFromVTKMatrix(_vtkMatrix(frameNode))))
-        number = len(edit.addedSeries) + 1
-        for i, data in enumerate(arrays):
-            self.editArrays[f"a{number}.{i + 1}"] = data
+        for key, data in zip(edit.nextAddedKeys(len(arrays)), arrays):
+            self.editArrays[key] = data
         indexes = edit.add(node.GetName(), prepared["atoms"], comparison["scaleBase"], comparison["scaleAdded"],
                            comparison["reference"])
         self._applyEdits(indexes)
@@ -1648,7 +1686,8 @@ class DynamicPETEditorSession:
 
     def onDiscardClicked(self):
         if self.isEditing() and slicer.util.confirmYesNoDisplay(
-                "Discard every change and go back to the original series?", windowTitle="Discard changes"):
+                "Discard every change and go back to the original series? (Undo brings them back.)",
+                windowTitle="Discard changes"):
             self.discardEdits()
 
     def onSaveAsClicked(self):
@@ -1662,6 +1701,10 @@ class DynamicPETEditorSession:
         sequence = self._guard(lambda: saveEditedSeries(self, str(name).strip()), "Save as")
         if sequence is not None and self.onSaved:
             self.onSaved(sequence)
+
+    def onExportClicked(self):
+        if not self.isEditing() and not self.temporarySequence:
+            exportSequenceDialog(self.sequenceNode)
 
     def onOverwriteClicked(self):
         if not self.isEditing() or self.temporarySequence:
@@ -1750,6 +1793,8 @@ def staticAsSequence(volume):
     frame.SetAttribute(PREFIX + "StartFromStudyStartS", "0")
     frame.SetAttribute(PREFIX + "DurationMs", f"{duration * 1000.0:g}")
     frame.SetAttribute("DICOM.Modality", "PT")
+    if volume.GetAttribute("DICOM.instanceUIDs"):
+        frame.SetAttribute("DICOM.instanceUIDs", volume.GetAttribute("DICOM.instanceUIDs"))
     frame.SetIJKToRASMatrix(_vtkMatrix(volume))
     image = vtk.vtkImageData()
     image.DeepCopy(volume.GetImageData())
@@ -1817,6 +1862,9 @@ def editedFrameNodes(session, baseName):
         node.SetAttribute(PREFIX + "Frames", str(len(rows)))
         if original is None:
             node.SetAttribute(PREFIX + "EditSources", edit.frameSources(i))
+            uids = (node.GetAttribute("DICOM.instanceUIDs") or "").split()
+            if uids:     # the study the DICOM export puts the series in
+                node.SetAttribute(PREFIX + "TemplateInstanceUID", uids[0])
             node.RemoveAttribute("DICOM.instanceUIDs")
         if edit.reference is not None:
             node.SetAttribute(PREFIX + "EditDecayReference", edit.reference.isoformat())
@@ -1951,6 +1999,138 @@ def saveEditedSeries(session, name=None, overwrite=False):
     logging.info(f"Dynamic PET Review/Edit: '{sequence.GetName()}' {'overwritten' if overwrite else 'saved'} with "
                  f"{len(rows)} frames")
     return sequence
+
+
+# ---------------------------------------------------------------------------
+# DICOM export (also used by Dynamic PET Motion Correction)
+# ---------------------------------------------------------------------------
+def templateInstanceUID(sequence):
+    """An instance UID of the original DICOM series of a dynamic sequence (its study is the export's), or None."""
+    nodes = [sequence.GetNthDataNode(i) for i in range(sequence.GetNumberOfDataNodes())]
+    summed = slicer.mrmlScene.GetNodeByID(sequence.GetAttribute(PREFIX + "SummedVolumeID") or "")
+    for node in nodes + [summed, sequence]:
+        if node is None:
+            continue
+        uids = (node.GetAttribute("DICOM.instanceUIDs") or "").split()
+        uid = uids[0] if uids else node.GetAttribute(PREFIX + "TemplateInstanceUID")
+        if uid:
+            return uid
+    return None
+
+
+def _nextSeriesNumber(studyUID, fallback=900):
+    """One above the highest Series Number of the study in the DICOM database."""
+    try:
+        db = slicer.dicomDatabase
+        numbers = []
+        for series in db.seriesForStudy(studyUID):
+            instances = db.instancesForSeries(series) if series else []
+            if instances:
+                number = fe.number(db.instanceValue(instances[0], "0020,0011"))
+                if number is not None:
+                    numbers.append(int(number))
+        return max(numbers) + 1 if numbers else fallback
+    except Exception:
+        return fallback
+
+
+def exportSequenceToDicom(sequence, description, progress=None):
+    """Write a dynamic PET sequence as a new DICOM series in the study of its original series and add it to the
+    DICOM database (the DICOM browser lists it). Returns (SeriesInstanceUID, number of files)."""
+    import pydicom
+    import shutil
+    import tempfile
+    from DICOMGatedDynamicPETLib import dicomexport
+    db = getattr(slicer, "dicomDatabase", None)
+    if db is None or not db.isOpen:
+        raise dicomexport.ExportError("The DICOM database is not open.")
+    uid = templateInstanceUID(sequence)
+    path = db.fileForInstance(uid) if uid else ""
+    if not path:
+        raise dicomexport.ExportError(f"The original DICOM series of '{sequence.GetName()}' is not in the DICOM "
+                                      "database, so the study to put it in is unknown.")
+    template = pydicom.dcmread(path, stop_before_pixels=True)
+    tags = seriesTags(sequence, "dynamic")
+    corrected, reference = decayStatus(tags)
+    correction = (tags.get("DecayCorrection") or "START").upper()
+    if not corrected:
+        correction = "NONE"
+    elif correction == "NONE" or tags.get("EditDecayReference"):
+        correction = "START"       # decay corrected by the loader or aligned by Review/Edit
+    frames, rows, notes = [], [], []
+    matrix = None
+    for i in range(sequence.GetNumberOfDataNodes()):
+        node = sequence.GetNthDataNode(i)
+        array = _array(node)
+        if array is None:
+            raise dicomexport.ExportError(f"Frame {i + 1} has no image.")
+        frameMatrix = slicer.util.arrayFromVTKMatrix(_vtkMatrix(node))
+        if matrix is None:
+            matrix = frameMatrix
+        elif array.shape != frames[0].shape or not np.allclose(frameMatrix, matrix, atol=1e-3):
+            raise dicomexport.ExportError("The frames are on different image grids; resample them first.")
+        frames.append(array)
+        rows.append({"StartDateTime": node.GetAttribute(PREFIX + "StartDateTime"),
+                     "DurationS": node.GetAttribute(PREFIX + "DurationS")})
+        notes.append(node.GetAttribute(PREFIX + "EditSources") or
+                     node.GetAttribute(PREFIX + "MotionCorrection.Status"))
+    derivation = "Dynamic PET (PET4D)"
+    if sequence.GetAttribute(PREFIX + "EditedFrom"):
+        derivation += f", edited in Review/Edit from {sequence.GetAttribute(PREFIX + 'EditedFrom')}"
+    if sequence.GetAttribute(PREFIX + "MotionCorrection.Method"):
+        derivation += f", motion corrected ({sequence.GetAttribute(PREFIX + 'MotionCorrection.Method')})"
+    datasets = dicomexport.buildDatasets(
+        frames, matrix, rows, template, tags.get("Units"), description,
+        _nextSeriesNumber(str(template.StudyInstanceUID)), correction,
+        reference if correction == "START" else None, fe.number(tags.get("RadionuclideHalfLifeS")),
+        derivation=derivation, frameNotes=[f"{derivation}: {n}" if n else None for n in notes])
+    folder = tempfile.mkdtemp(prefix="PET4Dexport", dir=slicer.app.temporaryPath)
+    try:
+        if progress:
+            progress("Writing the DICOM files...")
+        paths = dicomexport.writeDatasets(folder, datasets)
+        if progress:
+            progress("Adding the series to the DICOM database...")
+        from DICOMLib import DICOMUtils
+        DICOMUtils.importDicom(folder, db, copyFiles=True)
+    finally:
+        shutil.rmtree(folder, ignore_errors=True)
+    seriesUID = str(datasets[0].SeriesInstanceUID)
+    sequence.SetAttribute(PREFIX + "ExportedSeriesInstanceUID", seriesUID)
+    logging.info(f"Dynamic PET: '{sequence.GetName()}' exported to DICOM as '{description}' ({len(paths)} images, "
+                 f"series {seriesUID}, study {template.StudyInstanceUID})")
+    return seriesUID, len(paths)
+
+
+def exportSequenceDialog(sequence):
+    """Ask for the series description, export and tell the user. Returns the SeriesInstanceUID or None."""
+    from DICOMGatedDynamicPETLib import dicomexport
+    description = qt.QInputDialog.getText(
+        slicer.util.mainWindow(), "Export to DICOM",
+        "Series description of the new DICOM series (in the study of the original series):", qt.QLineEdit.Normal,
+        sequence.GetName()[:64])
+    if not description or not str(description).strip():
+        return None
+    dialog = slicer.util.createProgressDialog(labelText="Exporting to DICOM...", maximum=0)
+    try:
+        def progress(text):
+            dialog.labelText = text
+            slicer.app.processEvents()
+        seriesUID, count = exportSequenceToDicom(sequence, str(description).strip()[:64], progress)
+    except dicomexport.ExportError as error:
+        dialog.close()
+        slicer.util.warningDisplay(str(error), windowTitle="Export to DICOM")
+        return None
+    except Exception as error:
+        dialog.close()
+        logging.exception("DICOM export failed")
+        slicer.util.errorDisplay(f"DICOM export failed:\n{error}", windowTitle="Export to DICOM")
+        return None
+    dialog.close()
+    slicer.util.infoDisplay(f"'{sequence.GetName()}' was exported as the DICOM series '{description}' "
+                            f"({count} images) in the study of the original series, and added to the DICOM "
+                            "database.", windowTitle="Export to DICOM")
+    return seriesUID
 
 
 def _placeNextTo(sourceNode, nodes):
@@ -2426,6 +2606,8 @@ class DynamicPETEditorTest(ScriptedLoadableModuleTest):
         self.test_EditFrames()
         self.setUp()
         self.test_StartFromStatic()
+        self.setUp()
+        self.test_ExportDicom()
 
     def test_OpenEditor(self):
         import tempfile
@@ -2562,8 +2744,16 @@ class DynamicPETEditorTest(ScriptedLoadableModuleTest):
             newSummed = slicer.mrmlScene.GetNodeByID(saved.GetAttribute(PREFIX + "SummedVolumeID"))
             self.assertIsNotNone(newSummed)
             self.assertIsNot(newSummed, summed)
-            # discard
+            # discard, undo it, redo it
             session.discardEdits()
+            self.assertFalse(session.isEditing())
+            self.assertEqual(session.undo(), "Discard changes")
+            self.assertEqual(session.frameCount(), 4)
+            self.assertTrue(session.isEditing())
+            self.assertEqual(session.undo(), "Remove")
+            self.assertEqual(session.frameCount(), 5)
+            session.redo()
+            session.redo()
             self.assertFalse(session.isEditing())
             self.assertEqual(session.frameCount(), 4)
             self.assertEqual(session.mainVolume(), session.proxyNode)
@@ -2598,3 +2788,37 @@ class DynamicPETEditorTest(ScriptedLoadableModuleTest):
         finally:
             session.close()
         self.assertFalse(slicer.mrmlScene.IsNodePresent(temporary))
+
+    def test_ExportDicom(self):
+        import tempfile
+        from DICOMLib import DICOMUtils
+        from DICOMGatedDynamicPETLib import petseries
+        from DICOMGatedDynamicPET import DICOMGatedDynamicPETPluginClass
+        plugin = DICOMGatedDynamicPETPluginClass()
+        with DICOMUtils.TemporaryDICOMDatabase() as db:
+            folder = tempfile.mkdtemp(prefix="petseries")
+            files, _ = petseries.writeSyntheticSeries(folder, kind=petseries.DYNAMIC, frames=3,
+                                                      frameDurationsS=[10.0, 30.0, 60.0])
+            DICOMUtils.importDicom(folder, db)
+            summed = plugin.loadSeries(files, "Export dynamic Bq/ml", petseries.UNITS_ACTIVITY, summed=True)
+            sequence = slicer.mrmlScene.GetNodeByID(summed.GetAttribute(PREFIX + "DynamicSequence"))
+            session = DynamicPETEditorSession(sequence)
+            session.open()
+            try:
+                session.mergeFrames([1, 2])
+                saved = saveEditedSeries(session, "Export merged")
+            finally:
+                session.close()
+            seriesUID, count = exportSequenceToDicom(saved, "Export merged")
+            self.assertEqual(count, 2 * 6)
+            studies = db.studiesForPatient(db.patients()[0])
+            self.assertEqual(len(studies), 1)                       # the same study
+            self.assertIn(seriesUID, db.seriesForStudy(studies[0]))
+            exported = db.filesForSeries(seriesUID)
+            again = plugin.loadSeries(exported, "Reloaded dynamic Bq/ml", petseries.UNITS_ACTIVITY, summed=True)
+            reloaded = slicer.mrmlScene.GetNodeByID(again.GetAttribute(PREFIX + "DynamicSequence"))
+            self.assertEqual(reloaded.GetNumberOfDataNodes(), 2)
+            for i in range(2):
+                np.testing.assert_allclose(slicer.util.arrayFromVolume(reloaded.GetNthDataNode(i)),
+                                           slicer.util.arrayFromVolume(saved.GetNthDataNode(i)), rtol=1e-3)
+            self.assertEqual(reloaded.GetNthDataNode(1).GetAttribute(PREFIX + "DurationS"), "90")
