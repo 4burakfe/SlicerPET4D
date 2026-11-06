@@ -2127,10 +2127,73 @@ def exportSequenceDialog(sequence):
         slicer.util.errorDisplay(f"DICOM export failed:\n{error}", windowTitle="Export to DICOM")
         return None
     dialog.close()
-    slicer.util.infoDisplay(f"'{sequence.GetName()}' was exported as the DICOM series '{description}' "
-                            f"({count} images) in the study of the original series, and added to the DICOM "
-                            "database.", windowTitle="Export to DICOM")
+    exportDoneDialog(sequence, str(description).strip()[:64], seriesUID, count)
     return seriesUID
+
+
+def exportedLocation(seriesUID):
+    """Where the DICOM database keeps an exported series: (folder of its files, list of files, database folder)."""
+    import os
+    db = slicer.dicomDatabase
+    try:
+        files = [str(f) for f in db.filesForSeries(seriesUID)]
+    except Exception:
+        files = []
+    folder = ""
+    if files:
+        try:
+            folder = os.path.commonpath([os.path.dirname(f) for f in files])
+        except ValueError:
+            folder = os.path.dirname(files[0])
+    return folder, files, str(getattr(db, "databaseDirectory", "") or "")
+
+
+def exportDoneDialog(sequence, description, seriesUID, count):
+    """Tell exactly where and how the series was saved, with buttons to open the folder or copy its path."""
+    import html
+    import os
+    folder, files, databaseFolder = exportedLocation(seriesUID)
+    study = patient = seriesNumber = ""
+    try:
+        import pydicom
+        if files:
+            ds = pydicom.dcmread(files[0], stop_before_pixels=True)
+            patient = f"{ds.get('PatientName', '')} ({ds.get('PatientID', '')})"
+            study = " ".join(str(v) for v in (ds.get("StudyDescription", ""), ds.get("StudyDate", "")) if v)
+            study = study or str(ds.get("StudyInstanceUID", ""))
+            seriesNumber = str(ds.get("SeriesNumber", ""))
+    except Exception:
+        logging.debug("Could not read the exported series back", exc_info=True)
+    lines = [
+        f"<b>'{html.escape(sequence.GetName())}'</b> was exported to DICOM.",
+        "",
+        f"<b>Series:</b> {html.escape(description)}" + (f" (series number {seriesNumber})" if seriesNumber else ""),
+        f"<b>Images:</b> {count} PET Image Storage files (one per slice and frame)",
+        f"<b>Patient:</b> {html.escape(patient)}" if patient else None,
+        f"<b>Study:</b> {html.escape(study)} (the study of the original series)" if study else None,
+        f"<b>Series Instance UID:</b> {seriesUID}",
+        "",
+        "The files were copied into the Slicer DICOM database and the series is listed in the DICOM browser.",
+        f"<b>Folder:</b> {folder}" if folder else "<b>Folder:</b> (not found in the database)",
+        f"<b>DICOM database:</b> {databaseFolder}" if databaseFolder else None,
+        "",
+        "To get a copy in another folder: DICOM browser, right click the series, Export to file system.",
+    ]
+    box = qt.QMessageBox(slicer.util.mainWindow())
+    box.setWindowTitle("Export to DICOM")
+    box.setIcon(qt.QMessageBox.Information)
+    box.setTextFormat(qt.Qt.RichText)
+    box.setText("<br>".join(line for line in lines if line is not None))
+    box.setDetailedText("\n".join(files))
+    openButton = box.addButton("Open folder", qt.QMessageBox.ActionRole) if folder and os.path.isdir(folder) else None
+    copyButton = box.addButton("Copy path", qt.QMessageBox.ActionRole) if folder else None
+    box.addButton(qt.QMessageBox.Ok)
+    if openButton is not None:
+        openButton.connect("clicked()", lambda: qt.QDesktopServices.openUrl(qt.QUrl.fromLocalFile(folder)))
+    if copyButton is not None:
+        copyButton.connect("clicked()", lambda: qt.QApplication.clipboard().setText(folder))
+    box.exec_()
+    return box
 
 
 def _placeNextTo(sourceNode, nodes):
@@ -2815,6 +2878,9 @@ class DynamicPETEditorTest(ScriptedLoadableModuleTest):
             self.assertEqual(len(studies), 1)                       # the same study
             self.assertIn(seriesUID, db.seriesForStudy(studies[0]))
             exported = db.filesForSeries(seriesUID)
+            folder, files, _ = exportedLocation(seriesUID)              # what the done dialog shows
+            self.assertEqual(len(files), 2 * 6)
+            self.assertTrue(os.path.isdir(folder) and all(f.startswith(folder) for f in files))
             again = plugin.loadSeries(exported, "Reloaded dynamic Bq/ml", petseries.UNITS_ACTIVITY, summed=True)
             reloaded = slicer.mrmlScene.GetNodeByID(again.GetAttribute(PREFIX + "DynamicSequence"))
             self.assertEqual(reloaded.GetNumberOfDataNodes(), 2)

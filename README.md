@@ -228,6 +228,10 @@ place of the weight (`SUVMethod`, `LeanBodyMassKg`, `BodySurfaceAreaM2` are stor
 motion corrected one after *Harden transforms*) writes the series as a **new DICOM series in the study of the
 original series** and adds it to the DICOM database, so the DICOM browser lists it under the same patient and study.
 It asks for the series description (default: the sequence name).
+When done, a window shows where it was saved: the folder in the Slicer DICOM database that holds the files
+(the files are copied into the database, nothing is left elsewhere), the DICOM database folder, the patient, study,
+series number and Series Instance UID, with *Open folder* and *Copy path* buttons and the file list under *Show
+Details*. For a copy in another folder use the DICOM browser: right click the series, *Export to file system*.
 
 - PET Image Storage, one image per slice and frame, Series Type DYNAMIC\IMAGE, Number of Time Slices, Image Index,
   Acquisition Date / Time = frame start, Actual Frame Duration, Frame Reference Time and Decay Factor, so this
