@@ -1047,6 +1047,28 @@ class DynamicPETEditorSession:
         self.setFusion(self.fusionVolume)
         self.setColorNodeID(self.colorNodeID)
         self.applyWindow()
+        self.refreshViews()
+
+    def refreshViews(self):
+        """Fit the field of view of every editor view to its size on screen and render it: a rebuilt grid gives the
+        views new sizes, and a field of view kept from before would stretch the image. Done now and again once the
+        layout has settled."""
+        self._fitViewAspects()
+        for delay in (0, 150):
+            qt.QTimer.singleShot(delay, self._fitViewAspects)
+
+    def _fitViewAspects(self):
+        if slicer.app.layoutManager().layout != LAYOUT_ID:
+            return
+        for widget in self._editorWidgets():
+            view = widget.sliceView()
+            width, height = int(view.width), int(view.height)
+            node = widget.mrmlSliceNode()
+            if width > 1 and height > 1:
+                fov = node.GetFieldOfView()
+                if fov[0] > 0 and abs(fov[1] / fov[0] - height / width) > 1e-3:
+                    node.SetFieldOfView(fov[0], fov[0] * height / width, fov[2])
+            view.scheduleRender()
 
     def _addOverlay(self, name, widget, fontSize):
         sliceView = widget.sliceView()
