@@ -1500,6 +1500,10 @@ class DynamicPETMotionCorrectionWidget(ScriptedLoadableModuleWidget, VTKObservat
         row.addWidget(self.revertButton)
         row.addWidget(self.hardenButton)
         reg.addRow(row)
+        self.exportButton = qt.QPushButton("Export to DICOM...")
+        self.exportButton.toolTip = ("Write the selected series (e.g. the motion corrected one, after Harden) as a new "
+                                     "DICOM series in the study of the original one and add it to the DICOM browser")
+        reg.addRow(self.exportButton)
         self.resultLabel = qt.QLabel("Not registered yet.")
         self.resultLabel.wordWrap = True
         reg.addRow(self.resultLabel)
@@ -1532,6 +1536,7 @@ class DynamicPETMotionCorrectionWidget(ScriptedLoadableModuleWidget, VTKObservat
         self.registerButton.connect("clicked()", self.onRegister)
         self.revertButton.connect("clicked()", self.onRevert)
         self.hardenButton.connect("clicked()", self.onHarden)
+        self.exportButton.connect("clicked()", self.onExport)
         self.addObserver(slicer.mrmlScene, slicer.mrmlScene.StartCloseEvent, self.onSceneClose)
         self.addObserver(slicer.mrmlScene, slicer.mrmlScene.NodeRemovedEvent, self.onNodeRemoved)
         self.onMethodChanged()
@@ -1878,6 +1883,18 @@ class DynamicPETMotionCorrectionWidget(ScriptedLoadableModuleWidget, VTKObservat
                                  f"\nHardened into '{corrected.GetName()}' (table '{table.GetName()}'"
                                  + (f", new summed image '{summed.GetName()}'" if summed is not None else "") + ")."
                                  + (f"\nRemoved: {', '.join(removed)}." if removed else ""))
+
+    def onExport(self):
+        from DynamicPETEditor import exportSequenceDialog
+        sequence = self.sequenceSelector.currentNode()
+        if sequence is None:
+            slicer.util.warningDisplay("Pick the dynamic series to export.", windowTitle="Export to DICOM")
+            return
+        if self.results and not self.hardened:
+            slicer.util.warningDisplay("The registration is not hardened yet: press Harden transforms first, then "
+                                       "export the motion corrected series.", windowTitle="Export to DICOM")
+            return
+        exportSequenceDialog(sequence)
 
     def _selectSeries(self, sequenceNode, summedNode, referenceIndex):
         """Pick a series (and its summed image as reference, or the frame referenceIndex) in the selectors."""

@@ -12,6 +12,7 @@ mean. Every atom also has a scale (FrameEdit.scales, 1 by default): the decay co
 values of an added series continuous with the others (Bq/ml with different decay reference times).
 
 Splitting a merged frame gives its atoms back; the original series is never changed (FrameEdit only holds keys).
+Every operation (add, merge, split, remove, discard) can be undone and redone.
 
 compareSeries checks a series to add against the edited series: units, tracer, decay correction (and the factor
 that aligns the two), patient, scanner, the time between them.
@@ -264,15 +265,77 @@ class FrameEdit:
         self.addedSeries = []        # names of the added series, in order (for the keys and the notes)
         self.reference = None        # decay reference after an alignment (None: that of the original)
         self.frames = []
+        self.undoStack, self.redoStack = [], []
+        self.addCount = 0            # added series so far, never undone: atom keys are never used twice
         self.reset()
 
     # --- state -----------------------------------------------------------------------------------
     def reset(self):
+        """Back to the original series, forgetting the history too."""
+        self._clear()
+        self.undoStack, self.redoStack = [], []
+
+    def _clear(self):
         self.atoms = {atom["key"]: atom for atom in self.originals}
         self.frames = [[atom["key"]] for atom in self.originals]
         self.scales = {}
         self.addedSeries = []
         self.reference = None
+
+    # --- undo / redo ------------------------------------------------------------------------------
+    UNDO_LIMIT = 100
+
+    def _state(self):
+        return ([list(f) for f in self.frames], dict(self.scales), list(self.addedSeries), self.reference,
+                dict(self.atoms))
+
+    def _setState(self, state):
+        frames, scales, added, reference, atoms = state
+        self.frames, self.scales, self.addedSeries, self.reference = [list(f) for f in frames], dict(scales), \
+            list(added), reference
+        self.atoms = dict(atoms)
+
+    def _remember(self, label):
+        """Called by every operation just before it changes the frames."""
+        self.undoStack.append((label, self._state()))
+        del self.undoStack[:-self.UNDO_LIMIT]
+        self.redoStack = []
+
+    def canUndo(self):
+        return bool(self.undoStack)
+
+    def canRedo(self):
+        return bool(self.redoStack)
+
+    def undoText(self):
+        return self.undoStack[-1][0] if self.undoStack else ""
+
+    def redoText(self):
+        return self.redoStack[-1][0] if self.redoStack else ""
+
+    def undo(self):
+        """Undo the last operation; returns its label (None when there is nothing to undo)."""
+        if not self.undoStack:
+            return None
+        label, state = self.undoStack.pop()
+        self.redoStack.append((label, self._state()))
+        self._setState(state)
+        return label
+
+    def redo(self):
+        if not self.redoStack:
+            return None
+        label, state = self.redoStack.pop()
+        self.undoStack.append((label, self._state()))
+        self._setState(state)
+        return label
+
+    def discard(self):
+        """Back to the original series; can be undone."""
+        if not self.isEdited():
+            return
+        self._remember("Discard changes")
+        self._clear()
 
     def isEdited(self):
         return self.frames != [[atom["key"]] for atom in self.originals] or \
@@ -357,6 +420,10 @@ class FrameEdit:
                         break
         return found
 
+    def nextAddedKeys(self, count):
+        """Keys the atoms of the next added series will get."""
+        return [f"a{self.addCount + 1}.{i + 1}" for i in range(count)]
+
     def add(self, name, atoms, scaleExisting=1.0, scaleAdded=1.0, reference=None):
         """Add the frames of a series (atoms without keys: start, duration, label); every frame present is
         multiplied by scaleExisting, the new ones by scaleAdded (decay alignment, compareSeries). Returns the
@@ -367,8 +434,10 @@ class FrameEdit:
         if overlapping:
             raise EditError("The added frames overlap the series in time: " + ", ".join(
                 f"{label} with frame {n}" for label, n in overlapping[:6]) + ".")
+        self._remember(f"Add {name}")
+        self.addCount += 1
+        number = self.addCount
         self.addedSeries.append(name)
-        number = len(self.addedSeries)
         if abs(scaleExisting - 1.0) > 1e-12:
             for key in self.atoms:
                 self.scales[key] = self.scale(key) * scaleExisting
@@ -406,6 +475,7 @@ class FrameEdit:
         if not self.consecutive(indexes):
             raise EditError("Only neighbouring frames can be merged.")
         keys = sorted((k for i in indexes for k in self.frames[i]), key=lambda k: self.atoms[k]["start"])
+        self._remember("Merge")
         self.frames[indexes[0]:indexes[-1] + 1] = [keys]
         return indexes[0]
 
@@ -417,6 +487,7 @@ class FrameEdit:
         chosen = {tuple(self.frames[i]) for i in indexes if 0 <= i < len(self.frames) and len(self.frames[i]) > 1}
         if not chosen:
             raise EditError("Select a merged frame to split.")
+        self._remember("Split")
         out = []
         for keys in self.frames:
             if tuple(keys) in chosen:
@@ -434,6 +505,7 @@ class FrameEdit:
             raise EditError("Select the frames to remove.")
         if len(indexes) >= len(self.frames):
             raise EditError("At least one frame has to stay.")
+        self._remember("Remove")
         for i in reversed(indexes):
             del self.frames[i]
 
