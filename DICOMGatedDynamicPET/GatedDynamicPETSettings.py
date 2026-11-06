@@ -34,7 +34,7 @@ class GatedDynamicPETSettings(ScriptedLoadableModule):
     def __init__(self, parent):
         ScriptedLoadableModule.__init__(self, parent)
         parent.title = "Gated / Dynamic PET Settings"
-        parent.categories = ["Nuclear Medicine"]
+        parent.categories = ["Nuclear Medicine.PET4D"]
         parent.dependencies = []
         parent.contributors = ["Burak Demir"]
         parent.helpText = ("Defaults of the DICOM Gated / Dynamic PET loader: the SUV normalisation, which units "

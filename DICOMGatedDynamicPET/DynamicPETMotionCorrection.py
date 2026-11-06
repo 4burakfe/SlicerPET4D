@@ -68,7 +68,7 @@ class DynamicPETMotionCorrection(ScriptedLoadableModule):
     def __init__(self, parent):
         ScriptedLoadableModule.__init__(self, parent)
         parent.title = "Dynamic PET Motion Correction"
-        parent.categories = ["Nuclear Medicine"]
+        parent.categories = ["Nuclear Medicine.PET4D"]
         parent.dependencies = []
         parent.contributors = ["Burak Demir"]
         parent.helpText = (

@@ -60,7 +60,7 @@ class DynamicPETEditor(ScriptedLoadableModule):
     def __init__(self, parent):
         ScriptedLoadableModule.__init__(self, parent)
         parent.title = "Dynamic PET Review/Edit"
-        parent.categories = ["Nuclear Medicine"]
+        parent.categories = ["Nuclear Medicine.PET4D"]
         parent.dependencies = []
         parent.contributors = ["Burak Demir"]
         parent.helpText = ("Review a dynamic PET series frame by frame: a large view of the current frame, small "

@@ -63,7 +63,7 @@ class DynamicPETRegistration(ScriptedLoadableModule):
     def __init__(self, parent):
         ScriptedLoadableModule.__init__(self, parent)
         parent.title = "Dynamic PET to CT/MR Registration"
-        parent.categories = ["Nuclear Medicine"]
+        parent.categories = ["Nuclear Medicine.PET4D"]
         parent.dependencies = []
         parent.contributors = ["Burak Demir"]
         parent.helpText = (
