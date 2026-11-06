@@ -297,7 +297,6 @@ Settings in the panel:
 | Reference frame | frame with the highest activity | the frame shown in the large view; it is kept as it is |
 | Summed image (optional) | none | register to this volume instead (e.g. the series' summed volume); then every frame is registered |
 | Resum the summed image | on | *Harden transforms* also makes a new summed image of the corrected frames |
-| Keep only the motion corrected series | on | *Harden transforms* deletes the original series and old summed image |
 | Method | Rigid | Rigid, Affine or BSpline (BRAINSFit `transformType`, Mattes mutual information) |
 | Initialization | geometric centers | how the first pass starts (BRAINSFit `initializeTransformMode`): the geometric centers of the frame and the reference aligned (`useGeometryAlign`), the centers of mass (`useMoments`) or none; the second pass starts from the first |
 | Enable two pass | off; second pass Rigid | after the first pass, the corrected frames are summed (as the series' summed image: by duration or by counts) and every frame is registered again (Rigid, Affine or BSpline) **to that motion corrected sum**, starting from its first pass transform; a frame the second pass fails on or moves over the limit keeps its first pass result |
@@ -315,7 +314,11 @@ correction).
 
 Under *Register frames*:
 
-- **Harden transforms** (it asks first) makes a new series *"&lt;series&gt; motion corrected"* with **every frame**:
+- **Harden transforms** opens a dialog: the **output grid** (*Keep the original voxels*, default, or *Resample to
+  this voxel size* with a voxel size along i, j, k over the same field of view), the **resample method** (linear,
+  nearest neighbour, cubic) and **Overwrite**, **Save separately** or **Cancel**. *Overwrite* puts the corrected
+  frames into the series itself (and, with *Resum the summed image*, sums its summed image again in place), with the
+  motion on every frame and a motion table; *Revert changes* puts the frames back. *Save separately* makes a new series *"&lt;series&gt; motion corrected"* with **every frame**:
   the corrected image of each registered frame, and the frames that were not registered (reference, low activity,
   over the limit, failed) as they were, so the new series has the same frames and times as the original. It gets its
   own browser and current frame volume, a table *"&lt;series&gt; motion"* with the status, shift and angles of every
@@ -324,17 +327,54 @@ Under *Register frames*:
   tag says so), with the attributes and display of the old summed image. The new series points to it (`DynamicPET.SummedVolumeID`). Every frame carries
   `DynamicPET.MotionCorrection.Status` (and `ShiftRASMm` / `AnglesRASDeg` for rigid). The module then shows the new
   series. Save the scene to keep it.
-- **Keep only the motion corrected series** (on by default): Harden also **deletes the original series** (sequence,
-  browser, current frame volume) and, when a new summed image was made, the old summed image, so only the motion
-  corrected ones are left. This cannot be undone. Turn it off to keep the originals next to the new series.
-- **Revert changes** drops a registration that is not hardened yet; after hardening with the originals kept it
-  removes the new series, its table and summed image and goes back to the original series (until another series or
-  reference is picked, or the scene is closed).
+- **Revert changes** drops a registration that is not hardened yet; after *Overwrite* it puts the frames and the
+  summed image back, after *Save separately* it removes the new series, its table and summed image and goes back to
+  the original series (until another series or reference is picked, or the scene is closed).
 - **Export to DICOM...** writes the selected series (after *Harden transforms*: the motion corrected one) as a new
   DICOM series in the study of the original and adds it to the DICOM browser (see *DICOM export* above).
 
 Leaving the module closes its layout and timeline and switches to the four-up layout; coming back opens them again,
 with the registration. The timeline can also be closed with its own close button, or with *Close layout*.
+
+## Dynamic PET to CT/MR Registration
+
+The **Dynamic PET to CT/MR Registration** module (Nuclear Medicine) registers a dynamic PET series to a CT or MR with
+**BRAINSFit**. One reference image of the series is registered and the same transform moves **every frame and the
+summed image** of the series.
+
+- **Dynamic sequence** (the most recent one is picked), **Reference frame** (the series' summed image when it has one,
+  else the frame with the highest activity; any frame can be picked) and **CT / MR** (a CT or MR loaded from DICOM is
+  picked for you).
+- **Steps:** up to three BRAINSFit steps run one after the other, each starting where the previous one ended:
+  **Rigid, then Affine, then BSpline** by default. Step 2 and 3 can be *(none)* (one or two steps) or another type; a
+  B-spline can only be the last step and a rigid step cannot follow an affine one. The first step starts from the
+  **geometric centres** (as Motion Correction; *Initialization* also offers the centres of mass or none, e.g. for a
+  PET/CT of the same scanner). Mattes mutual information; sampling 0.05 and B-spline grid 5 under *Advanced*.
+- **Layout:** two rows, **axial on top and coronal below**, and three columns: **PET alone** (left, inverted grey),
+  **PET over the CT/MR** (fusion, middle, PET-DICOM at 0.5 opacity; PET voxels below the window or 3 % of it are
+  transparent) and **CT/MR alone** (right, grey). The views of a row are linked (slice, zoom, pan). After a
+  registration a **checkerboard column** is added on the left (2 x 4): a checkerboard made on the **PET grid** (20 mm
+  squares, green) and moved by the **same transform**, over the PET, so a B-spline deformation shows as bent
+  squares. It can be turned off, and its square size and opacity changed.
+- **View:** *PET colors* (PET column) and *Fusion colors* (any of the Review/Edit color maps), *PET window* (both
+  columns), *Fusion opacity*, *CT/MR preset* (soft tissue, brain, bone, lung, or automatic 1 - 99.5 % for MR) and
+  *CT/MR window*, *Auto windows*. The module shows the images through hidden helper volumes, so the display of your
+  own volumes does not change.
+- **Applied transform** (box in the panel): the steps, the **shift** of the PET centre (mm along R, A, S), the
+  **angles** (degrees about R, A, S), for an affine step the **scaling** (%) and **shear**, for a B-spline the mean
+  and largest **deformation** (mm, over the middle half of the PET), and the manual correction.
+- **Correct manually:** move / rotate handles (as in EasyReg) on the PET in the slice views, on a manual transform on
+  top of the registration; rotations turn about the centre of the PET. *Reset manual* drops it. A new *Register*
+  starts from scratch (the manual correction is reset).
+- **Harden** opens a dialog: the **output grid**, always over the CT/MR field of view and in its directions:
+  *Keep the PET voxel size* (default), *Resample to the CT/MR grid* or *Resample to this voxel size*; the **resample
+  method** (linear, nearest neighbour, cubic); and **Overwrite** (the frames and the summed image of the series are
+  replaced), **Save separately** (a new series *"&lt;series&gt; registered"* with its browser and a new summed image
+  *"&lt;summed&gt; registered"*) or **Cancel**. A B-spline is turned into a displacement grid once, so every frame is
+  resampled the same way. The frames carry `DynamicPET.Registration.Fixed`, `Transform`, `Interpolation` and
+  `VoxelSizeMm`.
+- **Revert changes** drops a registration that is not hardened yet; after *Overwrite* it puts the series back, after
+  *Save separately* it removes the new series (until another series is picked or the scene is closed).
 
 ## What is stored on the volumes
 
@@ -388,6 +428,7 @@ DICOMGatedDynamicPET/
   GatedDynamicPETSettings.py       settings module (visible, Nuclear Medicine)
   DynamicPETEditor.py              Dynamic PET Review/Edit module (visible, Nuclear Medicine)
   DynamicPETMotionCorrection.py    Dynamic PET Motion Correction module (visible, Nuclear Medicine), Slicer self-test
+  DynamicPETRegistration.py        Dynamic PET to CT/MR Registration module (visible, Nuclear Medicine), Slicer self-test
   DICOMGatedDynamicPETLib/
     settings.py                    the settings, kept in the Slicer application settings
     dynamicviews.py, timeline.py   Review/Edit layout helpers and the timeline widget
@@ -396,6 +437,9 @@ DICOMGatedDynamicPET/
                                    decay alignment, timing of the saved series, undo (numpy, no Slicer imports)
     dicomexport.py                 DICOM export of a dynamic series (pydicom + numpy, no Slicer imports)
     motioncorrection.py            Motion Correction: low activity frames, rigid shift / angles, motion limit (numpy)
+    registration.py                Registration: steps, transform summary, checkerboard, Harden grid, layout (numpy)
+    resampling.py                  voxels resampled onto another grid through a (B-spline) transform (VTK + numpy)
+    hardendialog.py                Harden dialog of Registration and Motion Correction (Qt)
     petseries.py                   PET DICOM: kind, frame ordering, geometry, SUV, tracer, decay, frame timing,
                                    ECG gating, synthetic test series (pydicom + numpy, no Slicer imports)
 Testing/                          tests without Slicer (petseries, Review/Edit helpers): python -m pytest Testing
@@ -404,7 +448,9 @@ Testing/                          tests without Slicer (petseries, Review/Edit h
 In Slicer, the self-test runs from the Python console:
 `import DICOMGatedDynamicPET; DICOMGatedDynamicPET.DICOMGatedDynamicPETTest().runTest()`; the motion correction
 self-test (a synthetic series with a frame moved 8 mm and a low activity frame) with
-`import DynamicPETMotionCorrection; DynamicPETMotionCorrection.DynamicPETMotionCorrectionTest().runTest()`.
+`import DynamicPETMotionCorrection; DynamicPETMotionCorrection.DynamicPETMotionCorrectionTest().runTest()`; the
+registration self-test (a synthetic CT and a PET moved 8 mm) with
+`import DynamicPETRegistration; DynamicPETRegistration.DynamicPETRegistrationTest().runTest()`.
 
 The Dynamic PET Review/Edit module keeps its internal name `DynamicPETEditor` (file, classes, layout id), so scenes and
 scripts that use it keep working; only the title shown to users changed.
