@@ -11,6 +11,10 @@
     motioncorrection    Motion Correction helpers: low activity frames, rigid shift / angles, motion limit, timeline
                 texts (numpy only)
     motionplot      Motion Correction plot of the rigid shift / angles over time (Qt)
+    registration    Dynamic PET to CT/MR Registration helpers: steps, transform summary, checkerboard, Harden grid,
+                layout (numpy only)
+    resampling  voxels resampled onto another grid through a (B-spline) transform (VTK + numpy)
+    hardendialog    Harden dialog (grid, voxel size, resample method, overwrite / save separately) (Qt)
     colortables     color tables shared with the Tarvos (MPI) extension (numpy only)
     colormaps       Review/Edit color maps as Slicer color nodes ("MPI <label>", shared with Tarvos)
     settings    user settings (SUV method, preferred units, summed volumes) in the Slicer application settings

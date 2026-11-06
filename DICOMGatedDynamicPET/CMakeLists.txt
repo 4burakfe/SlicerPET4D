@@ -16,6 +16,9 @@ set(MODULE_PYTHON_SCRIPTS
   ${MODULE_NAME}Lib/motionplot.py
   ${MODULE_NAME}Lib/colortables.py
   ${MODULE_NAME}Lib/colormaps.py
+  ${MODULE_NAME}Lib/registration.py
+  ${MODULE_NAME}Lib/resampling.py
+  ${MODULE_NAME}Lib/hardendialog.py
   )
 
 set(MODULE_PYTHON_RESOURCES
@@ -81,4 +84,19 @@ slicerMacroBuildScriptedModule(
 
 if(BUILD_TESTING)
   slicer_add_python_unittest(SCRIPT ${MC_MODULE_NAME}.py)
+endif()
+
+#-----------------------------------------------------------------------------
+# Dynamic PET to CT/MR Registration (visible, Nuclear Medicine): the series registered to a CT or MR with BRAINSFit
+set(REG_MODULE_NAME DynamicPETRegistration)
+
+slicerMacroBuildScriptedModule(
+  NAME ${REG_MODULE_NAME}
+  SCRIPTS ${REG_MODULE_NAME}.py
+  RESOURCES Resources/Icons/${REG_MODULE_NAME}.png
+  WITH_GENERIC_TESTS
+  )
+
+if(BUILD_TESTING)
+  slicer_add_python_unittest(SCRIPT ${REG_MODULE_NAME}.py)
 endif()
