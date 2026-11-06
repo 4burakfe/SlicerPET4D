@@ -46,6 +46,21 @@ def test_static():
     assert info["InjectionToScanStartS"] == "3600"
     assert info["PatientHeightCm"] == "170"
     assert info["CorrectedImage"].startswith("DECY")
+    assert (info["Manufacturer"], info["ScannerModel"]) == ("Synthetic", "Phantom PET")
+    assert (info["PatientName"], info["PatientID"]) == ("Phantom^PET", "PHANTOM")
+    timing = ps.frameTiming(frames, datasets)[0]
+    assert (timing["StartDateTime"], timing["DurationS"]) == ("2026-01-01T10:00:00", 600)
+
+
+def test_synthetic_series_options():
+    import datetime
+    start = datetime.datetime(2026, 1, 2, 11, 30, 0)
+    files, _ = ps.writeSyntheticSeries(tempfile.mkdtemp(), kind=ps.STATIC, seriesStart=start,
+                                       injection=start - datetime.timedelta(hours=2), patient=("Other^One", "42"),
+                                       scanner=("Vendor", "Model X"))
+    info = ps.acquisitionInfo(_read(files))
+    assert info["ScanStart"] == "2026-01-02T11:30:00" and info["InjectionToScanStartS"] == "7200"
+    assert (info["PatientID"], info["ScannerModel"]) == ("42", "Model X")
 
 
 def test_gated():

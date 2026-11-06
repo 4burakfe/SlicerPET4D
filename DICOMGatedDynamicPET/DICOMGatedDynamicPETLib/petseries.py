@@ -674,7 +674,8 @@ def radiopharmaceuticalInfo(ds):
 
 def acquisitionInfo(datasets):
     """Series-level fields worth keeping with the volume, as {key: text}; empty ones are left out:
-    study / series / scan start date-times, scanner, reconstruction and the corrections applied
+    study / series / scan start date-times, scanner (manufacturer, model, serial number, station), patient name and
+    ID, reconstruction and the corrections applied
     (Corrected Image (0028,0051): DECY decay, ATTN attenuation, SCAT scatter, DTIM dead time, RAN randoms,
     NORM normalisation), decay correction and its reference date-time, patient weight / height / sex."""
     first = datasets[0]
@@ -688,6 +689,10 @@ def acquisitionInfo(datasets):
         "ScanStartSource": startSource if start else "",
         "Manufacturer": _text(first, "Manufacturer"),
         "ScannerModel": _text(first, "ManufacturerModelName"),
+        "DeviceSerialNumber": _text(first, "DeviceSerialNumber"),
+        "StationName": _text(first, "StationName"),
+        "InstitutionName": _text(first, "InstitutionName"),
+        "SoftwareVersions": _text(first, "SoftwareVersions"),
         "ReconstructionMethod": _text(first, "ReconstructionMethod"),
         "ConvolutionKernel": _text(first, "ConvolutionKernel"),
         "CorrectedImage": _text(first, "CorrectedImage"),
@@ -703,6 +708,9 @@ def acquisitionInfo(datasets):
         "PatientSex": _text(first, "PatientSex"),
         "SeriesDescription": _text(first, "SeriesDescription"),
         "SeriesInstanceUID": _text(first, "SeriesInstanceUID"),
+        "StudyInstanceUID": _text(first, "StudyInstanceUID"),
+        "PatientName": str(_value(first, "PatientName", "") or "").strip(),
+        "PatientID": _text(first, "PatientID"),
     }
     radio = _radiopharmaceutical(first)
     if radio is not None:
@@ -1164,11 +1172,13 @@ def gateTiming(gate):
 # ---------------------------------------------------------------------------
 def writeSyntheticSeries(folder, kind=GATED, frames=4, slices=6, rows=16, columns=16, shuffle=True,
                          radiopharmaceutical="Fluorodeoxyglucose", description=None, decayCorrection="START",
-                         frameDurationsS=None):
+                         frameDurationsS=None, seriesStart=None, injection=None, patient=("Phantom^PET", "PHANTOM"),
+                         scanner=("Synthetic", "Phantom PET")):
     """Write a small PET series (Bq/ml, per image slope) and return (files, expected SUVbw arrays per frame).
     Frame f has the value 1000 x f Bq/ml at every voxel; 70 kg, 170 cm, 370 MBq F-18 injected 60 min before
     the series time (static and gated). Dynamic frames start at the series time, back to back, with the
-    given durations (default 30 s each). A static series is written with one frame (frames is ignored)."""
+    given durations (default 30 s each). A static series is written with one frame (frames is ignored).
+    seriesStart / injection (datetimes), patient (name, ID) and scanner (manufacturer, model) change those."""
     import random
     from pydicom.dataset import Dataset, FileMetaDataset
     from pydicom.uid import ExplicitVRLittleEndian, generate_uid
@@ -1177,10 +1187,11 @@ def writeSyntheticSeries(folder, kind=GATED, frames=4, slices=6, rows=16, column
     description = description or f"Synthetic {kind.lower()} PET"
     durations = list(frameDurationsS or [30.0] * frames)
     study, series, frameOfReference = generate_uid(), generate_uid(), generate_uid()
-    seriesStart = datetime.datetime(2026, 1, 1, 10, 0, 0)
-    injection = datetime.datetime(2026, 1, 1, 9, 0, 0)
-    if kind == DYNAMIC:
-        injection = seriesStart   # dynamic studies start at the injection
+    seriesStart = seriesStart or datetime.datetime(2026, 1, 1, 10, 0, 0)
+    if injection is None:
+        injection = datetime.datetime(2026, 1, 1, 9, 0, 0)
+        if kind == DYNAMIC:
+            injection = seriesStart   # dynamic studies start at the injection
     starts = [seriesStart + datetime.timedelta(seconds=sum(durations[:f])) for f in range(frames)]
     files, order = [], [(f, s) for f in range(frames) for s in range(slices)]
     if shuffle:
@@ -1194,11 +1205,11 @@ def writeSyntheticSeries(folder, kind=GATED, frames=4, slices=6, rows=16, column
         ds.file_meta = meta
         ds.SOPClassUID, ds.SOPInstanceUID = meta.MediaStorageSOPClassUID, meta.MediaStorageSOPInstanceUID
         ds.Modality, ds.SeriesDescription = "PT", description
-        ds.Manufacturer, ds.ManufacturerModelName = "Synthetic", "Phantom PET"
-        ds.PatientName, ds.PatientID, ds.PatientWeight, ds.PatientSize, ds.PatientSex = \
-            "Phantom^PET", "PHANTOM", "70", "1.70", "O"
+        ds.Manufacturer, ds.ManufacturerModelName = scanner
+        ds.PatientName, ds.PatientID = patient
+        ds.PatientWeight, ds.PatientSize, ds.PatientSex = "70", "1.70", "O"
         ds.StudyInstanceUID, ds.SeriesInstanceUID, ds.FrameOfReferenceUID = study, series, frameOfReference
-        ds.StudyDate = ds.SeriesDate = ds.AcquisitionDate = "20260101"
+        ds.StudyDate = ds.SeriesDate = ds.AcquisitionDate = seriesStart.strftime("%Y%m%d")
         ds.StudyTime, ds.SeriesTime = "095500", seriesStart.strftime("%H%M%S")
         ds.AcquisitionTime = starts[f].strftime("%H%M%S.%f")
         ds.SeriesType = [{STATIC: "STATIC", GATED: "GATED", DYNAMIC: "DYNAMIC"}[kind], "IMAGE"]

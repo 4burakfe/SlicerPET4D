@@ -86,6 +86,8 @@ class DynamicPETMotionCorrectionLogic(ScriptedLoadableModuleLogic):
                                  the first, starting from it
         skipLowActivity, lowActivityPercent    frames below that % of the highest frame activity are kept
         limitMotion, maxMotionMm    a registration moving more than that along R, A or S is rejected
+        initialization       BRAINSFit initializeTransformMode of the first pass (mc.INITIALIZATIONS; default
+                             useGeometryAlign: the centers of the frame and the reference are aligned first)
         samplingPercentage, bsplineGrid    BRAINSFit details
     """
 
@@ -94,7 +96,8 @@ class DynamicPETMotionCorrectionLogic(ScriptedLoadableModuleLogic):
         return {"method": mc.DEFAULT_METHOD, "twoPass": False, "secondMethod": mc.DEFAULT_SECOND_METHOD,
                 "skipLowActivity": True, "lowActivityPercent": mc.DEFAULT_LOW_ACTIVITY_PERCENT,
                 "limitMotion": True, "maxMotionMm": mc.DEFAULT_MAX_MOTION_MM,
-                "samplingPercentage": mc.DEFAULT_SAMPLING, "bsplineGrid": mc.DEFAULT_BSPLINE_GRID}
+                "samplingPercentage": mc.DEFAULT_SAMPLING, "bsplineGrid": mc.DEFAULT_BSPLINE_GRID,
+                "initialization": mc.DEFAULT_INITIALIZATION}
 
     @staticmethod
     def frameArray(sequenceNode, index):
@@ -146,7 +149,10 @@ class DynamicPETMotionCorrectionLogic(ScriptedLoadableModuleLogic):
             "fixedVolume": fixed.GetID(),
             "movingVolume": moving.GetID(),
             "transformType": transformType,
-            "initializeTransformMode": "Off",
+            # the first pass starts by aligning the centers (geometric by default); a later pass starts from the
+            # transform it is given
+            "initializeTransformMode": "Off" if initialTransform is not None else
+            settings.get("initialization", mc.DEFAULT_INITIALIZATION),
             "costMetric": "MMI",
             "samplingPercentage": float(settings["samplingPercentage"]),
             "interpolationMode": "Linear",
@@ -1389,6 +1395,16 @@ class DynamicPETMotionCorrectionWidget(ScriptedLoadableModuleWidget, VTKObservat
         self.methodCombo.toolTip = ("Rigid: 3 shifts + 3 angles (whole-body motion; the timeline shows them). "
                                     "Affine: adds scaling and shear. BSpline: local deformation.")
         reg.addRow("Method:", self.methodCombo)
+        self.initializationCombo = qt.QComboBox()
+        for title, mode in mc.INITIALIZATIONS:
+            self.initializationCombo.addItem(title, mode)
+        self.initializationCombo.setCurrentIndex(self.initializationCombo.findData(mc.DEFAULT_INITIALIZATION))
+        self.initializationCombo.toolTip = (
+            "How the first pass starts (BRAINSFit initialization): geometric centers aligns the centers of the "
+            "frame and the reference volumes before registering (needed when a frame comes from another "
+            "acquisition, e.g. added in Review/Edit); centers of mass aligns the activity; none starts from the "
+            "frames as they are. The second pass starts from the first.")
+        reg.addRow("Initialization:", self.initializationCombo)
         self.twoPassCheck = qt.QCheckBox("Enable two pass")
         self.twoPassCheck.checked = False
         self.twoPassCheck.toolTip = ("After the first pass, sum the corrected frames (weighted as the series' summed "
@@ -1530,7 +1546,9 @@ class DynamicPETMotionCorrectionWidget(ScriptedLoadableModuleWidget, VTKObservat
                 "secondMethod": self.secondMethodCombo.currentText,
                 "skipLowActivity": self.lowActivityCheck.checked, "lowActivityPercent": self.lowActivitySpin.value,
                 "limitMotion": self.limitCheck.checked, "maxMotionMm": self.limitSpin.value,
-                "samplingPercentage": self.samplingSpin.value, "bsplineGrid": self.gridSpin.value}
+                "samplingPercentage": self.samplingSpin.value, "bsplineGrid": self.gridSpin.value,
+                "initialization": self.initializationCombo.itemData(self.initializationCombo.currentIndex) or
+                mc.DEFAULT_INITIALIZATION}
 
     def onMethodChanged(self, *args):
         method = self.methodCombo.currentText

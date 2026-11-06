@@ -23,6 +23,9 @@ DEFAULT_LOW_ACTIVITY_PERCENT = 1.0
 DEFAULT_MAX_MOTION_MM = 200.0
 DEFAULT_SAMPLING = 0.05
 DEFAULT_BSPLINE_GRID = 5
+# BRAINSFit initializeTransformMode of the first pass: (title, mode); the second pass starts from the first
+INITIALIZATIONS = (("Geometric centers", "useGeometryAlign"), ("Centers of mass", "useMoments"), ("None", "Off"))
+DEFAULT_INITIALIZATION = "useGeometryAlign"
 
 # frame status after registration
 REGISTERED = "registered"

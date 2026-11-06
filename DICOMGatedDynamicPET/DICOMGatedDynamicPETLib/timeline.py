@@ -16,6 +16,11 @@ slider) or with the mouse wheel over the timeline (zooms around the cursor); Shi
 Ctrl + wheel over the plot band zooms its value axis (from 0 up), a double click on the band resets it, and a
 double click elsewhere shows the whole series. Click a frame to make it current;
 Ctrl+click toggles it in the selection, Shift+click selects a range; Left / Right step through the frames.
+
+Edit mode (Review/Edit): frames with "edited" true are drawn red, with their "sources" in the tooltip. A locked
+timeline (setLocked, the original series under the edited one) still zooms and pans, but frames cannot be clicked;
+setHighlighted outlines frames there (those of the current edited frame). setExtent makes two timelines share one
+full time range, and setCompact makes it lower.
 Callbacks (set by the editor):
     onCurrentFrameChanged(index)     the user picked a frame
     onSelectionChanged(indexes)      the selection changed (sorted list)
@@ -40,6 +45,10 @@ _FRAME_TEXT = qt.QColor(10, 30, 28)
 _GRID = qt.QColor(62, 62, 68)
 _MOTION_LEVELS = (qt.QColor(150, 220, 150), qt.QColor(240, 200, 90), qt.QColor(255, 110, 90))
 _STATUS_TEXT = qt.QColor(160, 160, 165)
+_EDITED = qt.QColor(205, 60, 60)
+_EDITED_CURRENT = qt.QColor(250, 105, 95)
+_LOCKED = qt.QColor(26, 120, 110)
+_HIGHLIGHT = qt.QColor(255, 210, 80)
 
 
 class FrameTimeline(qt.QWidget):
@@ -72,6 +81,11 @@ class FrameTimeline(qt.QWidget):
         self.curveTicks = [0.0, 1.0]
         self.valueZoom = 1.0          # Ctrl + wheel over the plot band: its top is the highest value / valueZoom
         self.motion = []              # per frame {"status", "shift", "angles", "message"} or None; empty: no rows
+        self.locked = False           # no clicks (zoom and pan still work)
+        self.compact = False
+        self.trackTitle = "Frames"
+        self.extent = None            # (start, end) of the full range, shared with another timeline
+        self.highlighted = set()
         self.onCurrentFrameChanged = None
         self.onSelectionChanged = None
         self.onViewRangeChanged = None
@@ -80,17 +94,47 @@ class FrameTimeline(qt.QWidget):
         self.setMouseTracking(True)
 
     # --- data ----------------------------------------------------------------------------------
-    def setFrames(self, frames):
-        """frames: dynamicviews.frameIntervals items. Shows the whole series."""
+    def setFrames(self, frames, keepView=False):
+        """frames: dynamicviews.frameIntervals items. Shows the whole series (keepView: the same time window)."""
         self.frames = list(frames)
         self.rulers = rulerRows(self.frames)
         self.rulerHeight = self.RULER_ROW_HEIGHT * max(1, len(self.rulers)) + 4
         self._updateMinimumHeight()
         self.selected = set()
-        self.currentIndex = 0 if self.frames else -1
-        if self.frames:
+        self.highlighted = set()
+        self.anchor = None
+        if not keepView or not (0 <= self.currentIndex < len(self.frames)):
+            self.currentIndex = 0 if self.frames else -1
+        if self.frames and not keepView:
             self.viewStart, self.viewEnd = self.fullRange()
         self.update()
+
+    def setSelection(self, indexes):
+        self.selected = {i for i in indexes if 0 <= i < len(self.frames)}
+        self.update()
+
+    def setHighlighted(self, indexes):
+        self.highlighted = set(indexes)
+        self.update()
+
+    def setLocked(self, locked):
+        self.locked = bool(locked)
+        if self.locked:
+            self.selected = set()
+        self.update()
+
+    def setCompact(self, compact):
+        self.compact = bool(compact)
+        self._updateMinimumHeight()
+        self.update()
+
+    def setTrackTitle(self, title):
+        self.trackTitle = title
+        self.update()
+
+    def setExtent(self, start=None, end=None):
+        """The full time range (Show all, zoom limits) when it is wider than the frames; None: the frames'."""
+        self.extent = (float(start), float(end)) if start is not None and end is not None and end > start else None
 
     def setCurves(self, curves, units=""):
         """curves: [{"name", "color" ('#RRGGBB'), "values" (per frame, None allowed)}]; none hides the plot band."""
@@ -120,11 +164,16 @@ class FrameTimeline(qt.QWidget):
         return 2 * self.MOTION_ROW_HEIGHT + 2 if self.motion else 0
 
     def _updateMinimumHeight(self):
-        extra = self.CURVE_TRACK_HEIGHT + self.CURVE_BAND_MIN_HEIGHT + self.CURVE_BAND_GAP + 16 if self.curves else 90
+        extra = self.CURVE_TRACK_HEIGHT + self.CURVE_BAND_MIN_HEIGHT + self.CURVE_BAND_GAP + 16 if self.curves else \
+            (36 if self.compact else 90)
         self.setMinimumHeight(self.rulerHeight + extra + self._motionHeight())
 
     def fullRange(self):
-        return (self.frames[0]["start"], self.frames[-1]["end"]) if self.frames else (0.0, 1.0)
+        if self.extent is not None:
+            return self.extent
+        if not self.frames:
+            return 0.0, 1.0
+        return min(f["start"] for f in self.frames), max(f["end"] for f in self.frames)
 
     def setViewRange(self, start, end):
         if end - start > 1e-6 and (abs(start - self.viewStart) > 1e-9 or abs(end - self.viewEnd) > 1e-9):
@@ -192,7 +241,7 @@ class FrameTimeline(qt.QWidget):
             painter.fillRect(left, top, width, height, _TRACK)
             painter.setPen(qt.QPen(_DIM_TEXT))
             painter.drawText(qt.QRect(4, top, self.LABEL_WIDTH - 8, height), qt.Qt.AlignVCenter | qt.Qt.AlignLeft,
-                             "Frames")
+                             self.trackTitle)
             if not self.frames:
                 painter.drawText(qt.QRect(left, top, width, height), qt.Qt.AlignCenter, "No dynamic series")
                 return
@@ -250,8 +299,20 @@ class FrameTimeline(qt.QWidget):
                 continue
             x0, x1 = self._x(frame["start"]), self._x(frame["end"])
             rect = qt.QRectF(x0 + 1, top + 4, max(1.0, x1 - x0 - 2), height - 8)
-            painter.setBrush(qt.QBrush(_FRAME_CURRENT if i == self.currentIndex else _FRAME))
-            painter.setPen(qt.QPen(qt.QBrush(_SELECTED), 2) if i in self.selected else qt.QPen(qt.Qt.NoPen))
+            current = i == self.currentIndex
+            if frame.get("edited"):
+                color = _EDITED_CURRENT if current else _EDITED
+            elif self.locked:
+                color = _FRAME if current else _LOCKED
+            else:
+                color = _FRAME_CURRENT if current else _FRAME
+            painter.setBrush(qt.QBrush(color))
+            if i in self.selected:
+                painter.setPen(qt.QPen(qt.QBrush(_SELECTED), 2))
+            elif i in self.highlighted:
+                painter.setPen(qt.QPen(qt.QBrush(_HIGHLIGHT), 2))
+            else:
+                painter.setPen(qt.QPen(qt.Qt.NoPen))
             painter.drawRoundedRect(rect, 3, 3)
             if rect.width() > 24:
                 painter.setPen(qt.QPen(_FRAME_TEXT))
@@ -378,6 +439,8 @@ class FrameTimeline(qt.QWidget):
 
     # --- interaction ---------------------------------------------------------------------------
     def mousePressEvent(self, event):
+        if self.locked:
+            return
         index = self._indexAt(event.pos().x())
         if index is None:
             return
@@ -426,6 +489,10 @@ class FrameTimeline(qt.QWidget):
         frame = self.frames[index]
         tip = (f"Frame {frame['number']}: {formatTime(frame['start'])} - {formatTime(frame['end'])} "
                f"({formatTime(frame['duration'])})")
+        if frame.get("sources"):
+            tip += "\n" + frame["sources"]
+        if self.locked:
+            tip += "\n(original series: locked while there are edits)"
         if index < len(self.motion) and self.motion[index]:
             tip += "\n" + frameMotionTooltip(self.motion[index])
         self.toolTip = tip
@@ -466,7 +533,8 @@ class FrameTimeline(qt.QWidget):
         event.accept()
 
     def keyPressEvent(self, event):
-        if not self.frames:
+        if not self.frames or self.locked:
+            qt.QWidget.keyPressEvent(self, event)
             return
         if event.key() == qt.Qt.Key_Left:
             self._setCurrent(max(0, self.currentIndex - 1))
