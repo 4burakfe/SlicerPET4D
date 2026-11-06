@@ -57,7 +57,7 @@ warned (a message after loading, the Python log, and the `LoadWarnings` attribut
 
 ## Settings
 
-The **Gated / Dynamic PET Settings** module (Nuclear Medicine category) sets the loader's defaults. Changes are
+The **Gated / Dynamic PET Settings** module (Nuclear Medicine > PET4D) sets the loader's defaults. Changes are
 saved at once and apply to series examined in the DICOM browser afterwards.
 
 | Setting | Choices | Default |
@@ -90,7 +90,7 @@ saved at once and apply to series examined in the DICOM browser afterwards.
 
 ## Dynamic PET Review/Edit
 
-The **Dynamic PET Review/Edit** module (Nuclear Medicine) reviews a dynamic series frame by frame. Pick the dynamic
+The **Dynamic PET Review/Edit** module (Nuclear Medicine > PET4D) reviews a dynamic series frame by frame. Pick the dynamic
 sequence (the most recent one is picked for you) and press *Open Review/Edit*:
 
 - **Upper 2/3:** a large axial view of the current frame, and next to it a near-square grid of small axial
@@ -249,7 +249,7 @@ Details*. For a copy in another folder use the DICOM browser: right click the se
 
 ## Dynamic PET Motion Correction
 
-The **Dynamic PET Motion Correction** module (Nuclear Medicine) registers every frame of a dynamic series to a
+The **Dynamic PET Motion Correction** module (Nuclear Medicine > PET4D) registers every frame of a dynamic series to a
 reference with Slicer's built-in **BRAINSFit** and resamples it on its own grid with **BRAINSResample**. Pick the
 dynamic sequence (the most recent one is picked for you); the layout opens by itself:
 
@@ -338,7 +338,7 @@ with the registration. The timeline can also be closed with its own close button
 
 ## Dynamic PET to CT/MR Registration
 
-The **Dynamic PET to CT/MR Registration** module (Nuclear Medicine) registers a dynamic PET series to a CT or MR with
+The **Dynamic PET to CT/MR Registration** module (Nuclear Medicine > PET4D) registers a dynamic PET series to a CT or MR with
 **BRAINSFit**. One reference image of the series is registered and the same transform moves **every frame and the
 summed image** of the series.
 
@@ -430,10 +430,10 @@ the *Gated / Dynamic PET Settings* module.
 ```
 DICOMGatedDynamicPET/
   DICOMGatedDynamicPET.py          DICOM plugin (examine / load), Slicer self-test on synthetic series
-  GatedDynamicPETSettings.py       settings module (visible, Nuclear Medicine)
-  DynamicPETEditor.py              Dynamic PET Review/Edit module (visible, Nuclear Medicine)
-  DynamicPETMotionCorrection.py    Dynamic PET Motion Correction module (visible, Nuclear Medicine), Slicer self-test
-  DynamicPETRegistration.py        Dynamic PET to CT/MR Registration module (visible, Nuclear Medicine), Slicer self-test
+  GatedDynamicPETSettings.py       settings module (visible, Nuclear Medicine.PET4D)
+  DynamicPETEditor.py              Dynamic PET Review/Edit module (visible, Nuclear Medicine.PET4D)
+  DynamicPETMotionCorrection.py    Dynamic PET Motion Correction module (visible, Nuclear Medicine.PET4D), Slicer self-test
+  DynamicPETRegistration.py        Dynamic PET to CT/MR Registration module (visible, Nuclear Medicine.PET4D), Slicer self-test
   DICOMGatedDynamicPETLib/
     settings.py                    the settings, kept in the Slicer application settings
     dynamicviews.py, timeline.py   Review/Edit layout helpers and the timeline widget
