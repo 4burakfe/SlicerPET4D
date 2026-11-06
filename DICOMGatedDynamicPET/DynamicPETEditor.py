@@ -11,8 +11,14 @@ Each view shows its frame number and start - end time from the study start in it
 The module panel sets the window (the same display range for all frames, or each frame on its own), the
 color map and fusion: an anatomical background volume (CT / MR) under the PET in every view, with a PET opacity.
 Spherical ROIs placed in the large view give time-activity curves, drawn on the timeline over the frame blocks.
-Frame operations (summation, reframing, ...) are placeholders for now.
+Edit mode (timeline bar): Add frame (a static or dynamic PET series placed by its clock time, decay correction
+aligned for Bq/ml), Merge (duration weighted mean of neighbouring frames), Split (a merged frame back into its
+frames), Remove, Discard changes, Save as... (a new sequence) and Overwrite original. Edits are shown at once on an
+edited timeline (edited frames in red) over the original one (locked, half height), and in the views; the original
+series is not changed until it is overwritten.
 """
+
+import datetime
 
 import os
 import sys
@@ -32,7 +38,7 @@ _MODULE_DIR = os.path.dirname(os.path.abspath(globals().get("__file__", "") or "
 if globals().get("__file__") and _MODULE_DIR not in sys.path:
     sys.path.insert(0, _MODULE_DIR)
 
-from DICOMGatedDynamicPETLib import colormaps, dynamicviews, roicurves  # noqa: E402
+from DICOMGatedDynamicPETLib import colormaps, dynamicviews, frameedit as fe, roicurves  # noqa: E402
 from DICOMGatedDynamicPETLib.timeline import FrameTimeline  # noqa: E402
 
 LAYOUT_ID = 7801
@@ -48,13 +54,6 @@ ROI_COLOR_ATTRIBUTE = "ReviewEdit.Color"
 ROI_NODE_CLASS = "vtkMRMLMarkupsFiducialNode"
 ROI_DEFAULT_RADIUS_MM = 10.0
 ROI_DEBOUNCE_MS = 100
-PLANNED_OPERATIONS = (
-    ("Sum selected", "Sum the selected frames into one static volume (duration weighted)"),
-    ("Merge", "Merge the selected neighbouring frames into one frame"),
-    ("Split", "Split the current frame"),
-    ("Reframe...", "Rebin the series into a new framing scheme"),
-    ("Remove", "Remove the selected frames"),
-)
 
 
 class DynamicPETEditor(ScriptedLoadableModule):
@@ -77,7 +76,7 @@ class DynamicPETEditor(ScriptedLoadableModule):
 class DynamicPETEditorLogic(ScriptedLoadableModuleLogic):
     @staticmethod
     def isDynamicSequence(sequenceNode):
-        return bool(sequenceNode and sequenceNode.GetNumberOfDataNodes() > 1
+        return bool(sequenceNode and sequenceNode.GetNumberOfDataNodes() >= 1
                     and sequenceNode.GetNthDataNode(0) is not None
                     and sequenceNode.GetNthDataNode(0).IsA("vtkMRMLScalarVolumeNode"))
 
@@ -98,6 +97,10 @@ class DynamicPETEditorLogic(ScriptedLoadableModuleLogic):
         if count <= maxViews:
             return list(range(count))
         return sorted({int(round(v)) for v in np.linspace(0, count - 1, maxViews)})
+
+    @staticmethod
+    def isStaticPet(volumeNode):
+        return any(node is volumeNode for node, kind, _ in petCandidates() if kind == "static")
 
     @staticmethod
     def browserFor(sequenceNode):
@@ -131,6 +134,230 @@ def guardViewVolumes(widget, expected):
 
     restore()
     return composite, composite.AddObserver(vtk.vtkCommand.ModifiedEvent, restore)
+
+
+# ---------------------------------------------------------------------------
+# Editing: the PET series that can be added, their description, resampling and the saved series
+# ---------------------------------------------------------------------------
+STATIC_PREFIX = "StaticPET."
+GATED_PREFIX = "GatedPET."
+SUMMED_PREFIX_KEYS = ("SummedVolumeID", "FrameTimingTableID")
+LONG_GAP_S = 60 * 60.0           # warn when the series are more than an hour apart
+EDIT_ATTRIBUTE = "DynamicPETEditor.Edit"
+# per-frame tags that do not hold for an edited frame (they are written again or removed)
+FRAME_TIMING_TAGS = ("Frame", "StartDateTime", "StartFromInjectionS", "StartFromStudyStartS", "StartFromScanStartS",
+                     "DurationS", "DurationMs", "MidFromInjectionS", "MidFromScanStartS", "EndFromInjectionS",
+                     "FrameReferenceTimeMs", "DecayFactor", "StartSource", "LoaderDecayFactor", "FrameScale")
+
+
+def _isHidden(node):
+    return bool(node.GetHideFromEditors()) or node.GetAttribute(EDITOR_ATTRIBUTE) == "1"
+
+
+def _isForeignStaticPet(node):
+    """A volume loaded from DICOM by another plugin that is static PET: modality PT, Series Type not GATED or
+    DYNAMIC, no gates or time slices (from the DICOM database)."""
+    uids = (node.GetAttribute("DICOM.instanceUIDs") or "").split()
+    if not uids or not getattr(slicer, "dicomDatabase", None):
+        return False
+    try:
+        db = slicer.dicomDatabase
+        if (db.instanceValue(uids[0], "0008,0060") or "").strip() != "PT":
+            return False
+        seriesType = (db.instanceValue(uids[0], "0054,1000") or "").upper()
+        counts = [fe.number(db.instanceValue(uids[0], tag)) for tag in ("0054,0071", "0054,0101")]
+        return "GATED" not in seriesType and "DYNAMIC" not in seriesType and all(not c or c <= 1 for c in counts)
+    except Exception:
+        return False
+
+
+def petCandidates(exclude=None):
+    """PET series that Add frame accepts, as (node, "static" / "dynamic", label): dynamic PET sequences and static
+    PET volumes (loaded by this extension, or by another plugin from DICOM PT); no gated PET, no summed or derived
+    volumes, no sequence proxies."""
+    out = []
+    for sequence in slicer.util.getNodesByClass("vtkMRMLSequenceNode"):
+        if sequence is exclude or _isHidden(sequence) or sequence.GetNumberOfDataNodes() < 1:
+            continue
+        first = sequence.GetNthDataNode(0)
+        if first is not None and (first.GetAttribute(PREFIX + "Kind") or "").upper() == "DYNAMIC":
+            out.append((sequence, "dynamic", f"{sequence.GetName()} (dynamic)"))
+    for volume in slicer.util.getNodesByClass("vtkMRMLScalarVolumeNode"):
+        if _isHidden(volume) or isinstance(volume, slicer.vtkMRMLLabelMapVolumeNode):
+            continue
+        names = list(volume.GetAttributeNames() or ())
+        if any(n.startswith(PREFIX) or n.startswith(GATED_PREFIX) or n.startswith("MPI.") for n in names):
+            continue        # dynamic frames / proxies / summed images, gated PET
+        if (volume.GetAttribute(STATIC_PREFIX + "Kind") or "").upper() == "STATIC" or \
+                _isForeignStaticPet(volume):
+            out.append((volume, "static", f"{volume.GetName()} (static)"))
+    return out
+
+
+def _dicomAttributes(node):
+    """The StaticPET.* tags of a static PET loaded by another plugin, from its DICOM files: {key: text}; raises
+    ValueError when it cannot be read or is not static PET."""
+    import pydicom
+    from DICOMGatedDynamicPETLib import petseries
+    uids = (node.GetAttribute("DICOM.instanceUIDs") or "").split()
+    files = [slicer.dicomDatabase.fileForInstance(uid) for uid in uids] if uids else []
+    files = [f for f in files if f]
+    if not files:
+        raise ValueError(f"'{node.GetName()}' has no DICOM files in the database to read its tags from.")
+    datasets = [pydicom.dcmread(f, stop_before_pixels=True) for f in files]
+    if petseries.datasetKind(datasets[0]) != petseries.STATIC:
+        raise ValueError(f"'{node.GetName()}' is not a static PET series.")
+    attributes = petseries.acquisitionInfo(datasets)
+    attributes.update(petseries.suvAttributes(petseries.suvInfo(datasets)))
+    timing = petseries.frameTiming([datasets], datasets)[0]
+    for key in ("StartDateTime", "DurationS", "StartFromInjectionS"):
+        if timing.get(key) is not None:
+            attributes[key] = str(timing[key])
+    attributes["Kind"] = petseries.STATIC
+    attributes["Units"] = _foreignUnits(node)
+    return {k: str(v) for k, v in attributes.items() if v not in (None, "")}
+
+
+def _foreignUnits(node):
+    """Units of a volume loaded by another plugin (PET SUV plugin: SUVbw), from its voxel units or its name."""
+    texts = [node.GetName()]
+    try:
+        units = node.GetVoxelValueUnits()
+        if units is not None:
+            texts += [units.GetCodeValue() or "", units.GetCodeMeaning() or ""]
+    except Exception:
+        pass
+    text = " ".join(texts).lower()
+    for key, value in (("lbm", "SUVlbm"), ("bsa", "SUVbsa"), ("suv", "SUVbw"), ("bq", "Bq/ml")):
+        if key in text:
+            return value
+    return ""
+
+
+def seriesTags(node, kind):
+    """{key: text} of the series tags (without prefix) of a dynamic sequence (its first frame) or a static
+    volume."""
+    if kind == "dynamic":
+        first = node.GetNthDataNode(0)
+        return {n[len(PREFIX):]: first.GetAttribute(n) for n in (first.GetAttributeNames() or ())
+                if n.startswith(PREFIX)}
+    if (node.GetAttribute(STATIC_PREFIX + "Kind") or "").upper() == "STATIC":
+        tags = {n[len(STATIC_PREFIX):]: node.GetAttribute(n) for n in (node.GetAttributeNames() or ())
+                if n.startswith(STATIC_PREFIX)}
+        if not tags.get("StartDateTime") or not tags.get("DurationS") or not tags.get("PatientID"):
+            try:     # loaded before these tags were kept: read them from its DICOM files
+                for key, value in _dicomAttributes(node).items():
+                    if not tags.get(key):
+                        tags[key] = value
+            except Exception:
+                logging.info(f"Review/Edit: no DICOM tags for '{node.GetName()}'", exc_info=True)
+        return tags
+    return _dicomAttributes(node)
+
+
+def decayStatus(tags):
+    """(decay corrected, reference datetime) from the series tags: the Decay Correction DateTime when given, the
+    injection for ADMIN, else the scan start (the SUV reference, the first frame start when the loader decay
+    corrected the frames)."""
+    correction = (tags.get("DecayCorrection") or "").upper()
+    loader = (tags.get("LoaderDecayCorrection") or "").startswith("frames decay corrected")
+    if correction == "NONE" and not loader:
+        return False, None
+    reference = fe.parseIso(tags.get("EditDecayReference"))
+    if reference is None and correction != "NONE":
+        reference = fe.parseIso(tags.get("DecayCorrectionDateTime"))
+    if reference is None and correction == "ADMIN":
+        reference = fe.parseIso(tags.get("InjectionTime"))
+    if reference is None:
+        reference = fe.parseIso(tags.get("ScanStart"))
+    if reference is None and loader:
+        text = tags.get("LoaderDecayCorrection") or ""
+        reference = fe.parseIso(text[text.rfind("(") + 1:text.rfind(")")] if "(" in text else None)
+    return True, reference
+
+
+def describeSeries(node, kind, tags=None, frames=None):
+    """frameedit.seriesInfo of a PET series; frames: [{"start": datetime, "duration": s}] (default: its own)."""
+    tags = tags if tags is not None else seriesTags(node, kind)
+    if frames is None and kind == "dynamic":
+        frames = []
+        for i in range(node.GetNumberOfDataNodes()):
+            frameNode = node.GetNthDataNode(i)
+            frames.append({"start": fe.parseIso(frameNode.GetAttribute(PREFIX + "StartDateTime")),
+                           "duration": fe.number(frameNode.GetAttribute(PREFIX + "DurationS"))})
+    elif frames is None:
+        frames = [{"start": fe.parseIso(tags.get("StartDateTime")), "duration": fe.number(tags.get("DurationS"))}]
+    corrected, reference = decayStatus(tags)
+    return fe.seriesInfo(
+        name=node.GetName(), kind=kind, units=tags.get("Units"), frames=frames,
+        injection=fe.parseIso(tags.get("InjectionTime")), halfLife=fe.number(tags.get("RadionuclideHalfLifeS")),
+        radionuclide=tags.get("Radionuclide"), decayCorrection=(tags.get("DecayCorrection") or "").upper(),
+        decayCorrected=corrected, decayReference=reference, patientName=tags.get("PatientName"),
+        patientID=tags.get("PatientID"), manufacturer=tags.get("Manufacturer"), model=tags.get("ScannerModel"),
+        serial=tags.get("DeviceSerialNumber"), station=tags.get("StationName"))
+
+
+def _vtkMatrix(node):
+    matrix = vtk.vtkMatrix4x4()
+    node.GetIJKToRASMatrix(matrix)
+    return matrix
+
+
+def _array(node):
+    from vtk.util import numpy_support
+    image = node.GetImageData()
+    scalars = image.GetPointData().GetScalars() if image is not None else None
+    if scalars is None:
+        return None
+    return numpy_support.vtk_to_numpy(scalars).reshape(image.GetDimensions()[::-1])
+
+
+def sameGeometry(node, dims, ijkToRas, tolerance=1e-3):
+    image = node.GetImageData()
+    if image is None or tuple(image.GetDimensions()) != tuple(dims):
+        return False
+    return np.allclose(slicer.util.arrayFromVTKMatrix(_vtkMatrix(node)), ijkToRas, atol=tolerance)
+
+
+def resampleToGrid(node, dims, ijkToRas):
+    """The image of a volume node resampled (linear, 0 outside) on another grid (dims i, j, k and IJK to RAS),
+    following the node's linear parent transform: a float32 array kji."""
+    from vtk.util import numpy_support
+    sourceToWorld = np.eye(4)
+    parent = node.GetParentTransformNode()
+    if parent is not None:
+        if not parent.IsTransformToWorldLinear():
+            raise ValueError(f"'{node.GetName()}' is under a non linear transform; harden it first.")
+        matrix = vtk.vtkMatrix4x4()
+        parent.GetMatrixTransformToWorld(matrix)
+        sourceToWorld = slicer.util.arrayFromVTKMatrix(matrix)
+    sourceIjkToWorld = sourceToWorld @ slicer.util.arrayFromVTKMatrix(_vtkMatrix(node))
+    axes = np.linalg.inv(sourceIjkToWorld) @ np.asarray(ijkToRas, dtype=float)
+    image = vtk.vtkImageData()
+    image.ShallowCopy(node.GetImageData())
+    image.SetOrigin(0.0, 0.0, 0.0)
+    image.SetSpacing(1.0, 1.0, 1.0)
+    reslice = vtk.vtkImageReslice()
+    reslice.SetInputData(image)
+    reslice.SetResliceAxes(slicer.util.vtkMatrixFromArray(axes))
+    reslice.SetOutputOrigin(0.0, 0.0, 0.0)
+    reslice.SetOutputSpacing(1.0, 1.0, 1.0)
+    reslice.SetOutputExtent(0, dims[0] - 1, 0, dims[1] - 1, 0, dims[2] - 1)
+    reslice.SetOutputScalarType(vtk.VTK_FLOAT)
+    reslice.SetInterpolationModeToLinear()
+    reslice.SetBackgroundLevel(0.0)
+    reslice.Update()
+    output = reslice.GetOutput()
+    return numpy_support.vtk_to_numpy(output.GetPointData().GetScalars()).reshape(tuple(dims)[::-1]).copy()
+
+
+def imageFromArray(array):
+    from vtk.util import numpy_support
+    array = np.ascontiguousarray(array, dtype=np.float32)
+    image = vtk.vtkImageData()
+    image.SetDimensions(array.shape[2], array.shape[1], array.shape[0])
+    image.GetPointData().SetScalars(numpy_support.numpy_to_vtk(array.ravel(), deep=True, array_type=vtk.VTK_FLOAT))
+    return image
 
 
 # ---------------------------------------------------------------------------
@@ -357,20 +584,15 @@ class SphereROIs:
         self._showCurves()
 
     def _frames(self):
-        """(array_kji, ijkToRas) of every frame of the sequence, or None for a frame without an image."""
-        from vtk.util import numpy_support
-        sequence = self.session.sequenceNode
-        matrix = vtk.vtkMatrix4x4()
-        for i in range(sequence.GetNumberOfDataNodes()):
-            node = sequence.GetNthDataNode(i)
-            image = node.GetImageData()
-            scalars = image.GetPointData().GetScalars() if image is not None else None
-            if scalars is None:
-                yield None
-                continue
-            node.GetIJKToRASMatrix(matrix)
-            yield (numpy_support.vtk_to_numpy(scalars).reshape(image.GetDimensions()[::-1]),
-                   slicer.util.arrayFromVTKMatrix(matrix))
+        """(array_kji, ijkToRas) of every frame shown (the edited frames while editing), or None for a frame
+        without an image."""
+        return self.session.frameArrays()
+
+    def refreshAll(self):
+        """The frames changed (an edit): every curve again."""
+        for roi in self.rois:
+            self._schedule(roi)
+        self.flush()
 
     def units(self):
         sequence = self.session.sequenceNode
@@ -399,19 +621,23 @@ class DynamicPETEditorSession:
         self.syncSlices = syncSlices
         self.browserNode = None
         self.proxyNode = None
-        self.intervals = []
+        self.intervals = []           # frames shown: the edited frames while editing, else the original ones
+        self.originalIntervals = []
         self.viewFrames = []          # frame index shown in each small view
         self.frameVolumes = []
         self.overlays = {}            # view name -> (sliceView, renderer, text actor)
         self.observers = []
+        self.viewObservers = []       # guards of the empty grid views (rebuilt with the grid)
         self.dock = None
         self.timeline = None
+        self.originalTimeline = None
         self.previousLayout = None
         self.frameStats = []          # (auto upper = 99.9th percentile, maximum, minimum) per frame
         self.windowMode = COMMON_WINDOW
         self.window = (0.0, 1.0)
         self.onWindowChanged = None   # callback(lower, upper) when the window changes in a view (mouse)
         self._applyingWindow = False
+        self.colorNodeID = None
         self.fusionVolume = None
         self.fusionOpacity = 0.5
         self.playTimer = None
@@ -419,13 +645,24 @@ class DynamicPETEditorSession:
         self.playTime = None
         self._lastTick = None
         self.rois = None              # SphereROIs
+        # editing
+        self.edit = None              # frameedit.FrameEdit once something was edited
+        self.editArrays = {}          # atom key of an added frame -> (array kji, ijkToRas)
+        self.editVolume = None        # current edited frame, in the large view while editing
+        self.editIndex = 0
+        self._imageCache = {}
+        self.temporarySequence = False   # a static volume opened as a one-frame series (Save as only)
+        self.onEditsChanged = None    # callback() after every edit
+        self.onSaved = None           # callback(sequence node) after Save as / Overwrite
+        self._candidateTimer = None
 
     # --- open / close ---------------------------------------------------------------------------
     def open(self):
         logic = DynamicPETEditorLogic()
         self.browserNode = logic.browserFor(self.sequenceNode)
         self.proxyNode = self.browserNode.GetProxyNode(self.sequenceNode)
-        self.intervals = logic.frameIntervals(self.sequenceNode)
+        self.originalIntervals = logic.frameIntervals(self.sequenceNode)
+        self.intervals = list(self.originalIntervals)
         self.viewFrames = logic.shownFrames(len(self.intervals), self.maxViews)
         self._computeFrameStats()
         self._makeFrameVolumes()
@@ -436,6 +673,7 @@ class DynamicPETEditorSession:
         proxyDisplay = self._proxyDisplay()
         if proxyDisplay is not None:
             self.window = (proxyDisplay.GetWindowLevelMin(), proxyDisplay.GetWindowLevelMax())
+            self.colorNodeID = proxyDisplay.GetColorNodeID()
         else:
             self.window = self.autoWindow()
         self.onBrowserModified()
@@ -449,14 +687,13 @@ class DynamicPETEditorSession:
         if self.playTimer is not None:
             self.playTimer.stop()
             self.playTimer = None
-        for node, tag in self.observers:
+        if self._candidateTimer is not None:
+            self._candidateTimer.stop()
+        for node, tag in self.observers + self.viewObservers:
             if node is not None:
                 node.RemoveObserver(tag)
-        self.observers = []
-        for sliceView, renderer, actor in self.overlays.values():
-            renderer.RemoveActor2D(actor)
-            sliceView.scheduleRender()
-        self.overlays = {}
+        self.observers, self.viewObservers = [], []
+        self._removeOverlays()
         if slicer.app.layoutManager().layout == LAYOUT_ID:
             self.setLinked(False)
         if self.dock is not None:
@@ -466,17 +703,84 @@ class DynamicPETEditorSession:
         layoutManager = slicer.app.layoutManager()
         if self.previousLayout is not None and layoutManager.layout == LAYOUT_ID:
             layoutManager.setLayout(self.previousLayout)
+        self._removeFrameVolumes()
+        if self.editVolume is not None and slicer.mrmlScene.IsNodePresent(self.editVolume):
+            slicer.mrmlScene.RemoveNode(self.editVolume)
+        self.editVolume = None
+        self._imageCache = {}
+        self.editArrays = {}
+        if self.temporarySequence:
+            for node in (self.browserNode, self.proxyNode, self.sequenceNode):
+                if node is not None and slicer.mrmlScene.IsNodePresent(node):
+                    slicer.mrmlScene.RemoveNode(node)
+
+    def _removeOverlays(self):
+        for sliceView, renderer, actor in self.overlays.values():
+            renderer.RemoveActor2D(actor)
+            sliceView.scheduleRender()
+        self.overlays = {}
+
+    def _removeFrameVolumes(self):
         for node in self.frameVolumes:
             if slicer.mrmlScene.IsNodePresent(node):
                 slicer.mrmlScene.RemoveNode(node)
         self.frameVolumes = []
 
+    # --- frames shown ----------------------------------------------------------------------------
+    def isEditing(self):
+        return self.edit is not None and self.edit.isEdited()
+
+    def frameCount(self):
+        return len(self.intervals)
+
+    def _atomArray(self, key):
+        if key in self.editArrays:
+            return self.editArrays[key][0]
+        return _array(self.sequenceNode.GetNthDataNode(int(key[1:]) - 1))
+
+    def _atomMatrix(self, key):
+        if key in self.editArrays:
+            return self.editArrays[key][1]
+        return slicer.util.arrayFromVTKMatrix(_vtkMatrix(self.sequenceNode.GetNthDataNode(int(key[1:]) - 1)))
+
+    def _atomGrid(self, key):
+        array = self._atomArray(key)
+        return (None if array is None else array.shape), np.round(self._atomMatrix(key), 4).tobytes()
+
+    def _frameData(self, index):
+        """(vtkImageData, vtkMatrix4x4 IJK to RAS) of a frame shown. While editing, an edited frame is computed
+        (duration weighted mean of its frames, decay alignment) once and kept; untouched frames share the
+        original's voxels."""
+        original = index if not self.isEditing() else self.edit.isOriginalFrame(index)
+        if original is not None:
+            node = self.sequenceNode.GetNthDataNode(original)
+            return node.GetImageData(), _vtkMatrix(node)
+        keys = tuple(self.edit.frames[index])
+        cacheKey = (keys, tuple(round(self.edit.scale(k), 12) for k in keys))
+        if cacheKey not in self._imageCache:
+            array = self.edit.frameArray(index, self._atomArray)
+            self._imageCache[cacheKey] = (imageFromArray(array), slicer.util.vtkMatrixFromArray(
+                self._atomMatrix(keys[0])))
+        return self._imageCache[cacheKey]
+
+    def frameArrays(self):
+        """(array_kji, ijkToRas) of every frame shown, or None for a frame without an image."""
+        from vtk.util import numpy_support
+        for i in range(self.frameCount()):
+            image, matrix = self._frameData(i)
+            scalars = image.GetPointData().GetScalars() if image is not None else None
+            if scalars is None:
+                yield None
+                continue
+            yield (numpy_support.vtk_to_numpy(scalars).reshape(image.GetDimensions()[::-1]),
+                   slicer.util.arrayFromVTKMatrix(matrix))
+
     # --- window and color --------------------------------------------------------------------------
     def _computeFrameStats(self):
         from vtk.util import numpy_support
         self.frameStats = []
-        for i in range(self.sequenceNode.GetNumberOfDataNodes()):
-            image = self.sequenceNode.GetNthDataNode(i).GetImageData()
+        for i in range(self.frameCount()):
+            image, _ = self._frameData(i)
             scalars = image.GetPointData().GetScalars() if image is not None else None
             if scalars is None:
                 self.frameStats.append((1.0, 1.0, 0.0))
@@ -499,9 +803,19 @@ class DynamicPETEditorSession:
     def _proxyDisplay(self):
         return self.proxyNode.GetDisplayNode() if self.proxyNode is not None else None
 
+    def mainVolume(self):
+        """The volume of the large view: the current edited frame while editing, else the sequence's proxy."""
+        return self.editVolume if self.isEditing() and self.editVolume is not None else self.proxyNode
+
+    def _mainDisplay(self):
+        volume = self.mainVolume()
+        return volume.GetDisplayNode() if volume is not None else None
+
     def _displays(self):
-        """(display node, frame index or None for the current-frame proxy) of every editor volume."""
+        """(display node, frame index or None for the current frame) of every editor volume."""
         out = [(self._proxyDisplay(), None)]
+        if self.editVolume is not None:
+            out.append((self.editVolume.GetDisplayNode(), None))
         out += [(volume.GetDisplayNode(), index) for volume, index in zip(self.frameVolumes, self.viewFrames)]
         return [(display, index) for display, index in out if display is not None]
 
@@ -535,6 +849,7 @@ class DynamicPETEditorSession:
     def setColorNodeID(self, colorNodeID):
         if not colorNodeID:
             return
+        self.colorNodeID = colorNodeID
         for display, _ in self._displays():
             display.SetAndObserveColorNodeID(colorNodeID)
 
@@ -542,7 +857,9 @@ class DynamicPETEditorSession:
         """Window changed in the large view (mouse drag): pass it to every frame view."""
         if self._applyingWindow or self.windowMode != COMMON_WINDOW:
             return
-        display = self._proxyDisplay()
+        display = self._mainDisplay()
+        if display is None or caller is None or caller.GetID() != display.GetID():
+            return
         window = (display.GetWindowLevelMin(), display.GetWindowLevelMax())
         if max(abs(window[0] - self.window[0]), abs(window[1] - self.window[1])) < 1e-9:
             return
@@ -554,10 +871,13 @@ class DynamicPETEditorSession:
     # --- fusion ------------------------------------------------------------------------------------
     def _viewVolumes(self):
         """(slice widget, PET volume shown in it) of every editor view."""
-        pairs = [(self._sliceWidget(dynamicviews.MAIN_VIEW), self.proxyNode)]
+        pairs = [(self._sliceWidget(dynamicviews.MAIN_VIEW), self.mainVolume())]
         pairs += [(self._sliceWidget(dynamicviews.frameViewName(v)), volume)
                   for v, volume in enumerate(self.frameVolumes)]
         return [(widget, volume) for widget, volume in pairs if widget is not None and volume is not None]
+
+    def editorVolumes(self):
+        return [v for v in (self.proxyNode, self.editVolume, *self.frameVolumes) if v is not None]
 
     def setFusion(self, backgroundVolume, opacity=None):
         """Show backgroundVolume (None: no fusion) under the PET of every view, the PET as foreground with the
@@ -594,27 +914,45 @@ class DynamicPETEditorSession:
 
     # --- frame volumes ---------------------------------------------------------------------------
     def _makeFrameVolumes(self):
-        """A hidden volume per small view, sharing the voxels of its frame in the sequence."""
+        """A hidden volume per small view, sharing the voxels of its frame."""
         proxyDisplay = self.proxyNode.GetDisplayNode() if self.proxyNode else None
         for index in self.viewFrames:
-            source = self.sequenceNode.GetNthDataNode(index)
             volume = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLScalarVolumeNode",
                                                         f"{self.sequenceNode.GetName()} view F{index + 1}")
             volume.SetHideFromEditors(True)
             volume.SetSaveWithScene(False)
             volume.SetAttribute(EDITOR_ATTRIBUTE, "1")
-            volume.SetAndObserveImageData(source.GetImageData())
-            matrix = vtk.vtkMatrix4x4()
-            source.GetIJKToRASMatrix(matrix)
+            image, matrix = self._frameData(index)
+            volume.SetAndObserveImageData(image)
             volume.SetIJKToRASMatrix(matrix)
             volume.CreateDefaultDisplayNodes()
             display = volume.GetDisplayNode()
             if proxyDisplay is not None:
-                display.SetAndObserveColorNodeID(proxyDisplay.GetColorNodeID())
+                display.SetAndObserveColorNodeID(self.colorNodeID or proxyDisplay.GetColorNodeID())
                 display.AutoWindowLevelOff()
                 display.SetWindowLevelMinMax(proxyDisplay.GetWindowLevelMin(), proxyDisplay.GetWindowLevelMax())
                 display.SetInterpolate(proxyDisplay.GetInterpolate())
             self.frameVolumes.append(volume)
+
+    def _ensureEditVolume(self):
+        if self.editVolume is not None:
+            return
+        volume = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLScalarVolumeNode",
+                                                    f"{self.sequenceNode.GetName()} (current edited frame)")
+        volume.SetHideFromEditors(True)
+        volume.SetSaveWithScene(False)
+        volume.SetAttribute(EDITOR_ATTRIBUTE, "1")
+        volume.CreateDefaultDisplayNodes()
+        proxyDisplay = self._proxyDisplay()
+        if proxyDisplay is not None:
+            volume.GetDisplayNode().CopyContent(proxyDisplay)
+        parent = self.proxyNode.GetParentTransformNode() if self.proxyNode is not None else None
+        if parent is not None:
+            volume.SetAndObserveTransformNodeID(parent.GetID())
+        display = volume.GetDisplayNode()
+        self.observers.append((display, display.AddObserver(vtk.vtkCommand.ModifiedEvent,
+                                                            self.onProxyDisplayModified)))
+        self.editVolume = volume
 
     # --- layout and views ------------------------------------------------------------------------
     def _setLayout(self):
@@ -648,12 +986,14 @@ class DynamicPETEditorSession:
         slicer.vtkMRMLTransformNode.GetTransformBetweenNodes(None, parent, transform)
         return transform.TransformPoint(point)
 
-    def _setupViews(self):
+    def _setupViews(self, fit=True):
         main = self._sliceWidget(dynamicviews.MAIN_VIEW)
-        main.mrmlSliceCompositeNode().SetBackgroundVolumeID(self.proxyNode.GetID() if self.proxyNode else None)
+        mainVolume = self.mainVolume()
+        main.mrmlSliceCompositeNode().SetBackgroundVolumeID(mainVolume.GetID() if mainVolume else None)
         main.mrmlSliceCompositeNode().SetForegroundVolumeID(None)
         main.mrmlSliceCompositeNode().SetLabelVolumeID(None)
-        main.sliceLogic().FitSliceToAll()
+        if fit:
+            main.sliceLogic().FitSliceToAll()
         self._addOverlay(dynamicviews.MAIN_VIEW, main, 15)
         for v, volume in enumerate(self.frameVolumes):
             name = dynamicviews.frameViewName(v)
@@ -672,8 +1012,41 @@ class DynamicPETEditorSession:
             if widget is None:
                 continue
             widget.sliceController().setVisible(False)    # placeholder keeping the grid cells equal, kept empty
-            self.observers.append(guardViewVolumes(widget, lambda: (None, None, None)))
+            self.viewObservers.append(guardViewVolumes(widget, lambda: (None, None, None)))
         self.setLinked(self.syncSlices)
+
+    def _rebuildViews(self):
+        """Show the frames of self.intervals: new images in the small views, a new grid when the number of views
+        changes, the edited frame or the proxy in the large view."""
+        viewFrames = DynamicPETEditorLogic.shownFrames(self.frameCount(), self.maxViews)
+        if len(viewFrames) == len(self.viewFrames) and self.frameVolumes:
+            self.viewFrames = viewFrames
+            for volume, index in zip(self.frameVolumes, viewFrames):
+                image, matrix = self._frameData(index)
+                volume.SetAndObserveImageData(image)
+                volume.SetIJKToRASMatrix(matrix)
+        else:
+            mainSlice = self._sliceWidget(dynamicviews.MAIN_VIEW).mrmlSliceNode()
+            saved = vtk.vtkMatrix4x4()
+            saved.DeepCopy(mainSlice.GetSliceToRAS())
+            fov = mainSlice.GetFieldOfView()
+            for node, tag in self.viewObservers:
+                node.RemoveObserver(tag)
+            self.viewObservers = []
+            self._removeOverlays()
+            self.setLinked(False)
+            self._removeFrameVolumes()
+            self.viewFrames = viewFrames
+            self._makeFrameVolumes()
+            self._setLayout()
+            self._setupViews(fit=False)
+            mainSlice = self._sliceWidget(dynamicviews.MAIN_VIEW).mrmlSliceNode()
+            mainSlice.GetSliceToRAS().DeepCopy(saved)
+            mainSlice.SetFieldOfView(*fov)
+            mainSlice.UpdateMatrices()
+        self.setFusion(self.fusionVolume)
+        self.setColorNodeID(self.colorNodeID)
+        self.applyWindow()
 
     def _addOverlay(self, name, widget, fontSize):
         sliceView = widget.sliceView()
@@ -698,20 +1071,27 @@ class DynamicPETEditorSession:
             sliceView.scheduleRender()
 
     def _updateOverlays(self, current):
+        editing = self.isEditing()
         for v, frameIndex in enumerate(self.viewFrames):
             overlay = self.overlays.get(dynamicviews.frameViewName(v))
-            if overlay is None:
+            if overlay is None or frameIndex >= len(self.intervals):
                 continue
             sliceView, _, actor = overlay
-            actor.SetInput(dynamicviews.frameLabel(self.intervals[frameIndex]))
+            edited = editing and self.intervals[frameIndex].get("edited")
+            actor.SetInput(dynamicviews.frameLabel(self.intervals[frameIndex]) + ("  (edited)" if edited else ""))
             highlight = frameIndex == current
-            actor.GetTextProperty().SetColor(*((1.0, 0.85, 0.2) if highlight else (1.0, 1.0, 1.0)))
+            color = (1.0, 0.85, 0.2) if highlight else ((1.0, 0.45, 0.4) if edited else (1.0, 1.0, 1.0))
+            actor.GetTextProperty().SetColor(*color)
             actor.GetTextProperty().SetBold(highlight)
             sliceView.scheduleRender()
         overlay = self.overlays.get(dynamicviews.MAIN_VIEW)
         if overlay is not None and 0 <= current < len(self.intervals):
             sliceView, _, actor = overlay
-            actor.SetInput(f"{dynamicviews.frameLabel(self.intervals[current])}   ({current + 1} / {len(self.intervals)})")
+            text = f"{dynamicviews.frameLabel(self.intervals[current])}   ({current + 1} / {len(self.intervals)})"
+            if editing:
+                text += "   edited series" + (f": {self.intervals[current]['sources']}"
+                                              if self.intervals[current].get("edited") else "")
+            actor.SetInput(text)
             sliceView.scheduleRender()
 
     # --- sync ------------------------------------------------------------------------------------
@@ -722,6 +1102,8 @@ class DynamicPETEditorSession:
         if proxyDisplay is not None:
             self.observers.append((proxyDisplay, proxyDisplay.AddObserver(vtk.vtkCommand.ModifiedEvent,
                                                                           self.onProxyDisplayModified)))
+        for event in (slicer.mrmlScene.NodeAddedEvent, slicer.mrmlScene.NodeRemovedEvent):
+            self.observers.append((slicer.mrmlScene, slicer.mrmlScene.AddObserver(event, self._scheduleCandidates)))
 
     def _editorWidgets(self):
         names = [dynamicviews.MAIN_VIEW] + [dynamicviews.frameViewName(v) for v in range(len(self.frameVolumes))]
@@ -739,10 +1121,21 @@ class DynamicPETEditorSession:
             composite.SetHotLinkedControl(linked)
 
     def currentIndex(self):
+        if self.isEditing():
+            return self.editIndex
         return self.browserNode.GetSelectedItemNumber() if self.browserNode else -1
 
     def setCurrentIndex(self, index):
-        if self.browserNode is not None and 0 <= index < len(self.intervals):
+        if not (0 <= index < len(self.intervals)):
+            return
+        if self.isEditing():
+            self.editIndex = index
+            self._ensureEditVolume()
+            image, matrix = self._frameData(index)
+            self.editVolume.SetAndObserveImageData(image)
+            self.editVolume.SetIJKToRASMatrix(matrix)
+            self.onBrowserModified()
+        elif self.browserNode is not None:
             self.browserNode.SetSelectedItemNumber(index)
 
     def onBrowserModified(self, caller=None, event=None):
@@ -752,6 +1145,9 @@ class DynamicPETEditorSession:
         self._updateOverlays(current)
         if self.timeline is not None:
             self.timeline.setCurrentIndex(current)
+        if self.originalTimeline is not None and self.isEditing() and 0 <= current < self.frameCount():
+            originals = [int(k[1:]) - 1 for k in self.edit.frames[current] if k.startswith("o")]
+            self.originalTimeline.setHighlighted(originals)
         self._updateToolbar(current)
 
     # --- timeline dock ---------------------------------------------------------------------------
@@ -793,19 +1189,25 @@ class DynamicPETEditorSession:
         toolbar.addStretch(1)
         self.selectionLabel = qt.QLabel()
         toolbar.addWidget(self.selectionLabel)
-        for title, tip in PLANNED_OPERATIONS:
-            button = qt.QPushButton(title)
-            button.enabled = False
-            button.toolTip = tip + " (coming soon)"
-            toolbar.addWidget(button)
         layout.addLayout(toolbar)
+        layout.addLayout(self._makeEditRow())
 
         self.timeline = FrameTimeline()
         self.timeline.setFrames(self.intervals)
         self.timeline.onCurrentFrameChanged = self._pickFrame
         self.timeline.onSelectionChanged = self._onSelectionChanged
         self.timeline.onViewRangeChanged = self._onTimelineZoomed
-        layout.addWidget(self.timeline, 1)
+        layout.addWidget(self.timeline, 2)
+        self.originalTimeline = FrameTimeline()
+        self.originalTimeline.setFrames(self.originalIntervals)
+        self.originalTimeline.setCurrentIndex(-1)
+        self.originalTimeline.setLocked(True)
+        self.originalTimeline.setCompact(True)
+        self.originalTimeline.setTrackTitle("Original")
+        self.originalTimeline.onViewRangeChanged = self._onTimelineZoomed
+        self.originalTimeline.toolTip = "The original series (locked while there are edits)"
+        self.originalTimeline.setVisible(False)
+        layout.addWidget(self.originalTimeline, 1)
 
         # time window: two-handle slider with spin boxes, like a volume's display range
         zoomRow = qt.QHBoxLayout()
@@ -830,7 +1232,7 @@ class DynamicPETEditorSession:
         self.dock.setWidget(container)
 
         self.previousButton.connect("clicked()", lambda: self._pickFrame(max(0, self.currentIndex() - 1)))
-        self.nextButton.connect("clicked()", lambda: self._pickFrame(min(len(self.intervals) - 1,
+        self.nextButton.connect("clicked()", lambda: self._pickFrame(min(self.frameCount() - 1,
                                                                               self.currentIndex() + 1)))
         self.playButton.connect("toggled(bool)", self._onPlay)
         self.slowerButton.connect("clicked()", lambda: self.setPlaySpeed(self.playSpeed / 2.0))
@@ -849,13 +1251,70 @@ class DynamicPETEditorSession:
         except Exception:
             self.dock.setMinimumHeight(max(160, int(mainWindow.height / 3)))
         self._onSelectionChanged([])
+        self.refreshCandidates()
+
+    def _makeEditRow(self):
+        row = qt.QHBoxLayout()
+        row.addWidget(qt.QLabel("Add frame:"))
+        self.addCombo = qt.QComboBox()
+        self.addCombo.setMinimumContentsLength(22)
+        self.addCombo.setSizeAdjustPolicy(qt.QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self.addCombo.toolTip = ("PET series to add: static PET volumes and dynamic PET sequences (not gated). Their "
+                                 "frames are placed by their acquisition clock time.")
+        row.addWidget(self.addCombo)
+        self.addButton = qt.QPushButton("Add...")
+        self.addButton.toolTip = "Compare the series (injection, acquisition, frames, decay correction) and add it"
+        row.addWidget(self.addButton)
+        row.addSpacing(12)
+        self.mergeButton = qt.QPushButton("Merge")
+        self.mergeButton.toolTip = "Merge the selected neighbouring frames into one (duration weighted mean)"
+        self.splitButton = qt.QPushButton("Split")
+        self.splitButton.toolTip = "Split the selected merged frames back into the frames they were made of"
+        self.removeButton = qt.QPushButton("Remove")
+        self.removeButton.toolTip = "Remove the selected frames from the edited series"
+        self.discardButton = qt.QPushButton("Discard changes")
+        self.discardButton.toolTip = "Drop every edit: back to the original series"
+        for button in (self.mergeButton, self.splitButton, self.removeButton, self.discardButton):
+            row.addWidget(button)
+        row.addStretch(1)
+        self.saveAsButton = qt.QPushButton("Save as...")
+        self.saveAsButton.toolTip = ("Save the edited series as a new dynamic sequence (with its frame timing table "
+                                     "and summed volume); the original stays")
+        self.overwriteButton = qt.QPushButton("Overwrite original")
+        self.overwriteButton.toolTip = "Replace the frames of the original sequence (and its summed volume) by the edit"
+        row.addWidget(self.saveAsButton)
+        row.addWidget(self.overwriteButton)
+        self.addButton.connect("clicked()", self.onAddClicked)
+        self.mergeButton.connect("clicked()", self.onMergeClicked)
+        self.splitButton.connect("clicked()", self.onSplitClicked)
+        self.removeButton.connect("clicked()", self.onRemoveClicked)
+        self.discardButton.connect("clicked()", self.onDiscardClicked)
+        self.saveAsButton.connect("clicked()", self.onSaveAsClicked)
+        self.overwriteButton.connect("clicked()", self.onOverwriteClicked)
+        return row
 
     def _onTimeWindowChanged(self, start, end):
         self.timeline.setViewRange(start, end)
+        if self.originalTimeline is not None:
+            self.originalTimeline.setViewRange(start, end)
         self.windowLabel.text = f"{dynamicviews.formatTime(start)} - {dynamicviews.formatTime(end)}"
 
     def _onTimelineZoomed(self, start, end):
         self.rangeWidget.setValues(start, end)
+
+    def _updateExtent(self):
+        """Both timelines and the time window slider span the original and the edited frames."""
+        frames = list(self.intervals) + list(self.originalIntervals)
+        start, end = min(f["start"] for f in frames), max(f["end"] for f in frames)
+        for timeline in (self.timeline, self.originalTimeline):
+            timeline.setExtent(start, end)
+        low, high = self.rangeWidget.minimumValue, self.rangeWidget.maximumValue
+        wasFull = abs(low - self.rangeWidget.minimum) < 1e-6 and abs(high - self.rangeWidget.maximum) < 1e-6
+        self.rangeWidget.setRange(start, end)
+        if wasFull:
+            self.rangeWidget.setValues(start, end)
+        else:
+            self._onTimeWindowChanged(self.rangeWidget.minimumValue, self.rangeWidget.maximumValue)
 
     # --- playback in acquisition time -------------------------------------------------------------
     def setPlaySpeed(self, speed):
@@ -900,6 +1359,7 @@ class DynamicPETEditorSession:
         self.timeline.setPlayTime(self.playTime)
 
     def _onSelectionChanged(self, indexes):
+        self._updateEditButtons()
         if not indexes:
             self.selectionLabel.text = "Ctrl / Shift + click to select frames"
             return
@@ -912,9 +1372,578 @@ class DynamicPETEditorSession:
         if self.dock is None or not (0 <= current < len(self.intervals)):
             return
         frame = self.intervals[current]
-        self.frameLabel.text = (f"Frame {frame['number']} ({current + 1} of {len(self.intervals)}):  "
-                                f"{dynamicviews.frameTimes(self.intervals, current)},  "
-                                f"duration {dynamicviews.formatTime(frame['duration'])}")
+        text = (f"Frame {frame['number']} ({current + 1} of {len(self.intervals)}):  "
+                f"{dynamicviews.frameTimes(self.intervals, current)},  "
+                f"duration {dynamicviews.formatTime(frame['duration'])}")
+        if frame.get("edited"):
+            text += f"  [{frame['sources']}]"
+        self.frameLabel.text = text
+
+    # --- editing --------------------------------------------------------------------------------
+    def selection(self):
+        return self.timeline.selectedIndexes() if self.timeline is not None else []
+
+    def _ensureEdit(self):
+        if self.edit is None:
+            self.edit = fe.FrameEdit([{"key": f"o{i + 1}", "start": iv["start"], "duration": iv["duration"],
+                                       "label": f"F{iv['number']}"} for i, iv in enumerate(self.originalIntervals)])
+        return self.edit
+
+    def _applyEdits(self, select=None):
+        """Show the edit: intervals, views, timelines, curves."""
+        editing = self.isEditing()
+        current = self.currentIndex()
+        if editing:
+            self._ensureEditVolume()
+            live = {(tuple(f), tuple(round(self.edit.scale(k), 12) for k in f)) for f in self.edit.frames}
+            self._imageCache = {k: v for k, v in self._imageCache.items() if k in live}
+            self.intervals = self.edit.intervals(self.originalIntervals[0] if self.originalIntervals else None)
+        else:
+            self._imageCache = {}
+            self.intervals = list(self.originalIntervals)
+        self._computeFrameStats()
+        self.timeline.setFrames(self.intervals, keepView=True)
+        self.timeline.setTrackTitle("Edited" if editing else "Frames")
+        self.originalTimeline.setVisible(editing)
+        self.originalTimeline.setHighlighted([])
+        self._updateExtent()
+        self._rebuildViews()
+        index = select[0] if select else min(max(current, 0), self.frameCount() - 1)
+        self.editIndex = index
+        if editing:
+            self.setCurrentIndex(index)
+        else:
+            self.browserNode.SetSelectedItemNumber(index)
+            self.onBrowserModified()
+        self.timeline.setSelection(select or [])
+        self.timeline.setCurrentIndex(index)
+        self._onSelectionChanged(self.timeline.selectedIndexes())
+        if self.rois is not None:
+            self.rois.refreshAll()
+        if self.onEditsChanged:
+            self.onEditsChanged()
+
+    def _updateEditButtons(self):
+        if self.dock is None:
+            return
+        selected = self.selection()
+        editing = self.isEditing()
+        self.mergeButton.enabled = len(selected) > 1 and fe.FrameEdit.consecutive(selected)
+        self.splitButton.enabled = editing and self.edit.canSplit(selected)
+        self.removeButton.enabled = bool(selected) and len(selected) < self.frameCount()
+        self.discardButton.enabled = editing
+        self.saveAsButton.enabled = editing
+        self.overwriteButton.enabled = editing and not self.temporarySequence
+        self.overwriteButton.toolTip = (
+            "The series was opened from a static volume: use Save as..." if self.temporarySequence else
+            "Replace the frames of the original sequence (and its summed volume) by the edit")
+
+    def mergeFrames(self, indexes):
+        edit = self._ensureEdit()
+        grids = {self._atomGrid(k) for i in indexes for k in edit.frames[i]}
+        if len(grids) > 1:
+            raise fe.EditError("The selected frames are on different image grids (an added series that was not "
+                               "resampled); they cannot be merged.")
+        merged = edit.merge(indexes)
+        self._applyEdits([merged])
+        return merged
+
+    def splitFrames(self, indexes):
+        if self.edit is None:
+            raise fe.EditError("Select a merged frame to split.")
+        out = self.edit.split(indexes)
+        self._applyEdits(out)
+        return out
+
+    def removeFrames(self, indexes):
+        self._ensureEdit().remove(indexes)
+        self._applyEdits([])
+
+    def discardEdits(self):
+        if self.edit is not None:
+            self.edit.reset()
+        self.editArrays = {}
+        self._applyEdits([])
+
+    def _grid(self):
+        first = self.sequenceNode.GetNthDataNode(0)
+        return first.GetImageData().GetDimensions(), slicer.util.arrayFromVTKMatrix(_vtkMatrix(first))
+
+    def baseDescription(self):
+        """frameedit.seriesInfo of the edited series (its frames as they are now)."""
+        tags = seriesTags(self.sequenceNode, "dynamic")
+        clock = self.originalIntervals[0].get("clockAtZero") if self.originalIntervals else None
+        frames = [{"start": clock + datetime.timedelta(seconds=f["start"]) if clock is not None else None,
+                   "duration": f["duration"]} for f in self.intervals]
+        info = describeSeries(self.sequenceNode, "dynamic", tags, frames)
+        if self.edit is not None and self.edit.reference is not None:
+            info["decayReference"] = self.edit.reference
+        return info
+
+    def prepareAdd(self, node, kind):
+        """Everything the Add frame dialog shows and addSeries needs: {"comparison" (frameedit.compareSeries),
+        "added" (its description), "atoms", "frameNodes", "resampleNeeded"}."""
+        added = describeSeries(node, kind)
+        comparison = fe.compareSeries(self.baseDescription(), added, LONG_GAP_S)
+        frameNodes = [node.GetNthDataNode(i) for i in range(node.GetNumberOfDataNodes())] if kind == "dynamic" \
+            else [node]
+        clock = self.originalIntervals[0].get("clockAtZero") if self.originalIntervals else None
+        atoms = []
+        if clock is not None and not comparison["errors"]:
+            for n, frame in enumerate(added["frames"]):
+                label = f"{node.GetName()} F{n + 1}" if kind == "dynamic" else node.GetName()
+                atoms.append({"start": (frame["start"] - clock).total_seconds(), "duration": frame["duration"],
+                              "label": label})
+            overlaps = self._ensureEdit().overlaps(atoms)
+            if overlaps:
+                comparison["errors"].append("The added frames overlap the edited series in time: " + ", ".join(
+                    f"{label} with frame {n}" for label, n in overlaps[:6]) + ".")
+        dims, ijkToRas = self._grid()
+        resampleNeeded = any(not sameGeometry(f, dims, ijkToRas) or f.GetParentTransformNode() is not None
+                             for f in frameNodes)
+        return {"comparison": comparison, "added": added, "atoms": atoms, "frameNodes": frameNodes,
+                "resampleNeeded": resampleNeeded, "node": node}
+
+    def addSeries(self, node, kind, resample=True, prepared=None):
+        """Add the frames of a PET series (prepareAdd); resample: onto the grid of the edited series when the
+        geometry differs. Returns the indexes of the new frames."""
+        prepared = prepared or self.prepareAdd(node, kind)
+        comparison = prepared["comparison"]
+        if comparison["errors"]:
+            raise fe.EditError("\n".join(comparison["errors"]))
+        edit = self._ensureEdit()
+        dims, ijkToRas = self._grid()
+        arrays = []
+        for frameNode in prepared["frameNodes"]:
+            if prepared["resampleNeeded"] and resample:
+                arrays.append((resampleToGrid(frameNode, dims, ijkToRas), ijkToRas))
+            else:
+                array = _array(frameNode)
+                if array is None:
+                    raise fe.EditError(f"'{frameNode.GetName()}' has no image.")
+                arrays.append((np.array(array, dtype=np.float32),
+                               slicer.util.arrayFromVTKMatrix(_vtkMatrix(frameNode))))
+        number = len(edit.addedSeries) + 1
+        for i, data in enumerate(arrays):
+            self.editArrays[f"a{number}.{i + 1}"] = data
+        indexes = edit.add(node.GetName(), prepared["atoms"], comparison["scaleBase"], comparison["scaleAdded"],
+                           comparison["reference"])
+        self._applyEdits(indexes)
+        return indexes
+
+    # --- candidates of Add frame ------------------------------------------------------------------
+    def _scheduleCandidates(self, caller=None, event=None):
+        if self._candidateTimer is None:
+            self._candidateTimer = qt.QTimer()
+            self._candidateTimer.setSingleShot(True)
+            self._candidateTimer.setInterval(300)
+            self._candidateTimer.connect("timeout()", self.refreshCandidates)
+        self._candidateTimer.start()
+
+    def refreshCandidates(self):
+        if self.dock is None:
+            return
+        current = self.addCombo.itemData(self.addCombo.currentIndex) if self.addCombo.count else None
+        self.addCombo.clear()
+        exclude = {self.sequenceNode.GetID()}
+        source = self.sequenceNode.GetAttribute(PREFIX + "OpenedFromStatic")
+        if source:
+            exclude.add(source)
+        for node, kind, label in petCandidates(self.sequenceNode):
+            if node.GetID() not in exclude:
+                self.addCombo.addItem(label, f"{kind}|{node.GetID()}")
+        if current:
+            index = self.addCombo.findData(current)
+            if index >= 0:
+                self.addCombo.setCurrentIndex(index)
+        self.addButton.enabled = self.addCombo.count > 0
+        if not self.addCombo.count:
+            self.addCombo.addItem("(no other PET series in the scene)")
+            self.addCombo.setItemData(0, None)
+
+    def selectedCandidate(self):
+        data = self.addCombo.itemData(self.addCombo.currentIndex) if self.addCombo.count else None
+        if not data:
+            return None, None
+        kind, nodeID = str(data).split("|", 1)
+        return slicer.mrmlScene.GetNodeByID(nodeID), kind
+
+    # --- buttons (with the dialogs) ----------------------------------------------------------------
+    def _guard(self, action, title):
+        try:
+            return action()
+        except fe.EditError as error:
+            slicer.util.warningDisplay(str(error), windowTitle=title)
+        except Exception as error:
+            logging.exception(f"Review/Edit: {title} failed")
+            slicer.util.errorDisplay(f"{title} failed:\n{error}", windowTitle=title)
+        return None
+
+    def onAddClicked(self):
+        node, kind = self.selectedCandidate()
+        if node is None:
+            return
+        prepared = self._guard(lambda: self.prepareAdd(node, kind), "Add frame")
+        if prepared is None or not addFrameDialog(self, prepared):
+            return
+        resample = True
+        if prepared["resampleNeeded"]:
+            answer = qt.QMessageBox.question(
+                slicer.util.mainWindow(), "Add frame: image grid",
+                f"'{node.GetName()}' is on another image grid (size, voxel size, position or orientation) than the "
+                "edited series, or under a transform.\n\nResample it onto the grid of the edited series (linear "
+                "interpolation, no registration)?\n\nYes: resampled; it can then be merged with other frames.\n"
+                "No: kept on its own grid (e.g. to register it later); it cannot be merged with frames on another "
+                "grid.", qt.QMessageBox.Yes | qt.QMessageBox.No | qt.QMessageBox.Cancel, qt.QMessageBox.Yes)
+            if answer == qt.QMessageBox.Cancel:
+                return
+            resample = answer == qt.QMessageBox.Yes
+        indexes = self._guard(lambda: self.addSeries(node, kind, resample, prepared), "Add frame")
+        if indexes:
+            slicer.util.infoDisplay(
+                f"{len(indexes)} frame(s) of '{node.GetName()}' added (red on the edited timeline).\n\n"
+                "Check the registration: the added frames come from another acquisition, so the patient may have "
+                "moved (compare them with the other frames, with fusion or the ROI curves). If they are not "
+                "aligned, save the edited series and correct it in Dynamic PET Motion Correction.",
+                windowTitle="Add frame: check the registration")
+
+    def onMergeClicked(self):
+        indexes = self.selection()
+        edit = self._ensureEdit()
+        if len(indexes) > 1 and fe.FrameEdit.consecutive(indexes):
+            gap = edit.largestGap(indexes)
+            if gap > fe.GAP_TOLERANCE_S and not slicer.util.confirmYesNoDisplay(
+                    f"There are {fe.formatDuration(gap)} between the selected frames. Merge them anyway? The merged "
+                    "frame spans the gap; its duration is the sum of the acquisition times.", windowTitle="Merge"):
+                return
+        self._guard(lambda: self.mergeFrames(indexes), "Merge")
+
+    def onSplitClicked(self):
+        self._guard(lambda: self.splitFrames(self.selection()), "Split")
+
+    def onRemoveClicked(self):
+        self._guard(lambda: self.removeFrames(self.selection()), "Remove")
+
+    def onDiscardClicked(self):
+        if self.isEditing() and slicer.util.confirmYesNoDisplay(
+                "Discard every change and go back to the original series?", windowTitle="Discard changes"):
+            self.discardEdits()
+
+    def onSaveAsClicked(self):
+        if not self.isEditing():
+            return
+        base = self.sequenceNode.GetName()
+        name = qt.QInputDialog.getText(slicer.util.mainWindow(), "Save as", "Name of the new dynamic series:",
+                                       qt.QLineEdit.Normal, slicer.mrmlScene.GenerateUniqueName(f"{base} edited"))
+        if not name or not str(name).strip():
+            return
+        sequence = self._guard(lambda: saveEditedSeries(self, str(name).strip()), "Save as")
+        if sequence is not None and self.onSaved:
+            self.onSaved(sequence)
+
+    def onOverwriteClicked(self):
+        if not self.isEditing() or self.temporarySequence:
+            return
+        if not slicer.util.confirmYesNoDisplay(
+                f"Overwrite '{self.sequenceNode.GetName()}' with the edited frames? Its frames, frame timing table "
+                "and summed volume are replaced; this cannot be undone (Save as... keeps the original).",
+                windowTitle="Overwrite original"):
+            return
+        sequence = self._guard(lambda: saveEditedSeries(self, overwrite=True), "Overwrite original")
+        if sequence is not None and self.onSaved:
+            self.onSaved(sequence)
+
+
+def addFrameDialog(session, prepared):
+    """The Add frame dialog: both series side by side, the decay correction, errors and warnings. True: add."""
+    comparison = prepared["comparison"]
+    dialog = qt.QDialog(slicer.util.mainWindow())
+    dialog.setWindowTitle("Add frame")
+    dialog.setMinimumWidth(720)
+    layout = qt.QVBoxLayout(dialog)
+    layout.addWidget(qt.QLabel(f"Add '{prepared['node'].GetName()}' to '{session.sequenceNode.GetName()}':"))
+    rows = comparison["rows"]
+    table = qt.QTableWidget(len(rows), 2)
+    table.setHorizontalHeaderLabels(["Edited series", "Added series"])
+    table.setVerticalHeaderLabels([r[0] for r in rows])
+    table.setEditTriggers(qt.QAbstractItemView.NoEditTriggers)
+    table.horizontalHeader().setSectionResizeMode(qt.QHeaderView.Stretch)
+    for r, (_, base, added) in enumerate(rows):
+        for c, text in enumerate((base, added)):
+            item = qt.QTableWidgetItem(str(text))
+            if base != added and r > 0:
+                item.setForeground(qt.QBrush(qt.QColor(230, 150, 40)))
+            table.setItem(r, c, item)
+    table.setMinimumHeight(min(420, 30 + 26 * len(rows)))
+    layout.addWidget(table)
+
+    def note(text, color=None):
+        label = qt.QLabel(text)
+        label.wordWrap = True
+        if color:
+            label.setStyleSheet(f"color: {color}; font-weight: bold;")
+        layout.addWidget(label)
+
+    if comparison["note"]:
+        note("Decay correction: " + comparison["note"])
+    for text in comparison["errors"]:
+        note("Cannot add: " + text, "#e04040")
+    for text in comparison["warnings"]:
+        note("Warning: " + text, "#e09020")
+    if prepared["resampleNeeded"] and not comparison["errors"]:
+        note("The image grid differs: you will be asked whether to resample it.")
+    if not comparison["errors"]:
+        note(f"{len(prepared['atoms'])} frame(s) will be placed by their acquisition clock time.")
+    buttons = qt.QDialogButtonBox()
+    addButton = buttons.addButton("Add" if not comparison["warnings"] else "Add anyway",
+                                  qt.QDialogButtonBox.AcceptRole)
+    addButton.enabled = not comparison["errors"]
+    buttons.addButton(qt.QDialogButtonBox.Cancel)
+    buttons.connect("accepted()", dialog.accept)
+    buttons.connect("rejected()", dialog.reject)
+    layout.addWidget(buttons)
+    return bool(dialog.exec_()) and not comparison["errors"]
+
+
+def staticAsSequence(volume):
+    """A static PET volume as a one-frame dynamic sequence (hidden, not saved; removed when Review/Edit closes),
+    so that frames can be added to it. Returns the sequence."""
+    tags = seriesTags(volume, "static")
+    if fe.parseIso(tags.get("StartDateTime")) is None or fe.number(tags.get("DurationS")) is None:
+        raise ValueError(f"The acquisition time or duration of '{volume.GetName()}' is unknown.")
+    scene = slicer.mrmlScene
+    sequence = scene.AddNewNodeByClass("vtkMRMLSequenceNode", scene.GenerateUniqueName(f"{volume.GetName()} dynamic"))
+    sequence.SetHideFromEditors(True)
+    sequence.SetSaveWithScene(False)
+    sequence.SetIndexName("Time")
+    sequence.SetIndexUnit("s")
+    sequence.SetIndexType(sequence.NumericIndex)
+    frame = slicer.vtkMRMLScalarVolumeNode()
+    frame.SetName(f"{volume.GetName()} F1")
+    for key, value in tags.items():
+        frame.SetAttribute(PREFIX + key, str(value))
+    duration = fe.number(tags.get("DurationS"))
+    frame.SetAttribute(PREFIX + "Kind", "DYNAMIC")
+    frame.SetAttribute(PREFIX + "Frame", "1")
+    frame.SetAttribute(PREFIX + "StartFromStudyStartS", "0")
+    frame.SetAttribute(PREFIX + "DurationMs", f"{duration * 1000.0:g}")
+    frame.SetAttribute("DICOM.Modality", "PT")
+    frame.SetIJKToRASMatrix(_vtkMatrix(volume))
+    image = vtk.vtkImageData()
+    image.DeepCopy(volume.GetImageData())
+    frame.SetAndObserveImageData(image)
+    try:
+        frame.SetVoxelValueUnits(volume.GetVoxelValueUnits())
+    except Exception:
+        pass
+    sequence.SetDataNodeAtValue(frame, f"{duration / 2.0:g}")
+    sequence.SetAttribute("DICOM.Modality", "PT")
+    sequence.SetAttribute(PREFIX + "OpenedFromStatic", volume.GetID())
+    sequence.SetAttribute(PREFIX + "SumWeighting", "duration")
+    sequence.SetAttribute(PREFIX + "StudyStartDateTime", tags.get("StartDateTime"))
+    browser = DynamicPETEditorLogic.browserFor(sequence)
+    browser.SetHideFromEditors(True)
+    browser.SetSaveWithScene(False)
+    proxy = browser.GetProxyNode(sequence)
+    if proxy is not None:
+        proxy.SetHideFromEditors(True)
+        proxy.SetSaveWithScene(False)
+        proxy.SetAttribute(EDITOR_ATTRIBUTE, "1")
+        proxy.CreateDefaultDisplayNodes()
+        sourceDisplay = volume.GetDisplayNode()
+        if sourceDisplay is not None:
+            proxy.GetDisplayNode().CopyContent(sourceDisplay)
+    return sequence
+
+
+def _indexValues(rows):
+    """Sequence index of each frame: seconds from the scan start to the frame middle, else frame numbers (as the
+    loader)."""
+    values = [row["MidFromScanStartS"] for row in rows]
+    if any(v is None for v in values) or len({round(v, 3) for v in values}) != len(values):
+        values = [row["MidFromInjectionS"] for row in rows]
+    if any(v is None for v in values) or len({round(v, 3) for v in values}) != len(values):
+        return [str(row["Frame"]) for row in rows]
+    return [f"{v:.3f}".rstrip("0").rstrip(".") for v in values]
+
+
+def editedFrameNodes(session, baseName):
+    """The frames of the edited series as volume nodes (not in the scene) with their tags, and the timing rows."""
+    from DICOMGatedDynamicPETLib import petseries
+    edit = session.edit
+    template = session.sequenceNode.GetNthDataNode(0)
+    tags = seriesTags(session.sequenceNode, "dynamic")
+    corrected, reference = decayStatus(tags)
+    if edit.reference is not None:
+        reference = edit.reference
+    clock = session.originalIntervals[0].get("clockAtZero")
+    rows = edit.timingRows(clock, fe.parseIso(tags.get("InjectionTime")),
+                           reference or fe.parseIso(tags.get("ScanStart")))
+    nodes = []
+    for i, row in enumerate(rows):
+        original = edit.isOriginalFrame(i)
+        source = session.sequenceNode.GetNthDataNode(original) if original is not None else template
+        node = slicer.vtkMRMLScalarVolumeNode()
+        node.SetName(f"{baseName} F{i + 1}")
+        for key in source.GetAttributeNames() or ():
+            node.SetAttribute(key, source.GetAttribute(key))
+        for key in FRAME_TIMING_TAGS:
+            node.RemoveAttribute(PREFIX + key)
+        for key, value in row.items():
+            if value is not None:
+                node.SetAttribute(PREFIX + key, str(value))
+        node.SetAttribute(PREFIX + "Frames", str(len(rows)))
+        if original is None:
+            node.SetAttribute(PREFIX + "EditSources", edit.frameSources(i))
+            node.RemoveAttribute("DICOM.instanceUIDs")
+        if edit.reference is not None:
+            node.SetAttribute(PREFIX + "EditDecayReference", edit.reference.isoformat())
+            node.SetAttribute(PREFIX + "DecayReference", "Review/Edit: frames decay corrected to "
+                              + edit.reference.isoformat())
+        image, matrix = session._frameData(i)
+        copy = vtk.vtkImageData()
+        copy.DeepCopy(image)
+        node.SetAndObserveImageData(copy)
+        node.SetIJKToRASMatrix(matrix)
+        try:
+            node.SetVoxelValueUnits(template.GetVoxelValueUnits())
+        except Exception:
+            pass
+        nodes.append(node)
+    return nodes, rows, tags, petseries
+
+
+def _summedArray(sequence, rows, tags, petseries, weighting):
+    arrays = [_array(sequence.GetNthDataNode(i)) for i in range(sequence.GetNumberOfDataNodes())]
+    if any(a is None for a in arrays) or len({a.shape for a in arrays}) != 1:
+        return None, None
+    corrected, _ = decayStatus(tags)
+    weights, text = petseries.summationWeights([row["DurationS"] for row in rows],
+                                               [row["StartFromStudyStartS"] for row in rows],
+                                               fe.number(tags.get("RadionuclideHalfLifeS")), weighting, corrected)
+    return petseries.weightedMean(arrays, weights).astype(np.float32), text
+
+
+def saveEditedSeries(session, name=None, overwrite=False):
+    """Save the edit: a new dynamic sequence `name` with its browser, frame timing table and summed volume (Save
+    as), or the frames of the original sequence replaced, with its table and summed volume (overwrite). Returns
+    the sequence."""
+    from DICOMGatedDynamicPET import frameTimingTable
+    scene = slicer.mrmlScene
+    original = session.sequenceNode
+    baseName = original.GetName() if overwrite else scene.GenerateUniqueName(name)
+    nodes, rows, tags, petseries = editedFrameNodes(session, baseName)
+    weighting = original.GetAttribute(PREFIX + "SumWeighting") or petseries.SUM_DURATION
+    oldSummed = scene.GetNodeByID(original.GetAttribute(PREFIX + "SummedVolumeID") or "")
+    oldTable = scene.GetNodeByID(original.GetAttribute(PREFIX + "FrameTimingTableID") or "")
+    if overwrite:
+        sequence = original
+        sequence.RemoveAllDataNodes()
+    else:
+        sequence = scene.AddNewNodeByClass("vtkMRMLSequenceNode", baseName)
+        sequence.SetIndexName(original.GetIndexName() or "Time")
+        sequence.SetIndexUnit(original.GetIndexUnit() or "s")
+        sequence.SetIndexType(original.GetIndexType())
+        for key in original.GetAttributeNames() or ():
+            if key not in (PREFIX + k for k in SUMMED_PREFIX_KEYS) and key != PREFIX + "OpenedFromStatic":
+                sequence.SetAttribute(key, original.GetAttribute(key))
+        sequence.SetAttribute(PREFIX + "EditedFrom", original.GetName())
+    for node, value in zip(nodes, _indexValues(rows)):
+        sequence.SetDataNodeAtValue(node, value)
+    for key, value in petseries.timingLists(rows).items():
+        sequence.SetAttribute(PREFIX + key, value)
+    sequence.SetAttribute(PREFIX + "Frames", str(len(rows)))
+    sequence.SetAttribute(PREFIX + "SumWeighting", weighting)
+    if rows and rows[0]["StartDateTime"]:
+        sequence.SetAttribute(PREFIX + "StudyStartDateTime", rows[0]["StartDateTime"])
+    if session.edit.reference is not None:
+        sequence.SetAttribute(PREFIX + "EditDecayReference", session.edit.reference.isoformat())
+    sequence.SetAttribute(PREFIX + "EditHistory", "; ".join(f"F{r['Frame']}: {r['StartSource'][13:]}" for r in rows))
+
+    table = frameTimingTable(f"{baseName} frame timing", rows)
+    table.SetAttribute(PREFIX + "SequenceNodeID", sequence.GetID())
+    sequence.SetAttribute(PREFIX + "FrameTimingTableID", table.GetID())
+    if overwrite and oldTable is not None:
+        table.SetName(oldTable.GetName())
+        scene.RemoveNode(oldTable)
+
+    array, text = _summedArray(sequence, rows, tags, petseries, weighting)
+    summed = None
+    if array is not None and (oldSummed is not None or not overwrite):
+        if overwrite and oldSummed is not None:
+            summed = oldSummed
+        else:
+            summedName = baseName.replace(" dynamic ", " summed ", 1) if " dynamic " in baseName else \
+                f"{baseName} summed"
+            summed = scene.AddNewNodeByClass("vtkMRMLScalarVolumeNode", scene.GenerateUniqueName(summedName))
+            template = oldSummed or sequence.GetNthDataNode(0)
+            for key in template.GetAttributeNames() or ():
+                if not key.startswith("DICOM.instanceUIDs"):
+                    summed.SetAttribute(key, template.GetAttribute(key))
+            for key in FRAME_TIMING_TAGS:
+                summed.RemoveAttribute(PREFIX + key)
+            try:
+                summed.SetVoxelValueUnits(sequence.GetNthDataNode(0).GetVoxelValueUnits())
+            except Exception:
+                pass
+        slicer.util.updateVolumeFromArray(summed, array)
+        summed.SetIJKToRASMatrix(_vtkMatrix(sequence.GetNthDataNode(0)))
+        summed.SetAttribute(PREFIX + "StaticFrom", f"{len(rows)} edited frames summed, {text}")
+        summed.SetAttribute(PREFIX + "SummedFrames", str(len(rows)))
+        summed.SetAttribute(PREFIX + "SumWeighting", weighting)
+        summed.SetAttribute(PREFIX + "DurationS", f"{sum(r['DurationS'] for r in rows):.6g}")
+        for key, value in (("StartFromInjectionS", rows[0]["StartFromInjectionS"]),
+                           ("EndFromInjectionS", rows[-1]["EndFromInjectionS"]),
+                           ("StartDateTime", rows[0]["StartDateTime"])):
+            if value is not None:
+                summed.SetAttribute(PREFIX + key, str(value))
+        summed.SetAttribute(PREFIX + "DynamicSequence", sequence.GetID())
+        sequence.SetAttribute(PREFIX + "SummedVolumeID", summed.GetID())
+        summed.CreateDefaultDisplayNodes()
+        if oldSummed is not None and oldSummed is not summed and oldSummed.GetDisplayNode() is not None:
+            summed.GetDisplayNode().CopyContent(oldSummed.GetDisplayNode())
+
+    created = [n for n in (table, summed) if n is not None]
+    if overwrite:
+        logic = slicer.modules.sequences.logic()
+        browsers = vtk.vtkCollection()
+        logic.GetBrowserNodesForSequenceNode(sequence, browsers)
+        for b in range(browsers.GetNumberOfItems()):
+            browser = browsers.GetItemAsObject(b)
+            browser.SetSelectedItemNumber(min(browser.GetSelectedItemNumber(), len(rows) - 1))
+            logic.UpdateProxyNodesFromSequences(browser)
+    else:
+        browser = DynamicPETEditorLogic.browserFor(sequence)
+        browser.SetPlaybackLooped(True)
+        proxy = browser.GetProxyNode(sequence)
+        if proxy is not None:
+            proxy.SetName(f"{baseName} (current frame)")
+            proxy.CreateDefaultDisplayNodes()
+            if session._proxyDisplay() is not None:
+                proxy.GetDisplayNode().CopyContent(session._proxyDisplay())
+        created += [n for n in (browser, proxy, sequence) if n is not None]
+        source = original
+        if session.temporarySequence:
+            source = scene.GetNodeByID(original.GetAttribute(PREFIX + "OpenedFromStatic") or "") or original
+        _placeNextTo(source, created)
+    logging.info(f"Dynamic PET Review/Edit: '{sequence.GetName()}' {'overwritten' if overwrite else 'saved'} with "
+                 f"{len(rows)} frames")
+    return sequence
+
+
+def _placeNextTo(sourceNode, nodes):
+    try:
+        sh = slicer.vtkMRMLSubjectHierarchyNode.GetSubjectHierarchyNode(slicer.mrmlScene)
+        sourceItem = sh.GetItemByDataNode(sourceNode)
+        parent = sh.GetItemParent(sourceItem) if sourceItem else 0
+        if not parent:
+            return
+        for node in nodes:
+            item = sh.GetItemByDataNode(node)
+            if item:
+                sh.SetItemParent(item, parent)
+    except Exception:
+        logging.warning("Could not place the edited series in the subject hierarchy", exc_info=True)
 
 
 # ---------------------------------------------------------------------------
@@ -933,14 +1962,15 @@ class DynamicPETEditorWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         inputBox = qt.QGroupBox("Dynamic series")
         form = qt.QFormLayout(inputBox)
         self.sequenceSelector = slicer.qMRMLNodeComboBox()
-        self.sequenceSelector.nodeTypes = ["vtkMRMLSequenceNode"]
+        self.sequenceSelector.nodeTypes = ["vtkMRMLSequenceNode", "vtkMRMLScalarVolumeNode"]
         self.sequenceSelector.noneEnabled = True
         self.sequenceSelector.addEnabled = False
         self.sequenceSelector.removeEnabled = False
         self.sequenceSelector.renameEnabled = False
         self.sequenceSelector.setMRMLScene(slicer.mrmlScene)
-        self.sequenceSelector.toolTip = "Dynamic PET sequence (as loaded from DICOM: '<series> dynamic Bq/ml')"
-        form.addRow("Sequence:", self.sequenceSelector)
+        self.sequenceSelector.toolTip = ("Dynamic PET sequence (as loaded from DICOM: '<series> dynamic Bq/ml'), or a "
+                                         "static PET volume to build a dynamic series from (Add frame, Save as)")
+        form.addRow("Series:", self.sequenceSelector)
         self.infoLabel = qt.QLabel()
         self.infoLabel.wordWrap = True
         form.addRow(self.infoLabel)
@@ -977,9 +2007,12 @@ class DynamicPETEditorWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.layout.addWidget(self.fusionBox)
         self.layout.addWidget(self.roiBox)
 
-        operationsBox = qt.QGroupBox("Frame operations")
+        operationsBox = qt.QGroupBox("Frame editing")
         operations = qt.QVBoxLayout(operationsBox)
-        note = qt.QLabel("Summation, merging, splitting and reframing are coming next.")
+        note = qt.QLabel("On the timeline bar: Add frame (static or dynamic PET, placed by acquisition time), Merge, "
+                         "Split, Remove and Discard changes; the edited timeline shows the edits in red over the "
+                         "original one. Save as... makes a new dynamic sequence, Overwrite original replaces the "
+                         "frames of the series.")
         note.wordWrap = True
         operations.addWidget(note)
         self.layout.addWidget(operationsBox)
@@ -987,7 +2020,7 @@ class DynamicPETEditorWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
 
         self.sequenceSelector.connect("currentNodeChanged(vtkMRMLNode*)", self.onSequenceChanged)
         self.openButton.connect("clicked()", self.onOpen)
-        self.closeButton.connect("clicked()", self.onClose)
+        self.closeButton.connect("clicked()", lambda: self.onClose(confirm=True))
         self.overlayCheck.connect("toggled(bool)", self.onOverlayToggled)
         self.syncCheck.connect("toggled(bool)", self.onSyncToggled)
         self.addObserver(slicer.mrmlScene, slicer.mrmlScene.StartCloseEvent, self.onSceneClose)
@@ -1164,7 +2197,7 @@ class DynamicPETEditorWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
     def onFusionVolumeChanged(self, node):
         if self.session is None:
             return
-        if node is not None and node in (self.session.proxyNode, *self.session.frameVolumes):
+        if node is not None and node in self.session.editorVolumes():
             slicer.util.warningDisplay("Pick an anatomical volume, not the dynamic PET itself.")
             self.fusionSelector.setCurrentNode(None)
             return
@@ -1242,8 +2275,17 @@ class DynamicPETEditorWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             self.infoLabel.text = "Pick a dynamic PET sequence."
             self.openButton.enabled = False
             return
+        if node.IsA("vtkMRMLScalarVolumeNode"):
+            if self.logic.isStaticPet(node):
+                self.infoLabel.text = ("Static PET: opens as a one-frame series; add static or dynamic PET to it and "
+                                       "Save as a new dynamic series.")
+                self.openButton.enabled = True
+            else:
+                self.infoLabel.text = "Not a static PET volume (pick a dynamic PET sequence or a static PET)."
+                self.openButton.enabled = False
+            return
         if not self.logic.isDynamicSequence(node):
-            self.infoLabel.text = "Not a sequence of volumes with more than one frame."
+            self.infoLabel.text = "Not a sequence of volumes."
             self.openButton.enabled = False
             return
         intervals = self.logic.frameIntervals(node)
@@ -1257,20 +2299,27 @@ class DynamicPETEditorWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         node = self.sequenceSelector.currentNode()
         if node is None:
             return
-        self.onClose()
+        if not self.onClose(confirm=True):
+            return
         # Motion Correction takes the main layout and a timeline dock too: close it first
         motionCorrection = getattr(slicer.modules, "DynamicPETMotionCorrectionWidget", None)
         if motionCorrection is not None and getattr(motionCorrection, "session", None) is not None:
             motionCorrection.onClose()
+        temporary = None
         try:
+            if node.IsA("vtkMRMLScalarVolumeNode"):
+                temporary = node = staticAsSequence(node)
             self.session = DynamicPETEditorSession(node, self.maxViewsSpin.value, self.overlayCheck.checked,
                                                    self.syncCheck.checked)
+            self.session.temporarySequence = temporary is not None
             self.session.open()
         except Exception as error:
             logging.exception("Could not open Dynamic PET Review/Edit")
             slicer.util.errorDisplay(f"Could not open Dynamic PET Review/Edit:\n{error}")
             if self.session is not None:
                 self.session.close()
+            elif temporary is not None and slicer.mrmlScene.IsNodePresent(temporary):
+                slicer.mrmlScene.RemoveNode(temporary)
             self.session = None
         self.closeButton.enabled = self.session is not None
         self._setupWindowBox()
@@ -1280,9 +2329,36 @@ class DynamicPETEditorWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.roiBox.enabled = self.session is not None
         if self.session is not None:
             self.session.rois.onChanged = self._refreshRoiTable
+            self.session.onEditsChanged = self._onEditsChanged
+            self.session.onSaved = lambda sequence: qt.QTimer.singleShot(0, lambda: self._reopen(sequence))
+            self.session._updateEditButtons()
         self._refreshRoiTable()
 
-    def onClose(self):
+    def _onEditsChanged(self):
+        """The frames shown changed: the window slider spans their values."""
+        if self.session is None:
+            return
+        lowest, highest = self.session.valueRange()
+        self.windowRange.blockSignals(True)
+        try:
+            self.windowRange.setRange(min(lowest, self.session.window[0]), max(highest, self.session.window[1]))
+            self.windowRange.setValues(*self.session.window)
+        finally:
+            self.windowRange.blockSignals(False)
+
+    def _reopen(self, sequence):
+        """After Save as / Overwrite: open the saved series, so the timeline is a plain one again."""
+        self.onClose()
+        if slicer.mrmlScene.IsNodePresent(sequence):
+            self.sequenceSelector.setCurrentNode(sequence)
+            self.onOpen()
+
+    def onClose(self, confirm=False):
+        """Close the session; confirm: ask first when there are unsaved edits. False when the user keeps it open."""
+        if self.session is not None and confirm and self.session.isEditing() and \
+                not slicer.app.testingEnabled() and not slicer.util.confirmYesNoDisplay(
+                    "The edits of the frames are not saved. Close and discard them?", windowTitle="Review/Edit"):
+            return False
         if self.session is not None:
             self.session.close()
             self.session = None
@@ -1295,6 +2371,7 @@ class DynamicPETEditorWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             self.roiBox.enabled = False
             self.selectedRoiNode = None
             self._refreshRoiTable()
+        return True
 
     def onOverlayToggled(self, checked):
         if self.session is not None:
@@ -1323,6 +2400,10 @@ class DynamicPETEditorTest(ScriptedLoadableModuleTest):
     def runTest(self):
         self.setUp()
         self.test_OpenEditor()
+        self.setUp()
+        self.test_EditFrames()
+        self.setUp()
+        self.test_StartFromStatic()
 
     def test_OpenEditor(self):
         import tempfile
@@ -1395,3 +2476,103 @@ class DynamicPETEditorTest(ScriptedLoadableModuleTest):
         rois.cancelPlacement()
         self.assertEqual(len(rois.rois), 1)
         self.assertFalse(slicer.mrmlScene.IsNodePresent(pending["node"]))
+
+    def _loadEditSeries(self):
+        """A dynamic series (4 frames from 10:00, injection 10:00) and a static one at 11:00 (same injection)."""
+        import tempfile
+        from DICOMGatedDynamicPETLib import petseries
+        from DICOMGatedDynamicPET import DICOMGatedDynamicPETPluginClass
+        plugin = DICOMGatedDynamicPETPluginClass()
+        start = datetime.datetime(2026, 1, 1, 10, 0, 0)
+        files, _ = petseries.writeSyntheticSeries(tempfile.mkdtemp(prefix="petseries"), kind=petseries.DYNAMIC,
+                                                  frames=4, frameDurationsS=[10.0, 30.0, 60.0, 120.0])
+        summed = plugin.loadSeries(files, "Edit dynamic Bq/ml", petseries.UNITS_ACTIVITY, summed=True)
+        sequence = slicer.mrmlScene.GetNodeByID(summed.GetAttribute(PREFIX + "DynamicSequence"))
+        files, _ = petseries.writeSyntheticSeries(tempfile.mkdtemp(prefix="petseries"), kind=petseries.STATIC,
+                                                  seriesStart=start + datetime.timedelta(hours=1), injection=start)
+        static = plugin.loadSeries(files, "Late static Bq/ml", petseries.UNITS_ACTIVITY)
+        return sequence, summed, static
+
+    def test_EditFrames(self):
+        sequence, summed, static = self._loadEditSeries()
+        self.assertEqual(static.GetAttribute("StaticPET.DurationS"), "600")
+        self.assertEqual(static.GetAttribute("StaticPET.Manufacturer"), "Synthetic")
+        self.assertEqual([kind for _, kind, _ in petCandidates(sequence)], ["static"])
+        session = DynamicPETEditorSession(sequence)
+        session.open()
+        try:
+            self.assertEqual(session.addCombo.count, 1)
+            # merge F1 + F2: duration weighted mean, red on the edited timeline, the original untouched
+            session.mergeFrames([0, 1])
+            self.assertTrue(session.isEditing())
+            self.assertEqual(session.frameCount(), 3)
+            self.assertFalse(session.originalTimeline.isHidden())
+            self.assertTrue(session.timeline.frames[0]["edited"])
+            merged = session.frameArrays()
+            array, _ = next(merged)
+            self.assertAlmostEqual(float(array.mean()), (1000.0 * 10 + 2000.0 * 30) / 40, places=2)
+            self.assertEqual(sequence.GetNumberOfDataNodes(), 4)
+            self.assertEqual(session.mainVolume(), session.editVolume)
+            # add the static series: one hour later, decay corrected to its own start -> aligned to 10:00
+            prepared = session.prepareAdd(static, "static")
+            self.assertFalse(prepared["comparison"]["errors"])
+            self.assertFalse(prepared["comparison"]["warnings"])                  # 56 min apart, same patient
+            self.assertFalse(prepared["resampleNeeded"])
+            self.assertEqual(session.addSeries(static, "static", prepared=prepared), [3])
+            self.assertAlmostEqual(session.intervals[3]["start"], 3600.0)
+            values = list(session.frameArrays())
+            self.assertAlmostEqual(float(values[3][0].mean()), 1000.0 * 2.0 ** (3600.0 / 6586.2), places=1)
+            # split gives F1 and F2 back; remove the last original frame
+            session.splitFrames([0])
+            self.assertEqual(session.frameCount(), 5)
+            session.removeFrames([3])
+            self.assertEqual(session.frameCount(), 4)
+            # save as: a new sequence; the original keeps its 4 frames
+            saved = saveEditedSeries(session, "Edit saved")
+            self.assertEqual(saved.GetNumberOfDataNodes(), 4)
+            self.assertEqual(sequence.GetNumberOfDataNodes(), 4)
+            starts = [float(saved.GetNthDataNode(i).GetAttribute(PREFIX + "StartFromStudyStartS")) for i in range(4)]
+            self.assertEqual([round(t) for t in starts], [0, 10, 40, 3600])
+            self.assertEqual(saved.GetNthDataNode(3).GetAttribute(PREFIX + "DurationS"), "600")
+            self.assertIn("added", saved.GetNthDataNode(3).GetAttribute(PREFIX + "EditSources"))
+            table = slicer.mrmlScene.GetNodeByID(saved.GetAttribute(PREFIX + "FrameTimingTableID"))
+            self.assertEqual(table.GetNumberOfRows(), 4)
+            newSummed = slicer.mrmlScene.GetNodeByID(saved.GetAttribute(PREFIX + "SummedVolumeID"))
+            self.assertIsNotNone(newSummed)
+            self.assertIsNot(newSummed, summed)
+            # discard
+            session.discardEdits()
+            self.assertFalse(session.isEditing())
+            self.assertEqual(session.frameCount(), 4)
+            self.assertEqual(session.mainVolume(), session.proxyNode)
+            # overwrite the original with a merge
+            session.mergeFrames([2, 3])
+            saveEditedSeries(session, overwrite=True)
+            self.assertEqual(sequence.GetNumberOfDataNodes(), 3)
+            self.assertEqual(sequence.GetNthDataNode(2).GetAttribute(PREFIX + "DurationS"), "180")
+            self.assertEqual(slicer.mrmlScene.GetNodeByID(sequence.GetAttribute(PREFIX + "SummedVolumeID")), summed)
+        finally:
+            session.close()
+        self.assertFalse([n for n in slicer.util.getNodesByClass("vtkMRMLScalarVolumeNode")
+                          if n.GetAttribute(EDITOR_ATTRIBUTE) == "1"])
+
+    def test_StartFromStatic(self):
+        sequence, summed, static = self._loadEditSeries()
+        temporary = staticAsSequence(static)
+        session = DynamicPETEditorSession(temporary)
+        session.temporarySequence = True
+        session.open()
+        try:
+            self.assertEqual(session.frameCount(), 1)
+            self.assertIn(sequence, [node for node, _, _ in petCandidates(temporary)])
+            prepared = session.prepareAdd(sequence, "dynamic")
+            self.assertFalse(prepared["comparison"]["errors"])
+            self.assertEqual(session.addSeries(sequence, "dynamic", prepared=prepared), [0, 1, 2, 3])
+            self.assertFalse(session.overwriteButton.enabled)
+            # the dynamic series starts first: the static frame is decay corrected to 10:00
+            self.assertAlmostEqual(session.edit.scale("o1"), 2.0 ** (3600.0 / 6586.2), places=6)
+            saved = saveEditedSeries(session, "From static")
+            self.assertEqual(saved.GetNumberOfDataNodes(), 5)
+        finally:
+            session.close()
+        self.assertFalse(slicer.mrmlScene.IsNodePresent(temporary))

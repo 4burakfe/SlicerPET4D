@@ -11,8 +11,8 @@ the tracer, decay correction and frame timing with every volume. Plain static PE
 Slicer's PET SUV plugin (PETDICOMExtension) targets static PET, and the MultiVolume importer handles time
 series generically. Gated and dynamic PET series are stacks of single-slice images, one per slice and frame.
 Those plugins often stack such a series into one volume, fail to split it, or lose the per-image rescale
-slope, the per-frame timing and the decay correction. This plugin fills that gap. For static PET it gives way
-to the PET SUV plugin when that one is installed (see *Static PET* below).
+slope, the per-frame timing and the decay correction. This plugin fills that gap, and loads static PET too
+(see *Static PET* below).
 
 ## What it loads
 
@@ -122,8 +122,52 @@ sequence (the most recent one is picked for you) and press *Open Review/Edit*:
 - **Close Review/Edit:** goes back to the previous layout and removes the helper volumes and the sphere models. ROI
   points stay in the scene, and the next *Open Review/Edit* takes them up again.
 
-Series longer than *Frame views (max)* (64 by default) show that many frames, spread over the series. The frame
-operations (sum selected, merge, split, reframe, remove) are placeholders for now.
+Series longer than *Frame views (max)* (64 by default) show that many frames, spread over the series.
+
+### Editing the frames
+
+The *Series* box also takes a **static PET** volume: it opens as a one-frame series, so a dynamic series can be
+built from several static scans (add them, then *Save as...*). The bar above the timeline edits the frames:
+
+- **Add frame** + series box + **Add...**: the box lists the PET in the scene, *(static)* volumes and *(dynamic)*
+  sequences (gated PET is not offered). *Add...* opens a dialog with both series side by side: patient, units,
+  injection time, acquisition start / end, acquisition time, number of frames, decay correction and its
+  reference time, half life and scanner. The frames are placed by their **acquisition clock time** (the series
+  start, not the study time).
+  - Refused: SUV with Bq/ml, different SUV normalisations, different radionuclides or half lives, Bq/ml decay
+    corrected with Bq/ml that is not, unknown acquisition times, frames overlapping the edited series.
+  - Warned: different patient name or ID, a different scanner (manufacturer, model, serial number, station), a
+    different injection time, more than 60 min between the two series.
+  - **Decay correction:** SUV is normalised to each series' own decayed dose, so SUV values join as they are.
+    Bq/ml series decay corrected to different times are put on the decay reference of the series that **starts
+    first**: the other one is multiplied by 2^((its reference - that reference) / T1/2), so the values are
+    continuous. When the added series starts first, the frames already there are corrected.
+  - When the image grid differs (size, voxel size, position, orientation, or a transform), Review/Edit asks
+    whether to **resample** it onto the grid of the edited series (linear, no registration). A frame kept on its
+    own grid cannot be merged with others. After adding, it reminds you to check the registration and, if needed,
+    to correct it in *Dynamic PET Motion Correction* after saving.
+- **Merge**: the selected neighbouring frames (Ctrl / Shift + click) become one, the **duration weighted mean**;
+  its duration is the sum of the acquisition times. Frames with a gap between them are merged after a question.
+- **Split**: a merged frame goes back to the frames it was made of (frames added from another series come back
+  as they were added).
+- **Remove**: the selected frames are left out. The other frames keep their values: decay correction is to a
+  fixed reference time, not to the first frame, and that time is written to the saved series.
+- **Discard changes**: back to the original series (after a question).
+
+Once something is edited, the original timeline stays at the bottom at half height, **locked** (it zooms and pans
+with the edited one, but frames cannot be clicked; the frames of the current edited frame are outlined), and the
+**edited timeline** above it shows the edited frames in **red**. The views show the edited frames at once; the
+original sequence is not changed.
+
+- **Save as...** asks for a name and makes a new dynamic sequence with its browser, frame timing table and summed
+  volume (weighted as the original's), next to the original in the subject hierarchy.
+- **Overwrite original** (after a question) replaces the frames of the sequence, its frame timing table and its
+  summed volume. A series opened from a static volume can only be saved as a new one.
+
+After saving, the saved series is opened again with a plain timeline. Edited frames carry
+`DynamicPET.EditSources` (what they are made of, e.g. *F2 + F3 (merged)*), the timing tags are written again
+(the study start is the new first frame; `StartSource` says *Review/Edit: ...*), and a decay alignment is kept in
+`DynamicPET.EditDecayReference`.
 
 ### Spherical ROIs and time-activity curves
 
@@ -225,7 +269,8 @@ Settings in the panel:
 | Summed image (optional) | none | register to this volume instead (e.g. the series' summed volume); then every frame is registered |
 | Resum the summed image | on | *Harden transforms* also makes a new summed image of the corrected frames |
 | Keep only the motion corrected series | on | *Harden transforms* deletes the original series and old summed image |
-| Method | Rigid | Rigid, Affine or BSpline (BRAINSFit `transformType`, Mattes mutual information, no initialization) |
+| Method | Rigid | Rigid, Affine or BSpline (BRAINSFit `transformType`, Mattes mutual information) |
+| Initialization | geometric centers | how the first pass starts (BRAINSFit `initializeTransformMode`): the geometric centers of the frame and the reference aligned (`useGeometryAlign`), the centers of mass (`useMoments`) or none; the second pass starts from the first |
 | Enable two pass | off; second pass Rigid | after the first pass, the corrected frames are summed (as the series' summed image: by duration or by counts) and every frame is registered again (Rigid, Affine or BSpline) **to that motion corrected sum**, starting from its first pass transform; a frame the second pass fails on or moves over the limit keeps its first pass result |
 | Do not register low activity frames | on, below 1 % | activity = sum of the voxels of the frame; frames below that % of the highest frame are kept as they are |
 | Limit motion | on, 200 mm | a registration that moves any point of the middle half of the volume (3 x 3 x 3 grid) further than this along R, A or S is rejected and the frame is kept |
@@ -290,10 +335,12 @@ about frames whose start was estimated, and about frames that start before the p
 
 ## Static PET
 
-Static PET loadables get a low confidence (0.6). That is above Slicer's plain scalar volume loader and,
-as far as we know, below the PET SUV plugin, so the PET SUV plugin is used for static PET when it is
-installed. To use this plugin for a static series anyway, pick its loadable in the DICOM browser's
-*Advanced* view.
+Static PET loadables get the same confidence as gated and dynamic ones (1.05), above Slicer's scalar volume
+loader and the PET SUV plugin (PETDICOMExtension), so this plugin loads static PET too. It keeps the acquisition
+start, the frame duration, the tracer, the decay correction, the patient and the scanner on the volume
+(`StaticPET.*`), which *Add frame* in Review/Edit needs. The DICOM browser names the loader per kind: *Gated PET
+(PET4D)*, *Dynamic PET (PET4D)* and *Static PET (PET4D)*. A static PET loaded by another plugin can still be
+added in Review/Edit: its tags are read from the DICOM database.
 
 ## Installation
 
@@ -314,6 +361,8 @@ DICOMGatedDynamicPET/
     settings.py                    the settings, kept in the Slicer application settings
     dynamicviews.py, timeline.py   Review/Edit layout helpers and the timeline widget
     roicurves.py                   spherical ROIs: sphere voxels, time-activity curves (numpy, no Slicer imports)
+    frameedit.py                   Review/Edit frame editing: merge / split / remove / add, series comparison and
+                                   decay alignment, timing of the saved series (numpy, no Slicer imports)
     motioncorrection.py            Motion Correction: low activity frames, rigid shift / angles, motion limit (numpy)
     petseries.py                   PET DICOM: kind, frame ordering, geometry, SUV, tracer, decay, frame timing,
                                    ECG gating, synthetic test series (pydicom + numpy, no Slicer imports)

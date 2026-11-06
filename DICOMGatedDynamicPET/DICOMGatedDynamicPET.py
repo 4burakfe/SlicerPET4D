@@ -6,8 +6,10 @@ Loads PET series (Modality PT) from the DICOM browser in SUVbw or Bq/ml:
               gated PET): a sequence of gates plus their mean as the static image
     dynamic   dynamic PET (Series Type DYNAMIC\\IMAGE or Number of Time Slices > 1): a sequence of time frames
               plus a table of the frame timing
-    static    one volume (offered with a low confidence, so Slicer's PET SUV plugin is used for plain static
-              PET when it is installed; pick this loadable in the DICOM browser's Advanced view to use it)
+    static    one volume, with its acquisition start and duration (offered above Slicer's PET SUV plugin, so
+              static PET keeps the tags Review/Edit needs to add it to a dynamic series)
+The DICOM browser lists the loader per kind: "Gated PET (PET4D)", "Dynamic PET (PET4D)", "Static PET (PET4D)"
+(three plugin classes sharing one loader).
 Slicer's PET SUV and MultiVolume plugins stack the images of gated and dynamic series into one volume or fail
 to split them; this plugin orders them by Image Index (0054,1330), else Trigger Time (gated) or Frame
 Reference Time / acquisition time (dynamic), else repeated slice positions, and applies every image's own
@@ -17,7 +19,7 @@ Loadables (one series gives SUV and Bq/ml, the DICOM browser selects the first).
 SUVlbm, SUVbsa) and which units come first are set in the Gated / Dynamic PET Settings module; by default:
     gated     "<series> gated SUVbw" (1.05), "<series> gated Bq/ml" (1.04)
     dynamic   "<series> dynamic Bq/ml" (1.05), "<series> dynamic SUVbw" (1.04)   activity first, for kinetics
-    static    "<series> SUVbw" (0.6), "<series> Bq/ml" (0.59)
+    static    "<series> SUVbw" (1.05), "<series> Bq/ml" (1.04)
 
 Results, placed in the series' subject hierarchy study:
     gated     "<series> mean SUVbw": the static image, mean of the gates (each gate is a full concentration
@@ -61,8 +63,8 @@ UNIT_CODES = {petseries.UNITS_ACTIVITY: ("Bq/ml", "UCUM", "Becquerels/milliliter
               petseries.UNITS_SUV: ("{SUVbw}g/ml", "UCUM", "Standardized Uptake Value body weight"),
               petseries.UNITS_SUL: ("{SUVlbm}g/ml", "UCUM", "Standardized Uptake Value lean body mass"),
               petseries.UNITS_SUVBSA: ("{SUVbsa}cm2/ml", "UCUM", "Standardized Uptake Value body surface area")}
-# (first loadable, second loadable) confidence per kind; above 1.0 beats MultiVolumeImporter
-CONFIDENCE = {petseries.GATED: (1.05, 1.04), petseries.DYNAMIC: (1.05, 1.04), petseries.STATIC: (0.6, 0.59)}
+# (first loadable, second loadable) confidence per kind; above 1.0 beats MultiVolumeImporter and the PET SUV plugin
+CONFIDENCE = {petseries.GATED: (1.05, 1.04), petseries.DYNAMIC: (1.05, 1.04), petseries.STATIC: (1.05, 1.04)}
 KIND_WORD = {petseries.GATED: "gated", petseries.DYNAMIC: "dynamic", petseries.STATIC: ""}
 
 
@@ -85,16 +87,24 @@ class DICOMGatedDynamicPET(ScriptedLoadableModule):
             slicer.modules.dicomPlugins
         except AttributeError:
             slicer.modules.dicomPlugins = {}
-        slicer.modules.dicomPlugins["DICOMGatedDynamicPETPlugin"] = DICOMGatedDynamicPETPluginClass
+        # one plugin per kind, so the DICOM browser names the loader "Gated PET (PET4D)" and so on
+        slicer.modules.dicomPlugins.pop("DICOMGatedDynamicPETPlugin", None)
+        slicer.modules.dicomPlugins["DICOMGatedPET4DPlugin"] = DICOMGatedPET4DPluginClass
+        slicer.modules.dicomPlugins["DICOMDynamicPET4DPlugin"] = DICOMDynamicPET4DPluginClass
+        slicer.modules.dicomPlugins["DICOMStaticPET4DPlugin"] = DICOMStaticPET4DPluginClass
 
 
 # ---------------------------------------------------------------------------
 # DICOM plugin: examine + load
 # ---------------------------------------------------------------------------
 class DICOMGatedDynamicPETPluginClass(DICOMPlugin):
+    """Examines and loads every kind; the registered subclasses below each examine one kind (KINDS)."""
+    KINDS = None
+    LOAD_TYPE = "PET (PET4D)"
+
     def __init__(self):
         super().__init__()
-        self.loadType = "Gated / Dynamic PET"
+        self.loadType = self.LOAD_TYPE
         self.tags["modality"] = "0008,0060"
         self.tags["seriesDescription"] = "0008,103e"
         self.tags["seriesType"] = "0054,1000"
@@ -120,7 +130,7 @@ class DICOMGatedDynamicPETPluginClass(DICOMPlugin):
         first = files[0]
         kind = petseries.seriesKind(db.fileValue(first, self.tags["modality"]), db.fileValue(first, self.tags["seriesType"]),
                                     db.fileValue(first, self.tags["timeSlots"]), db.fileValue(first, self.tags["timeSlices"]))
-        if kind is None:
+        if kind is None or (self.KINDS is not None and kind not in self.KINDS):
             return []
         import pydicom
         header = pydicom.dcmread(first, stop_before_pixels=True)
@@ -267,6 +277,12 @@ class DICOMGatedDynamicPETPluginClass(DICOMPlugin):
         common.update(suvExtra)
         if kind == petseries.GATED:
             common.update({k: str(v) for k, v in petseries.gatingInfo(frames).items()})
+        if kind == petseries.STATIC:
+            # acquisition start and duration of the static frame (Review/Edit places it on a dynamic time axis)
+            timing = petseries.frameTiming(frames, datasets)[0]
+            for key in ("StartDateTime", "DurationS", "StartFromInjectionS", "EndFromInjectionS"):
+                if timing.get(key) is not None:
+                    common[key] = str(timing[key])
         prefix = petseries.ATTRIBUTE_PREFIXES[kind]
 
         if kind == petseries.STATIC:
@@ -466,6 +482,21 @@ class DICOMGatedDynamicPETWidget(ScriptedLoadableModuleWidget):
 
 # Loadable name + first file -> (kind, units) (Qt-wrapped loadables can lose Python attributes)
 _KIND_FOR_LOADABLE = {}
+
+
+class DICOMGatedPET4DPluginClass(DICOMGatedDynamicPETPluginClass):
+    KINDS = (petseries.GATED,)
+    LOAD_TYPE = "Gated PET (PET4D)"
+
+
+class DICOMDynamicPET4DPluginClass(DICOMGatedDynamicPETPluginClass):
+    KINDS = (petseries.DYNAMIC,)
+    LOAD_TYPE = "Dynamic PET (PET4D)"
+
+
+class DICOMStaticPET4DPluginClass(DICOMGatedDynamicPETPluginClass):
+    KINDS = (petseries.STATIC,)
+    LOAD_TYPE = "Static PET (PET4D)"
 
 
 def loadableName(description, kind, units):
