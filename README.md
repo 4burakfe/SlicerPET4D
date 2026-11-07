@@ -475,8 +475,8 @@ without, the result is kept, or stay).
    (also FLAIR), PD, or CT; it can be set by hand.
 2. **Motion correction** (Dynamic PET Motion Correction).
 3. **CT/MR registration** (Dynamic PET to CT/MR Registration).
-4. **Normalization** to the **MNI ICBM 152 nonlinear symmetric 2009c** template with **BRAINSFit**, **affine then
-   B-spline** by default, or the **iterative multi-resolution** engine (rigid, then deformable, B-spline grid 30 mm).
+4. **Normalization** to the **MNI ICBM 152 nonlinear symmetric 2009c** template with **BRAINSFit**, **rigid + scale +
+   skew** (BRAINSFit `ScaleSkewVersor3D`; *Affine* can be picked) **then B-spline** by default, or the **iterative multi-resolution** engine (rigid, then deformable, B-spline grid 30 mm).
    BRAINSFit registers copies of the template and of the CT/MR (or PET) **smoothed and resampled to 2 mm**
    (*Register at*, as FSL's 2 mm MNI template; 0 for the images as they are); the transform applies to the original
    images. A 0.5 mm MR against the 1 mm template otherwise takes tens of GB. The sizes BRAINSFit gets are written to
@@ -489,8 +489,10 @@ without, the result is kept, or stay).
      (step 3, or PET/MR). The CT/MR is normalized too.
 
    The result is shown in the registration layout (PET, fusion, template, checkerboard) with manual correction;
-   with the CT/MR method the **normalized CT/MR** is on the right and **over the template** (in red) in the fusion
-   column;
+   with the CT/MR method the **normalized CT/MR** is on the right, **over the template** (Inferno) in the fusion
+   column, and the **PET over the template** in the PET column. BRAINSFit's B-spline to the template uses a
+   **12-subdivision grid** (*B-spline grid*; control points about 16 mm apart) and a stopping factor of 1e9 instead of
+   BRAINSFit's 2e13;
    **Harden** resamples every frame and the summed image onto the template's field of view (PET voxel size by
    default) into a new series *"&lt;series&gt; MNI"* (or overwrites it). **Revert** undoes it.
 5. **Regions:** the **CerebrA** atlas as a segmentation with the structure names. The **region atlas** is CerebrA

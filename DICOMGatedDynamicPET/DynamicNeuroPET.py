@@ -7,10 +7,11 @@ A step-by-step workflow for dynamic receptor PET of the brain, built on the othe
                             from the DICOM tags)
     2. Motion correction    the Dynamic PET Motion Correction panel, on the series of step 1
     3. CT/MR registration   the Dynamic PET to CT/MR Registration panel, the series to the CT / MR
-    4. Normalization        to the MNI ICBM 152 2009c template (BRAINSFit, affine then B-spline): the PET registered
-                            to the template (default), or the CT / MR normalized and the same transform applied to the
-                            PET. Checked in the registration layout (PET / fusion / template, checkerboard, manual
-                            correction), then hardened into a new series in the template space.
+    4. Normalization        to the MNI ICBM 152 2009c template (BRAINSFit, rigid + scale + skew then B-spline): the
+                            PET registered to the template, or the CT / MR normalized and the same transform applied
+                            to the PET (default when the study has a CT / MR). Checked in the registration layout
+                            (PET / fusion / template, checkerboard, manual correction), then hardened into a new
+                            series in the template space.
     5. Regions              the CerebrA atlas (Manera et al. 2020) as a segmentation with the structure names: the
                             regions from the left / right atlas ('Putamen R', 'Putamen L') or the bilateral one
                             ('Putamen'), the reference region from either (default: the bilateral cerebellar grey
@@ -63,10 +64,14 @@ DEFAULT_MODEL = "SRTM"
 METHOD_PET, METHOD_ANATOMY = "pet", "anatomy"
 METHODS = ((METHOD_PET, "Register the PET to the template"),
            (METHOD_ANATOMY, "Normalize the CT/MR, apply the same transform to the PET"))
-NORMALIZATION_STEPS = ("Affine", "BSpline")
+NORMALIZATION_STEPS = (reg.SCALE_SKEW, "BSpline")      # rigid + scale + skew, then B-spline
 # BRAINSFit registers a copy of the template and of the CT/MR / PET at this voxel size (as FSL's 2 mm MNI template;
 # a 0.5 mm MR against the 1 mm template otherwise takes tens of GB); the result applies to the original images
 NORMALIZATION_WORKING_MM = 2.0
+# BRAINSFit B-spline to the template: 12 subdivisions per axis (control points about 16 mm apart over the template;
+# BRAINSFit's own default is 14,10,12) and a stricter stopping factor than BRAINSFit's 2e13 (see registerStep)
+NORMALIZATION_BSPLINE_GRID = 12
+NORMALIZATION_CONVERGENCE_FACTOR = 1e9
 NORMALIZATION_ITERATIVE_GRID_MM = 30.0     # iterative engine: last control-point spacing (brain to template)
 # The PET is registered to the skull-stripped template by default (the scalp of the T1 has no PET counterpart);
 # the CT/MR is registered to the whole template.
@@ -243,6 +248,8 @@ class DynamicNeuroPETLogic(ScriptedLoadableModuleLogic):
         settings["steps"] = list(NORMALIZATION_STEPS)
         settings["resample"] = [True] * len(NORMALIZATION_STEPS)
         settings["workingVoxelMm"] = NORMALIZATION_WORKING_MM
+        settings["bsplineGrid"] = NORMALIZATION_BSPLINE_GRID
+        settings["bsplineConvergenceFactor"] = NORMALIZATION_CONVERGENCE_FACTOR
         settings["initialization"] = NORMALIZATION_INITIALIZATION[method]
         settings["iterativeDeformable"] = True          # to the template: linear, then deformable
         settings["iterativeGridMm"] = NORMALIZATION_ITERATIVE_GRID_MM
@@ -928,9 +935,9 @@ class DynamicNeuroPETWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             if index > 0:
                 combo.addItem("(none)", "")
             for name in reg.STEP_TYPES:
-                combo.addItem(name, name)
+                combo.addItem(reg.stepTitle(name), name)
             combo.setCurrentIndex(combo.findData(default))
-            combo.toolTip = "Affine then B-spline by default (a B-spline only as the last step)"
+            combo.toolTip = ("Rigid + scale + skew then B-spline by default (a B-spline only as the last step)")
             self.normStepCombos.append(combo)
             brainsForm.addRow(f"Step {index + 1}:", combo)
         self.normWorkingSpin = qt.QDoubleSpinBox()
@@ -946,6 +953,13 @@ class DynamicNeuroPETWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             "MNI template of FSL) keeps the memory low: a 0.5 mm MR against the 1 mm template otherwise takes tens "
             "of GB. 0: the template and the images as they are.")
         brainsForm.addRow("Register at:", self.normWorkingSpin)
+        self.normGridSpin = qt.QSpinBox()
+        self.normGridSpin.setRange(3, 40)
+        self.normGridSpin.value = NORMALIZATION_BSPLINE_GRID
+        self.normGridSpin.toolTip = (
+            "B-spline control grid: subdivisions along each axis of the template (12: control points about 16 mm "
+            "apart). More subdivisions deform more locally (and take longer). BRAINSFit's own default is 14,10,12.")
+        brainsForm.addRow("B-spline grid:", self.normGridSpin)
         form.addRow(self.normBrainsBox)
         form.addRow(self.normIterativeBox)
         self.normInitCombo = qt.QComboBox()
@@ -1090,6 +1104,7 @@ class DynamicNeuroPETWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         steps = [c.currentData for c in self.normStepCombos if c.currentData]
         settings["engine"] = reg.ENGINE_BRAINSFIT
         settings["steps"] = reg.validateSteps(steps)
+        settings["bsplineGrid"] = int(self.normGridSpin.value)
         working = float(self.normWorkingSpin.value)
         settings["resample"] = [working > 0] * len(settings["steps"])
         settings["workingVoxelMm"] = working

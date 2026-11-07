@@ -209,3 +209,12 @@ def test_extend_grid():
     assert np.allclose(bigGrid[:3, :3], grid[:3, :3])
     assert np.allclose(bigGrid[:3, 3], [-7.5, 0.5, 0.5])                           # aligned: whole voxels earlier
     assert reg.extendGrid(dims, grid, [])[0] == dims
+
+
+def test_scale_skew_step():
+    assert reg.SCALE_SKEW in reg.STEP_TYPES and reg.isLinearStep(reg.SCALE_SKEW)
+    assert reg.validateSteps([reg.SCALE_SKEW, "BSpline"]) == ["ScaleSkewVersor3D", "BSpline"]
+    with pytest.raises(ValueError):
+        reg.validateSteps([reg.SCALE_SKEW, "Rigid"])
+    assert reg.stepsText([reg.SCALE_SKEW, "BSpline"]) == "Rigid + scale + skew, then BSpline"
+    assert reg.resampleFlags([reg.SCALE_SKEW]) == [True]
