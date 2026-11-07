@@ -157,8 +157,10 @@ class NeuroPETDatabaseManagerLogic(ScriptedLoadableModuleLogic):
         try:
             array = slicer.util.arrayFromVolume(source)
             mask = (array > 0) if values is None else np.isin(np.rint(array).astype(np.int64), values)
+            mask = neuro.erodeMask(mask, float(header.get("referenceErosionMm") or 0),
+                                   tuple(float(x) for x in source.GetSpacing())[::-1])
             if not mask.any():
-                raise ValueError("The reference mask is empty")
+                raise ValueError("The reference mask is empty (eroded too much?)")
             target = slicer.modules.volumes.logic().CreateAndAddLabelVolume(slicer.mrmlScene, source,
                                                                            "reference mask")
             slicer.util.updateVolumeFromArray(target, mask.astype(np.uint8))
@@ -198,10 +200,12 @@ class NeuroPETDatabaseManagerLogic(ScriptedLoadableModuleLogic):
             if not slicer.modules.segmentations.logic().ExportSegmentsToLabelmapNode(
                     segmentationNode, ids, labelNode, reference):
                 raise ValueError("The pons segments could not be exported")
-            array = slicer.util.arrayFromVolume(labelNode)
-            if not array.any():
-                raise ValueError("The pons mask is empty")
-            slicer.util.updateVolumeFromArray(labelNode, (array > 0).astype(np.uint8))
+            mask = neuro.erodeMask(slicer.util.arrayFromVolume(labelNode) > 0,
+                                   float(header.get("referenceErosionMm") or 0),
+                                   tuple(float(x) for x in labelNode.GetSpacing())[::-1])
+            if not mask.any():
+                raise ValueError("The pons mask is empty (eroded too much?)")
+            slicer.util.updateVolumeFromArray(labelNode, mask.astype(np.uint8))
             relative = normaldb.REFERENCE_MASK_NAME
             if not slicer.util.saveNode(labelNode, os.path.join(folder, relative)):
                 raise ValueError("The reference mask could not be saved")
@@ -326,6 +330,15 @@ class HeaderForm:
         self.smoothingSpin.toolTip = ("Gaussian smoothing of the maps before the mean / SD" if not predefined
                                       else "Smoothing applied to the maps of the database (for the record).")
         refForm.addRow("Smoothing:", self.smoothingSpin)
+        self.erosionSpin = qt.QDoubleSpinBox()
+        self.erosionSpin.setRange(0, 10)
+        self.erosionSpin.setDecimals(1)
+        self.erosionSpin.singleStep = 0.5
+        self.erosionSpin.suffix = " mm"
+        self.erosionSpin.specialValueText = "Off"
+        self.erosionSpin.toolTip = ("Erode the reference mask made from the atlas (not a custom mask file), so "
+                                    "spill-over from the neighbouring tissue does not reach it.")
+        refForm.addRow("Erode reference:", self.erosionSpin)
         if predefined:
             self.mapTypeCombo = qt.QComboBox()
             self.mapTypeCombo.toolTip = ("What the mean / SD maps hold: PET SUVR (divided by the reference) or SUV, "
@@ -487,6 +500,7 @@ class HeaderForm:
             segmentation=self.segmentationEdit.text.strip(),
             referenceRegion=self.referenceKey(),
             smoothingFwhmMm=float(self.smoothingSpin.value),
+            referenceErosionMm=float(self.erosionSpin.value),
             ageStratified=stratified,
             ageGroups=self.ageGroups() if stratified else [],
             scanner=self.scannerEdit.text.strip(),
@@ -667,6 +681,7 @@ class NeuroPETDatabaseManagerWidget(ScriptedLoadableModuleWidget):
             ("Segmentation", header.get("segmentation")),
             ("Reference", normaldb.referenceTitle(header.get("referenceRegion"))
              + (f" (mask {header.get('referenceMask')})" if header.get("referenceMask") else " (no mask)")),
+            ("Reference erosion", f"{header.get('referenceErosionMm') or 0:g} mm"),
             ("Maps", f"{header.get('mapType')}, smoothing {header.get('smoothingFwhmMm') or 0:g} mm FWHM"),
             ("Scanner", header.get("scanner")),
             ("Description", header.get("description")),

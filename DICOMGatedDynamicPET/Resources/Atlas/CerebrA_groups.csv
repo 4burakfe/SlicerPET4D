@@ -1,0 +1,25 @@
+Group;Structures;Notes
+Prefrontal;Superior Frontal, Rostral Middle Frontal, Caudal Middle Frontal, Pars Opercularis, Pars Triangularis;dorsolateral and dorsomedial prefrontal, inferior frontal gyrus
+Orbitofrontal;Lateral Orbitofrontal, Medial Orbitofrontal, Pars Orbitalis;
+Sensorimotor;Precentral, Postcentral, Paracentral;
+Anterior Cingulate;Rostral Anterior Cingulate, Caudal Anterior Cingulate;
+Posterior Cingulate;Posterior Cingulate, Isthmus Cingulate;
+Precuneus;Precuneus;
+Lateral Parietal;Superior Parietal, Inferior Parietal, Supramarginal;
+Lateral Temporal;Superior Temporal, Middle Temporal, Inferior temporal, Transverse Temporal, Fusiform;fusiform (basal temporal) included
+Mesial Temporal;Hippocampus, Amygdala, Parahippocampal, Entorhinal;
+Insula;Insula;
+Lateral Occipital;Lateral Occipital;
+Medial Occipital;Cuneus, Lingual, Pericalcarine;
+Caudate;Caudate;
+Putamen;Putamen;
+Ventral Striatum;Accumbens Area;
+Pallidum;Pallidum;
+Thalamus;Thalamus;
+Basal Forebrain;Basal Forebrain;
+Ventral Diencephalon;Ventral Diencephalon;
+Cerebellum Gray Matter;Cerebellum Gray Matter;cerebellar hemisphere cortex (default reference)
+Cerebellum White Matter;Cerebellum White Matter;
+Vermis;Vermal lobules I-V, Vermal lobules VI-VII, Vermal lobules VIII-X;
+Brainstem;Brainstem;
+Pons;Pons;CerebrA with pons only (over the brainstem)

@@ -185,3 +185,150 @@ def test_pons_overlay_helpers(tmp_path):
     again = neuro.findAtlasFiles(str(tmp_path))
     assert again[neuro.PONS_OVERLAY] == lateral and again[neuro.PONS_BILATERAL_OVERLAY] == bilateral
     assert again[neuro.PONS_LABELS].endswith(".seg.nrrd")
+
+
+CEREBRA_NAMES = [
+    "Caudal Anterior Cingulate",
+    "Caudal Middle Frontal",
+    "Cuneus",
+    "Entorhinal",
+    "Fusiform",
+    "Inferior Parietal",
+    "Inferior temporal",
+    "Isthmus Cingulate",
+    "Lateral Occipital",
+    "Lateral Orbitofrontal",
+    "Lingual",
+    "Medial Orbitofrontal",
+    "Middle Temporal",
+    "Parahippocampal",
+    "Paracentral",
+    "Pars Opercularis",
+    "Pars Orbitalis",
+    "Pars Triangularis",
+    "Pericalcarine",
+    "Postcentral",
+    "Posterior Cingulate",
+    "Precentral",
+    "Precuneus",
+    "Rostral Anterior Cingulate",
+    "Rostral Middle Frontal",
+    "Superior Frontal",
+    "Superior Parietal",
+    "Superior Temporal",
+    "Supramarginal",
+    "Transverse Temporal",
+    "Insula",
+    "Brainstem",
+    "Third Ventricle",
+    "Fourth Ventricle",
+    "Optic Chiasm",
+    "Lateral Ventricle",
+    "Inferior Lateral Ventricle",
+    "Cerebellum Gray Matter",
+    "Cerebellum White Matter",
+    "Thalamus",
+    "Caudate",
+    "Putamen",
+    "Pallidum",
+    "Hippocampus",
+    "Amygdala",
+    "Accumbens Area",
+    "Ventral Diencephalon",
+    "Basal Forebrain",
+    "Vermal lobules I-V",
+    "Vermal lobules VI-VII",
+    "Vermal lobules VIII-X",
+    "Pons",
+]
+
+
+def _structures(names):
+    return [{"id": "", "name": n, "right": 2 * i + 1, "left": 2 * i + 2, "notes": ""} for i, n in enumerate(names)]
+
+
+def test_default_groups_cover_cerebra():
+    groups = neuro.readGroups(neuro.DEFAULT_GROUPS_PATH)
+    structures = _structures(CEREBRA_NAMES)
+    entries, mapping, unknown = neuro.groupedTable(structures, groups)
+    assert unknown == []
+    grouped = {m.lower() for _, members in groups for m in members}
+    left_out = sorted(n for n in CEREBRA_NAMES if n.lower() not in grouped)
+    assert left_out == ["Fourth Ventricle", "Inferior Lateral Ventricle", "Lateral Ventricle", "Optic Chiasm",
+                        "Third Ventricle"]
+    names = [n for _, n, _ in entries]
+    assert "Prefrontal R" in names and "Lateral Occipital L" in names and "Cerebellum Gray Matter R" in names
+    bilateral, _, _ = neuro.groupedTable(structures, groups, mergeSides=True)
+    assert "Cerebellum Gray Matter" in [n for _, n, _ in bilateral]
+
+
+def test_groups_table_and_grouped_csv():
+    text = ("Group;Structures;Notes\nFrontal;Superior Frontal, Rostral Middle Frontal;x\n"
+            "Striatum;Caudate, Putamen, Nope;\n")
+    groups = neuro.readGroups(text)
+    assert groups == [("Frontal", ["Superior Frontal", "Rostral Middle Frontal"]),
+                      ("Striatum", ["Caudate", "Putamen", "Nope"])]
+    structures = _structures(["Superior Frontal", "Rostral Middle Frontal", "Caudate", "Putamen", "Brainstem"])
+    entries, mapping, unknown = neuro.groupedTable(structures, groups)
+    assert unknown == ["Nope"]
+    assert [(v, n) for v, n, _ in entries] == [(1, "Frontal R"), (2, "Frontal L"), (3, "Striatum R"),
+                                              (4, "Striatum L")]
+    assert mapping == {1: 1, 3: 1, 2: 2, 4: 2, 5: 3, 7: 3, 6: 4, 8: 4}
+    merged, mergedMap, _ = neuro.groupedTable(structures, groups, mergeSides=True)
+    assert [n for _, n, _ in merged] == ["Frontal", "Striatum"] and mergedMap[8] == 2
+    csvText = neuro.groupedCsvText(entries, groups)
+    assert [n for _, n, _ in neuro.readBilateralLabels(csvText)] == ["Frontal R", "Frontal L", "Striatum R",
+                                                                      "Striatum L"]
+    assert "Superior Frontal, Rostral Middle Frontal" in csvText
+    with pytest.raises(ValueError, match="in the groups"):
+        neuro.readGroups("Group;Structures\nA;Putamen\nB;Putamen\n")
+    with pytest.raises(ValueError, match="columns"):
+        neuro.readGroups("Name;Members\nA;Putamen\n")
+    assert neuro.readGroups("Group,Structures\nA,Caudate|Putamen\n") == [("A", ["Caudate", "Putamen"])]
+
+
+def test_grouped_paths(tmp_path):
+    assert neuro.groupedPaths({}) == (None, None, None)
+    found = {neuro.CEREBRA_LABELS: str(tmp_path / "mni_icbm152_CerebrA_tal_nlin_sym_09c.nii")}
+    labels, table, overlay = neuro.groupedPaths(found, mergeSides=True)
+    assert labels.endswith(neuro.GROUPED_BILATERAL_STEM + ".nii") and table.endswith(neuro.GROUPED_BILATERAL_CSV_NAME)
+    assert overlay.endswith(neuro.GROUPED_BILATERAL_STEM + "_overlay.nii")
+    for path in (labels, table, overlay):
+        open(path, "w").close()
+    (tmp_path / "CerebrA_groups.csv").write_text("Group;Structures\nA;Putamen\n")
+    again = neuro.findAtlasFiles(str(tmp_path))
+    assert again[neuro.GROUPED_BILATERAL_LABELS] == labels and again[neuro.GROUPED_BILATERAL_CSV] == table
+    assert neuro.groupsCsv(again).endswith("CerebrA_groups.csv") and neuro.groupsCsv({}) == neuro.DEFAULT_GROUPS_PATH
+    assert not any("group" in m.lower() for m in neuro.missingFiles({}))
+
+
+def test_grow_labels_nearest_region_without_overlap():
+    labels = np.zeros((1, 1, 11), dtype=np.int16)
+    labels[0, 0, 0] = 1
+    labels[0, 0, 10] = 2
+    grown = neuro.growLabels(labels, 3.0)
+    assert grown[0, 0].tolist() == [1, 1, 1, 1, 0, 0, 0, 2, 2, 2, 2]
+    grown = neuro.growLabels(labels, 10.0)
+    assert grown[0, 0].tolist() == [1] * 5 + [1 if grown[0, 0, 5] == 1 else 2] + [2] * 5
+    assert (grown > 0).all()
+    allowed = np.ones_like(labels, dtype=bool)
+    allowed[0, 0, 2] = False
+    assert neuro.growLabels(labels, 3.0, allowed=allowed)[0, 0, :4].tolist() == [1, 1, 0, 1]
+    labels[0, 0, 5] = 9        # a ventricle: neither grows nor is overwritten
+    grown = neuro.growLabels(labels, 10.0, fixedValues=[9])
+    assert grown[0, 0, 5] == 9 and grown[0, 0, 4] == 1 and grown[0, 0, 6] == 2
+    assert neuro.growLabels(labels, 2.0, spacing=(1.0, 1.0, 2.0))[0, 0, :3].tolist() == [1, 1, 0]
+    assert (neuro.growLabels(labels, 0) == labels).all()
+    assert neuro.fixedValuesOf([(1, "Lateral Ventricle R", None), (2, "Putamen", None),
+                                (3, "Optic Chiasm", None)]) == [1, 3]
+
+
+def test_erode_mask():
+    mask = np.zeros((9, 9, 9), dtype=bool)
+    mask[1:8, 1:8, 1:8] = True
+    assert neuro.erodeMask(mask, 1.0).sum() == 5 ** 3
+    assert neuro.erodeMask(mask, 2.0).sum() == 3 ** 3
+    assert neuro.erodeMask(mask, 0).sum() == 7 ** 3
+    full = np.ones((5, 5, 5), dtype=bool)          # the edge of the array counts as outside
+    assert neuro.erodeMask(full, 1.0).sum() == 3 ** 3
+    assert not neuro.erodeMask(mask, 10.0).any()

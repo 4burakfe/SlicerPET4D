@@ -52,6 +52,15 @@ PONS_OVERLAY = "cerebraPonsOverlay"
 PONS_BILATERAL_OVERLAY = "cerebraPonsBilateralOverlay"
 PONS_OVERLAY_STEM = PONS_STEM + "_overlay"
 PONS_BILATERAL_OVERLAY_STEM = BILATERAL_STEM + "_wpons_overlay"
+GROUPS_CSV = "cerebraGroups"
+GROUPS_CSV_NAME = "CerebrA_groups.csv"
+GROUPED_LABELS, GROUPED_CSV = "cerebraGrouped", "cerebraGroupedCsv"
+GROUPED_BILATERAL_LABELS, GROUPED_BILATERAL_CSV = "cerebraGroupedBilateral", "cerebraGroupedBilateralCsv"
+GROUPED_OVERLAY, GROUPED_BILATERAL_OVERLAY = "cerebraGroupedOverlay", "cerebraGroupedBilateralOverlay"
+GROUPED_STEM = "mni_icbm152_CerebrA_grouped" + TEMPLATE_SUFFIX
+GROUPED_BILATERAL_STEM = "mni_icbm152_CerebrA_grouped_bilateral" + TEMPLATE_SUFFIX
+GROUPED_CSV_NAME = "CerebrA_grouped_LabelDetails.csv"
+GROUPED_BILATERAL_CSV_NAME = "CerebrA_grouped_bilateral_LabelDetails.csv"
 EXTRA_FILES = (
     (BRAIN_MASK, "mni_icbm152_t1" + TEMPLATE_SUFFIX + "_mask"),
     (CEREBRA_LABELS, "mni_icbm152_CerebrA" + TEMPLATE_SUFFIX),
@@ -59,11 +68,17 @@ EXTRA_FILES = (
     (PONS_LABELS, PONS_STEM),
     (PONS_OVERLAY, PONS_OVERLAY_STEM),
     (PONS_BILATERAL_OVERLAY, PONS_BILATERAL_OVERLAY_STEM),
+    (GROUPED_LABELS, GROUPED_STEM),
+    (GROUPED_BILATERAL_LABELS, GROUPED_BILATERAL_STEM),
+    (GROUPED_OVERLAY, GROUPED_STEM + "_overlay"),
+    (GROUPED_BILATERAL_OVERLAY, GROUPED_BILATERAL_STEM + "_overlay"),
 )
 CSV_NAME = "CerebrA_LabelDetails.csv"
 BILATERAL_CSV_NAME = "CerebrA_bilateral_LabelDetails.csv"
-GENERATED = (BILATERAL_LABELS, BILATERAL_CSV, PONS_OVERLAY, PONS_BILATERAL_OVERLAY)  # made by the workflow
-OPTIONAL = (PONS_LABELS, PONS_CSV)                # the CerebrA with pons, never reported missing
+GENERATED = (BILATERAL_LABELS, BILATERAL_CSV, PONS_OVERLAY, PONS_BILATERAL_OVERLAY,     # made by the workflow
+             GROUPED_LABELS, GROUPED_CSV, GROUPED_BILATERAL_LABELS, GROUPED_BILATERAL_CSV, GROUPED_OVERLAY,
+             GROUPED_BILATERAL_OVERLAY)
+OPTIONAL = (PONS_LABELS, PONS_CSV, GROUPS_CSV)    # never reported missing (the groups: the extension's table)
 IMAGE_EXTENSIONS = (".seg.nrrd", ".nii", ".nii.gz", ".nrrd", ".mnc")
 MAX_SEARCH_DEPTH = 4
 REQUIRED = (DEFAULT_TEMPLATE,)       # without these the normalization cannot run
@@ -95,7 +110,9 @@ def findAtlasFiles(folder, maxDepth=MAX_SEARCH_DEPTH):
         subdirs.sort()
         for fileName in sorted(files):
             csvKeys = {CSV_NAME.lower(): CEREBRA_CSV, BILATERAL_CSV_NAME.lower(): BILATERAL_CSV,
-                       PONS_CSV_NAME.lower(): PONS_CSV}
+                       PONS_CSV_NAME.lower(): PONS_CSV, GROUPS_CSV_NAME.lower(): GROUPS_CSV,
+                       GROUPED_CSV_NAME.lower(): GROUPED_CSV,
+                       GROUPED_BILATERAL_CSV_NAME.lower(): GROUPED_BILATERAL_CSV}
             if fileName.lower() in csvKeys:
                 key = csvKeys[fileName.lower()]
                 found.setdefault(key, os.path.join(directory, fileName))
@@ -384,3 +401,159 @@ def segmentNamesOfLabels(values, name=None):
         base = name.strip().lower()
         names.update({base, f"{base} r", f"{base} l"})
     return names
+
+
+
+# ---------------------------------------------------------------------------
+# Grouped CerebrA (broad regions: prefrontal, lateral occipital, ...)
+# ---------------------------------------------------------------------------
+DEFAULT_GROUPS_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "Resources", "Atlas",
+                                   GROUPS_CSV_NAME)
+
+
+def groupsCsv(found):
+    """Table of the broad regions: CerebrA_groups.csv of the atlas folder when the user put one there, else the
+    extension's (Resources/Atlas/CerebrA_groups.csv)."""
+    return found.get(GROUPS_CSV) or DEFAULT_GROUPS_PATH
+
+
+def readGroups(source):
+    """Broad regions of a groups table (path or text): [(group name, [CerebrA structure names])]. Columns Group and
+    Structures (';' or ',' separated file; the structures of a group separated by ',' in a ';' file, by '|' in a ','
+    file); other columns (Notes) are ignored. Raises ValueError for a structure in two groups."""
+    if isinstance(source, str) and "\n" in source and not os.path.isfile(source):
+        text = source
+    else:
+        with open(source, newline="", encoding="utf-8-sig") as f:
+            text = f.read()
+    text = text.lstrip("\ufeff")
+    firstLine = text.split("\n", 1)[0]
+    delimiter = ";" if firstLine.count(";") >= firstLine.count(",") else ","
+    memberSeparator = "," if delimiter == ";" else "|"
+    rows = [r for r in csv.reader(io.StringIO(text), delimiter=delimiter) if any(c.strip() for c in r)]
+    if not rows:
+        raise ValueError("The groups table is empty")
+    header = [c.strip().lower() for c in rows[0]]
+    if "group" not in header or "structures" not in header:
+        raise ValueError("The groups table needs the columns Group and Structures")
+    groupCol, membersCol = header.index("group"), header.index("structures")
+    groups, seen = [], {}
+    for row in rows[1:]:
+        name = row[groupCol].strip() if groupCol < len(row) else ""
+        members = [m.strip() for m in (row[membersCol] if membersCol < len(row) else "").split(memberSeparator)]
+        members = [m for m in members if m]
+        if not name or not members:
+            continue
+        for member in members:
+            if member.lower() in seen:
+                raise ValueError(f"'{member}' is in the groups '{seen[member.lower()]}' and '{name}'")
+            seen[member.lower()] = name
+        groups.append((name, members))
+    if not groups:
+        raise ValueError("No groups in the groups table")
+    return groups
+
+
+def groupedTable(structures, groups, mergeSides=False):
+    """Segments of the grouped CerebrA. Returns (entries [(value, name, color)], mapping {CerebrA label value: group
+    value}, unknown structure names). Sides separate: 'Prefrontal R' (value 2i+1) and 'Prefrontal L' (2i+2);
+    merged: 'Prefrontal' (i+1). CerebrA structures in no group are left out (ventricles, optic chiasm)."""
+    byName = {s["name"].strip().lower(): s for s in structures}
+    entries, mapping, unknown = [], {}, []
+    count = len(groups)
+    for index, (name, members) in enumerate(groups):
+        found = [byName[m.lower()] for m in members if m.lower() in byName]
+        unknown.extend(m for m in members if m.lower() not in byName)
+        if not found:
+            continue
+        if mergeSides:
+            value = index + 1
+            entries.append((value, name, structureColor(index, count, BOTH)))
+            for s in found:
+                for side in ("right", "left"):
+                    if s[side] is not None:
+                        mapping[s[side]] = value
+            continue
+        for side, suffix, value in (("right", RIGHT, 2 * index + 1), ("left", LEFT, 2 * index + 2)):
+            values = [s[side] for s in found if s[side] is not None]
+            if values:
+                entries.append((value, f"{name} {suffix}", structureColor(index, count, suffix)))
+                mapping.update({v: value for v in values})
+    return entries, mapping, unknown
+
+
+GROUPED_HEADER = ("Label", "Label Name", "Structures")
+
+
+def groupedCsvText(entries, groups):
+    """CSV of a grouped CerebrA (read with readBilateralLabels): label value, segment name, its structures."""
+    members = {name.lower(): ", ".join(m) for name, m in groups}
+    out = io.StringIO()
+    writer = csv.writer(out, lineterminator="\n")
+    writer.writerow(GROUPED_HEADER)
+    for value, name, _ in entries:
+        base = name[:-2] if name[-2:] in (" " + RIGHT, " " + LEFT) and name[:-2].lower() in members else name
+        writer.writerow((value, name, members.get(base.lower(), "")))
+    return out.getvalue()
+
+
+def groupedPaths(found, mergeSides=False):
+    """(labels, CSV, overlay) paths of a grouped CerebrA: the files found, else next to the CerebrA labels; (None,
+    None, None) without CerebrA."""
+    keys = ((GROUPED_BILATERAL_LABELS, GROUPED_BILATERAL_CSV, GROUPED_BILATERAL_OVERLAY) if mergeSides
+            else (GROUPED_LABELS, GROUPED_CSV, GROUPED_OVERLAY))
+    stem = GROUPED_BILATERAL_STEM if mergeSides else GROUPED_STEM
+    csvName = GROUPED_BILATERAL_CSV_NAME if mergeSides else GROUPED_CSV_NAME
+    source = found.get(CEREBRA_LABELS)
+    if not source:
+        return None, None, None
+    folder = os.path.dirname(source)
+    defaults = (os.path.join(folder, stem + ".nii"), os.path.join(folder, csvName),
+                os.path.join(folder, stem + "_overlay.nii"))
+    return tuple(found.get(k) or d for k, d in zip(keys, defaults))
+
+
+# ---------------------------------------------------------------------------
+# Growing the regions, eroding a reference (numpy + scipy)
+# ---------------------------------------------------------------------------
+def growLabels(labels, distanceMm, spacing=(1.0, 1.0, 1.0), allowed=None, fixedValues=()):
+    """Regions grown by distanceMm into the unlabelled voxels: each such voxel within distanceMm of a region (and in
+    allowed, when given) goes to the nearest region, so regions never overlap and the order does not matter. Labelled
+    voxels are kept; fixedValues (ventricles, ...) neither grow nor are grown into. spacing: of the array axes (mm).
+    """
+    from scipy import ndimage
+    labels = np.asarray(labels)
+    if distanceMm <= 0:
+        return labels.copy()
+    seeds = labels > 0
+    if len(fixedValues):
+        seeds &= ~np.isin(labels, list(fixedValues))
+    if not seeds.any():
+        return labels.copy()
+    distance, indices = ndimage.distance_transform_edt(~seeds, sampling=spacing, return_indices=True)
+    grow = (labels == 0) & (distance <= distanceMm + 1e-6)
+    if allowed is not None:
+        grow &= np.asarray(allowed, dtype=bool)
+    out = labels.copy()
+    nearest = labels[tuple(indices)]
+    out[grow] = nearest[grow]
+    return out
+
+
+def erodeMask(mask, distanceMm, spacing=(1.0, 1.0, 1.0)):
+    """The mask without its voxels within distanceMm of the outside (mm, any voxel size). Nothing removed for 0."""
+    from scipy import ndimage
+    mask = np.asarray(mask, dtype=bool)
+    if distanceMm <= 0 or not mask.any():
+        return mask.copy()
+    padded = np.pad(mask, 1)        # the edge of the array counts as outside
+    distance = ndimage.distance_transform_edt(padded, sampling=spacing)[1:-1, 1:-1, 1:-1]
+    return mask & (distance > distanceMm + 1e-6)
+
+
+NO_GROW_WORDS = ("ventricle", "optic chiasm")       # CSF and the chiasm: never grown
+
+
+def fixedValuesOf(entries):
+    """Label values of the entries that must not grow (ventricles, optic chiasm)."""
+    return [v for v, name, _ in entries if any(w in name.lower() for w in NO_GROW_WORDS)]

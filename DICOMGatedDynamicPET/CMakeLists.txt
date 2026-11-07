@@ -129,7 +129,9 @@ set(NEURO_MODULE_NAME DynamicNeuroPET)
 slicerMacroBuildScriptedModule(
   NAME ${NEURO_MODULE_NAME}
   SCRIPTS ${NEURO_MODULE_NAME}.py
-  RESOURCES Resources/Icons/${NEURO_MODULE_NAME}.png
+  RESOURCES
+    Resources/Icons/${NEURO_MODULE_NAME}.png
+    Resources/Atlas/CerebrA_groups.csv
   WITH_GENERIC_TESTS
   )
 
