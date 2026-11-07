@@ -64,7 +64,7 @@ METHOD_PET, METHOD_ANATOMY = "pet", "anatomy"
 METHODS = ((METHOD_PET, "Register the PET to the template (default)"),
            (METHOD_ANATOMY, "Normalize the CT/MR, apply the same transform to the PET"))
 NORMALIZATION_STEPS = ("Affine", "BSpline")
-NORMALIZATION_INITIALIZATION = {METHOD_PET: "useMoments", METHOD_ANATOMY: "useGeometryAlign"}
+NORMALIZATION_INITIALIZATION = {METHOD_PET: "useMomentsAlign", METHOD_ANATOMY: "useGeometryAlign"}
 # Harden: the template's field of view with the PET voxel size (default), the template grid (1 mm), or custom
 NORMALIZATION_GRIDS = (("Keep the PET voxel size (over the template field of view)", reg.OUTPUT_PET_SPACING),
                        ("Resample to the template grid (1 mm)", reg.OUTPUT_FIXED_GRID),
