@@ -67,6 +67,10 @@ NORMALIZATION_STEPS = ("Affine", "BSpline")
 # BRAINSFit registers a copy of the template and of the CT/MR / PET at this voxel size (as FSL's 2 mm MNI template;
 # a 0.5 mm MR against the 1 mm template otherwise takes tens of GB); the result applies to the original images
 NORMALIZATION_WORKING_MM = 2.0
+# BRAINSFit B-spline to the template: 12 subdivisions per axis (control points about 16 mm apart over the template;
+# BRAINSFit's own default is 14,10,12) and a stricter stopping factor than BRAINSFit's 2e13 (see registerStep)
+NORMALIZATION_BSPLINE_GRID = 12
+NORMALIZATION_CONVERGENCE_FACTOR = 1e9
 NORMALIZATION_ITERATIVE_GRID_MM = 30.0     # iterative engine: last control-point spacing (brain to template)
 # The PET is registered to the skull-stripped template by default (the scalp of the T1 has no PET counterpart);
 # the CT/MR is registered to the whole template.
@@ -243,6 +247,8 @@ class DynamicNeuroPETLogic(ScriptedLoadableModuleLogic):
         settings["steps"] = list(NORMALIZATION_STEPS)
         settings["resample"] = [True] * len(NORMALIZATION_STEPS)
         settings["workingVoxelMm"] = NORMALIZATION_WORKING_MM
+        settings["bsplineGrid"] = NORMALIZATION_BSPLINE_GRID
+        settings["bsplineConvergenceFactor"] = NORMALIZATION_CONVERGENCE_FACTOR
         settings["initialization"] = NORMALIZATION_INITIALIZATION[method]
         settings["iterativeDeformable"] = True          # to the template: linear, then deformable
         settings["iterativeGridMm"] = NORMALIZATION_ITERATIVE_GRID_MM
@@ -946,6 +952,13 @@ class DynamicNeuroPETWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             "MNI template of FSL) keeps the memory low: a 0.5 mm MR against the 1 mm template otherwise takes tens "
             "of GB. 0: the template and the images as they are.")
         brainsForm.addRow("Register at:", self.normWorkingSpin)
+        self.normGridSpin = qt.QSpinBox()
+        self.normGridSpin.setRange(3, 40)
+        self.normGridSpin.value = NORMALIZATION_BSPLINE_GRID
+        self.normGridSpin.toolTip = (
+            "B-spline control grid: subdivisions along each axis of the template (12: control points about 16 mm "
+            "apart). More subdivisions deform more locally (and take longer). BRAINSFit's own default is 14,10,12.")
+        brainsForm.addRow("B-spline grid:", self.normGridSpin)
         form.addRow(self.normBrainsBox)
         form.addRow(self.normIterativeBox)
         self.normInitCombo = qt.QComboBox()
@@ -1090,6 +1103,7 @@ class DynamicNeuroPETWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         steps = [c.currentData for c in self.normStepCombos if c.currentData]
         settings["engine"] = reg.ENGINE_BRAINSFIT
         settings["steps"] = reg.validateSteps(steps)
+        settings["bsplineGrid"] = int(self.normGridSpin.value)
         working = float(self.normWorkingSpin.value)
         settings["resample"] = [working > 0] * len(settings["steps"])
         settings["workingVoxelMm"] = working

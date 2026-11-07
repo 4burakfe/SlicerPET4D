@@ -52,7 +52,7 @@ REGISTERED_SUFFIX = " registered"
 PET_COLORMAP = "Inverted grey"   # PET column (and under the checkerboard)
 FUSION_COLORMAP = "PET-DICOM"    # PET over the CT/MR
 CHECKER_COLOR_ID = "vtkMRMLColorTableNodeGreen"
-ANATOMY_FUSION_COLOR_ID = "vtkMRMLColorTableNodeRed"   # a CT/MR (normalized with the PET) over the fixed image
+ANATOMY_FUSION_COLORMAP = "Inferno"   # a CT/MR (normalized with the PET) over the fixed image
 DEFAULT_FUSION_OPACITY = 0.5
 DEFAULT_CHECKER_OPACITY = 0.35
 THRESHOLD_FRACTION = 0.03        # fusion PET voxels below 3 % of the PET window are transparent over the CT/MR
@@ -302,10 +302,17 @@ class DynamicPETRegistrationLogic(ScriptedLoadableModuleLogic):
             grid = int(settings["bsplineGrid"])
             parameters["bsplineTransform"] = output.GetID()
             parameters["splineGridSize"] = f"{grid},{grid},{grid}"
+            if settings.get("bsplineConvergenceFactor"):
+                # L-BFGS-B stopping factor: BRAINSFit's default 2e13 stops early ("1e+12 for low accuracy; 1e+7
+                # for moderate", its doc; "1e+9 seems to work well")
+                parameters["costFunctionConvergenceFactor"] = float(settings["bsplineConvergenceFactor"])
         else:
             parameters["linearTransform"] = output.GetID()
+        extra = "".join(f", {k} {parameters[k]}" for k in ("splineGridSize", "costFunctionConvergenceFactor")
+                        if k in parameters)
         logging.info(f"BRAINSFit {transformType}: fixed '{fixed.GetName()}' {_gridText(fixed)}, moving "
-                     f"'{moving.GetName()}' {_gridText(moving)}, sampling {parameters['samplingPercentage']:g}")
+                     f"'{moving.GetName()}' {_gridText(moving)}, sampling {parameters['samplingPercentage']:g}"
+                     + extra)
         try:
             self._runCli(slicer.modules.brainsfit, parameters)
         except Exception:
@@ -748,8 +755,8 @@ class RegistrationSession:
 
     def setAnatomy(self, source, window=None):
         """Show source (a volume that lies with the PET, e.g. the CT/MR normalized to a template) moved by the same
-        chain: alone in grey in the right column, and in colour over the fixed image in the fusion column (the PET
-        keeps its own column). None goes back to the PET fusion and the fixed image."""
+        chain: alone in grey in the right column, and in Inferno over the fixed image in the fusion column; the PET
+        column shows the PET over the fixed image. None goes back to the PET fusion and the fixed image."""
         logic = DynamicPETRegistrationLogic
         for node in (self.anatomyView, self.anatomyFusion):
             if node is not None and slicer.mrmlScene.IsNodePresent(node):
@@ -762,7 +769,7 @@ class RegistrationSession:
             self.anatomyView = logic.helperVolume(f"{source.GetName()} registration view", source)
             self.anatomyFusion = logic.helperVolume(f"{source.GetName()} registration fusion", source)
             for node, color in ((self.anatomyView, "vtkMRMLColorTableNodeGrey"),
-                                (self.anatomyFusion, ANATOMY_FUSION_COLOR_ID)):
+                                (self.anatomyFusion, colormaps.colorNodeForLabel(ANATOMY_FUSION_COLORMAP).GetID())):
                 node.CreateDefaultDisplayNodes()
                 display = node.GetDisplayNode()
                 display.SetAndObserveColorNodeID(color)
@@ -901,6 +908,8 @@ class RegistrationSession:
     def setFusionOpacity(self, opacity):
         self.fusionOpacity = float(opacity)
         self._setOpacity("Fusion", self.fusionOpacity)
+        if self.anatomyView is not None:
+            self._setOpacity("PET", self.fusionOpacity)
 
     def setCheckerOpacity(self, opacity):
         self.checkerOpacity = float(opacity)
@@ -972,7 +981,9 @@ class RegistrationSession:
         """(background, foreground, opacity) of a view."""
         if column == "Checker":
             return self.petView, self.checkers.get(orientation), self.checkerOpacity
-        if column == "PET":
+        if column == "PET":         # with a normalized CT/MR shown, the PET over the fixed image (fusion)
+            if self.anatomyView is not None:
+                return self.fixedHelper, self.petFusion, self.fusionOpacity
             return self.petView, None, 0.0
         if column == "Fusion":
             return self.fixedHelper, self.anatomyFusion or self.petFusion, self.fusionOpacity
