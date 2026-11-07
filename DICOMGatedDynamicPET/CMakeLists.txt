@@ -19,6 +19,8 @@ set(MODULE_PYTHON_SCRIPTS
   ${MODULE_NAME}Lib/registration.py
   ${MODULE_NAME}Lib/resampling.py
   ${MODULE_NAME}Lib/hardendialog.py
+  ${MODULE_NAME}Lib/kinetics.py
+  ${MODULE_NAME}Lib/tacplot.py
   )
 
 set(MODULE_PYTHON_RESOURCES
@@ -99,4 +101,19 @@ slicerMacroBuildScriptedModule(
 
 if(BUILD_TESTING)
   slicer_add_python_unittest(SCRIPT ${REG_MODULE_NAME}.py)
+endif()
+
+#-----------------------------------------------------------------------------
+# Dynamic PET Modeling (visible, Nuclear Medicine): kinetic models on the segments of a segmentation
+set(KM_MODULE_NAME DynamicPETModeling)
+
+slicerMacroBuildScriptedModule(
+  NAME ${KM_MODULE_NAME}
+  SCRIPTS ${KM_MODULE_NAME}.py
+  RESOURCES Resources/Icons/${KM_MODULE_NAME}.png
+  WITH_GENERIC_TESTS
+  )
+
+if(BUILD_TESTING)
+  slicer_add_python_unittest(SCRIPT ${KM_MODULE_NAME}.py)
 endif()
