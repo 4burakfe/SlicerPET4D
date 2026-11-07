@@ -21,6 +21,7 @@ set(MODULE_PYTHON_SCRIPTS
   ${MODULE_NAME}Lib/hardendialog.py
   ${MODULE_NAME}Lib/kinetics.py
   ${MODULE_NAME}Lib/tacplot.py
+  ${MODULE_NAME}Lib/neuro.py
   )
 
 set(MODULE_PYTHON_RESOURCES
@@ -116,4 +117,20 @@ slicerMacroBuildScriptedModule(
 
 if(BUILD_TESTING)
   slicer_add_python_unittest(SCRIPT ${KM_MODULE_NAME}.py)
+endif()
+
+#-----------------------------------------------------------------------------
+# Dynamic Neuro Receptor PET (visible, Nuclear Medicine): workflow app (data, motion correction, CT/MR registration,
+# normalization to MNI ICBM 152 2009c, CerebrA regions, modeling)
+set(NEURO_MODULE_NAME DynamicNeuroPET)
+
+slicerMacroBuildScriptedModule(
+  NAME ${NEURO_MODULE_NAME}
+  SCRIPTS ${NEURO_MODULE_NAME}.py
+  RESOURCES Resources/Icons/${NEURO_MODULE_NAME}.png
+  WITH_GENERIC_TESTS
+  )
+
+if(BUILD_TESTING)
+  slicer_add_python_unittest(SCRIPT ${NEURO_MODULE_NAME}.py)
 endif()

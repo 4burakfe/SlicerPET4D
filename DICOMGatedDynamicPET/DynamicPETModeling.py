@@ -1022,6 +1022,11 @@ class DynamicPETModelingWidget(ScriptedLoadableModuleWidget, VTKObservationMixin
         buttons.addWidget(self.previewButton)
         buttons.addWidget(self.fitAllButton)
         modelForm.addRow(buttons)
+        self.showAllCheck = qt.QCheckBox("Show all fitted segments")
+        self.showAllCheck.checked = False
+        self.showAllCheck.toolTip = ("Show every segment that has a result (after Fit all segments) on the summed "
+                                     "image, not only the target and the reference")
+        modelForm.addRow(self.showAllCheck)
         exportRow = qt.QHBoxLayout()
         self.tableCheck = qt.QCheckBox("Results table in the scene")
         self.tableCheck.checked = True
@@ -1119,6 +1124,7 @@ class DynamicPETModelingWidget(ScriptedLoadableModuleWidget, VTKObservationMixin
         self.windowEndSpin.connect("valueChanged(double)", self.onSettingsChanged)
         self.previewButton.connect("clicked()", self.onPreview)
         self.fitAllButton.connect("clicked()", self.onFitAll)
+        self.showAllCheck.connect("toggled(bool)", lambda on: self._showSegments())
         self.exportButton.connect("clicked()", self.onExport)
         self.mapButton.connect("clicked()", self.onMaps)
         self.orientationCombo.connect("currentIndexChanged(int)", self.onOrientationChanged)
@@ -1226,7 +1232,7 @@ class DynamicPETModelingWidget(ScriptedLoadableModuleWidget, VTKObservationMixin
         self._fillSegmentCombos()
         self._invalidate(curves=True)
         if self.session is not None:
-            self.session.setSegmentation(segmentation, (self.targetId(), self.referenceId()))
+            self.session.setSegmentation(segmentation, self.shownSegmentIds())
         self._update()
 
     def _segmentEvents(self):
@@ -1264,7 +1270,7 @@ class DynamicPETModelingWidget(ScriptedLoadableModuleWidget, VTKObservationMixin
                     segment["name"], segment["color"] = infos[segmentId]
         self._segmentsChanged = False
         if self.session is not None:
-            self.session.showSegments((self.targetId(), self.referenceId()))
+            self._showSegments()
         self._update()
 
     def _fillSegmentCombos(self):
@@ -1307,7 +1313,7 @@ class DynamicPETModelingWidget(ScriptedLoadableModuleWidget, VTKObservationMixin
         if self._updating:
             return
         if self.session is not None:
-            self.session.showSegments((self.targetId(), self.referenceId()))
+            self._showSegments()
         self._refreshPlot()
         self._refreshTable()
 
@@ -1316,7 +1322,7 @@ class DynamicPETModelingWidget(ScriptedLoadableModuleWidget, VTKObservationMixin
             return
         self._invalidate()
         if self.session is not None:
-            self.session.showSegments((self.targetId(), self.referenceId()))
+            self._showSegments()
         self._update()
 
     def onTimeZeroChanged(self, *args):
@@ -1368,7 +1374,7 @@ class DynamicPETModelingWidget(ScriptedLoadableModuleWidget, VTKObservationMixin
                 finally:
                     self._updating = False
                 if self.session is not None:
-                    self.session.showSegments((self.targetId(), self.referenceId()))
+                    self._showSegments()
         voxelwise = key in kin.VOXEL_MAPS
         self.mapButton.toolTip = ("Maps of " + ", ".join(kin.VOXEL_MAPS[key]) if voxelwise else
                                   f"{spec.title} has no voxel-wise version; use 1TC, Patlak, Logan, SRTM or SUVR")
@@ -1448,11 +1454,26 @@ class DynamicPETModelingWidget(ScriptedLoadableModuleWidget, VTKObservationMixin
         self._update()
 
     # --- curves -----------------------------------------------------------------------------------
+    def shownSegmentIds(self):
+        """Segments shown on the summed image: the target and the reference, and with Show all fitted segments every
+        segment that has a result."""
+        shown = [self.targetId(), self.referenceId()]
+        if self.showAllCheck.checked:
+            shown += [s for s, r in self.results.items() if not r.get("error")]
+        return tuple(s for s in shown if s)
+
+    def _showSegments(self):
+        if self.session is not None:
+            self.session.showSegments(self.shownSegmentIds())
+
     def _invalidate(self, curves=False):
         if curves:
             self.analysis = None
+        hadResults = bool(self.results)
         self.results, self.resultsModel = {}, None
         self.resultLabel.text = ""
+        if hadResults and self.showAllCheck.checked:
+            self._showSegments()
         if curves and self.session is not None:
             self.session.plot.setGraphical(None)
 
@@ -1709,6 +1730,7 @@ class DynamicPETModelingWidget(ScriptedLoadableModuleWidget, VTKObservationMixin
             existing = slicer.mrmlScene.GetFirstNodeByName(name)
             table = existing if existing is not None and existing.IsA("vtkMRMLTableNode") else None
             self.logic.resultsTable(analysis, results, key, name, table)
+        self._showSegments()
         self._refreshPlot()
         self._refreshTable()
         self._updateButtons()
@@ -1783,8 +1805,7 @@ class DynamicPETModelingWidget(ScriptedLoadableModuleWidget, VTKObservationMixin
                                            self.frameWindowCheck.checked)
             self.session.onRowClicked = self._selectTarget
             self.session.open()
-            self.session.setSegmentation(self.segmentationSelector.currentNode(),
-                                         (self.targetId(), self.referenceId()))
+            self.session.setSegmentation(self.segmentationSelector.currentNode(), self.shownSegmentIds())
         except Exception as error:
             logging.exception("Could not open Dynamic PET Modeling")
             slicer.util.errorDisplay(f"Could not open the modelling layout:\n{error}")
