@@ -29,11 +29,12 @@ DEFAULT_INITIALIZATION = mc.DEFAULT_INITIALIZATION      # geometric centres, as 
 INITIALIZATIONS = mc.INITIALIZATIONS
 DEFAULT_CHECKER_MM = 20.0
 DEFAULT_WORKING_VOXEL_MM = 0.0          # 0: register to the CT/MR at the PET voxel size
-# output grid of Harden: always the CT/MR field of view and directions, with one of these voxel sizes
+# output grid of Harden: the CT/MR directions and field of view (extended to the registered PET's where that is larger,
+# except on the CT/MR grid itself), with one of these voxel sizes
 OUTPUT_PET_SPACING = "petSpacing"       # keep the PET voxel size (default)
 OUTPUT_FIXED_GRID = "fixedGrid"         # the CT/MR grid itself
 OUTPUT_CUSTOM = "custom"                # a voxel size the user gives
-OUTPUT_GRIDS = (("Keep the PET voxel size (over the CT/MR field of view)", OUTPUT_PET_SPACING),
+OUTPUT_GRIDS = (("Keep the PET voxel size (CT/MR field of view, extended to the PET)", OUTPUT_PET_SPACING),
                 ("Resample to the CT/MR grid", OUTPUT_FIXED_GRID),
                 ("Resample to this voxel size:", OUTPUT_CUSTOM))
 INTERPOLATIONS = ("Linear", "Nearest neighbour", "Cubic")
@@ -310,6 +311,22 @@ def outputGrid(fixedDims, fixedIjkToRas, petSpacing):
     out[:3, :3] = directions * petSpacing
     out[:3, 3] = corner + directions @ (petSpacing / 2.0)
     return tuple(int(v) for v in dims), out
+
+
+def extendGrid(dims, ijkToRas, points):
+    """(dims, ijkToRas) of a grid (from outputGrid) grown by whole voxels along its own axes until it covers the
+    world points (e.g. the corners of the registered PET), so a CT/MR smaller than the PET does not cut the PET. The
+    voxels stay where they were (the grown grid is aligned with the original); unchanged when it covers them."""
+    m = np.asarray(ijkToRas, dtype=float)
+    points = np.asarray(points, dtype=float).reshape(-1, 3)
+    if not len(points):
+        return tuple(int(v) for v in dims), m
+    ijk = (np.linalg.inv(m) @ np.c_[points, np.ones(len(points))].T)[:3].T     # continuous voxel indices
+    low = np.minimum(0, np.floor(ijk.min(axis=0) + 0.5 + 1e-6)).astype(int)    # voxel i covers [i - 0.5, i + 0.5]
+    high = np.maximum(np.asarray(dims, dtype=int) - 1, np.ceil(ijk.max(axis=0) - 0.5 - 1e-6)).astype(int)
+    out = np.array(m)
+    out[:3, 3] = m[:3, :3] @ low + m[:3, 3]
+    return tuple(int(v) for v in high - low + 1), out
 
 
 # ---------------------------------------------------------------------------

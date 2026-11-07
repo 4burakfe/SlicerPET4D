@@ -464,12 +464,34 @@ class DynamicPETRegistrationLogic(ScriptedLoadableModuleLogic):
         return slicer.mrmlScene.GetNodeByID(nodeID) if nodeID else None
 
     @staticmethod
-    def outputGeometry(fixed, petNode, grid, customSpacing=None):
-        """(dims, ijkToRas) of the Harden grid: the CT/MR field of view with the voxel size of grid."""
+    def outputGeometry(fixed, petNode, grid, customSpacing=None, petCorners=None):
+        """(dims, ijkToRas) of the Harden grid: the CT/MR field of view with the voxel size of grid, grown to cover
+        petCorners (world points: the registered PET's corners) unless grid is the CT/MR grid itself."""
         fixedMatrix = _ijkToRas(fixed)
         spacing = reg.outputSpacing(grid, reg.gridSpacing(_ijkToRas(petNode)), reg.gridSpacing(fixedMatrix),
                                     customSpacing)
-        return reg.outputGrid(fixed.GetImageData().GetDimensions(), fixedMatrix, spacing)
+        dims, matrix = reg.outputGrid(fixed.GetImageData().GetDimensions(), fixedMatrix, spacing)
+        if petCorners is not None and grid != reg.OUTPUT_FIXED_GRID:
+            dims, matrix = reg.extendGrid(dims, matrix, petCorners)
+        return dims, matrix
+
+    @staticmethod
+    def registeredCorners(petNode, linearNode):
+        """World positions of the corners of petNode's field of view moved by the registration chain whose PET end is
+        linearNode (and of the face centres, for a deformable chain)."""
+        transform = vtk.vtkGeneralTransform()
+        slicer.vtkMRMLTransformNode.GetTransformBetweenNodes(linearNode, None, transform)
+        dims = petNode.GetImageData().GetDimensions()
+        matrix = _ijkToRas(petNode)
+        lo, hi = -0.5, np.asarray(dims, dtype=float) - 0.5
+        steps = [(lo, (lo + h) / 2.0, h) for h in hi]
+        points = []
+        for i in steps[0]:
+            for j in steps[1]:
+                for k in steps[2]:
+                    ras = matrix @ np.array([i, j, k, 1.0])
+                    points.append(transform.TransformPoint([float(v) for v in ras[:3]]))
+        return np.asarray(points, dtype=float)
 
     @staticmethod
     def worldToPet(linearNode):
@@ -480,13 +502,14 @@ class DynamicPETRegistrationLogic(ScriptedLoadableModuleLogic):
         return transform, bool(linearNode.IsTransformToWorldLinear())
 
     def harden(self, sequenceNode, summedNode, fixed, linearNode, action, grid, customSpacing=None,
-               interpolation=reg.DEFAULT_INTERPOLATION, description=""):
+               interpolation=reg.DEFAULT_INTERPOLATION, description="", keepPetFov=False):
         """Resample every frame of the sequence (and summedNode, when given) through the registration chain onto the
         Harden grid. action reg.OVERWRITE replaces the voxels and geometry of the frames and of the summed image;
         reg.SAVE_SEPARATELY makes a new sequence '<name> registered' (with its browser) and a new summed image next
         to the originals. Returns (undo record for revert(), sequence, summed)."""
         first = sequenceNode.GetNthDataNode(0)
-        dims, outputMatrix = self.outputGeometry(fixed, first, grid, customSpacing)
+        corners = self.registeredCorners(first, linearNode) if keepPetFov else None
+        dims, outputMatrix = self.outputGeometry(fixed, first, grid, customSpacing, corners)
         worldToPet, linear = self.worldToPet(linearNode)
         resamplers = {}
 
@@ -1613,7 +1636,8 @@ class DynamicPETRegistrationWidget(ScriptedLoadableModuleWidget, VTKObservationM
         petSpacing = reg.gridSpacing(_ijkToRas(sequence.GetNthDataNode(0)))
         text = (f"Resample the {sequence.GetNumberOfDataNodes()} frames of '{sequence.GetName()}'"
                 + (f" and the summed image '{summed.GetName()}'" if summed is not None else "")
-                + f" through the registration onto the field of view of '{fixed.GetName()}'.\n\n"
+                + f" through the registration onto the field of view of '{fixed.GetName()}', grown to the PET's "
+                "where the PET is larger (not with the CT/MR grid option).\n\n"
                 "Overwrite replaces the series (Revert changes puts it back until you pick another series or close "
                 "the scene). Save separately makes a new series next to it. Save the scene to keep the result.")
         choice = hardenDialog("Harden registration", text, reg.OUTPUT_GRIDS, petSpacing,
@@ -1627,7 +1651,7 @@ class DynamicPETRegistrationWidget(ScriptedLoadableModuleWidget, VTKObservationM
         try:
             undo, newSequence, newSummed = self.logic.harden(
                 sequence, summed, fixed, self.session.linear, choice["action"], choice["grid"], choice["spacing"],
-                choice["interpolation"], description)
+                choice["interpolation"], description, keepPetFov=True)
         except Exception as error:
             logging.exception("Could not harden the registration")
             slicer.util.errorDisplay(f"Could not harden the registration:\n{error}")

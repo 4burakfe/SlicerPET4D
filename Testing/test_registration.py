@@ -196,3 +196,16 @@ def test_pool_to_spacing():
     assert np.isclose(pooled[0, 0, 0], voxels[0, :4, :4].mean())
     same, sameMatrix = reg.poolToSpacing(voxels, np.diag([2.0, 2.0, 2.0, 1.0]), 2.0)
     assert same is voxels
+
+
+def test_extend_grid():
+    dims, grid = reg.outputGrid((10, 10, 10), np.eye(4), (2.0, 2.0, 2.0))          # 1 mm CT/MR from -0.5 to 9.5 mm
+    assert dims == (5, 5, 5) and np.allclose(grid[:3, 3], [0.5, 0.5, 0.5])         # 2 mm voxels centred 0.5 .. 8.5
+    same, sameGrid = reg.extendGrid(dims, grid, [[1.0, 1.0, 1.0], [8.0, 8.0, 8.0]])  # inside: unchanged
+    assert same == dims and np.allclose(sameGrid, grid)
+    # a PET from -7 to 14 mm along x: 4 voxels before (centre -7.5), 3 after (centre 14.5); y, z unchanged
+    big, bigGrid = reg.extendGrid(dims, grid, [[-7.0, 2.0, 2.0], [14.0, 8.0, 8.0]])
+    assert big == (12, 5, 5)
+    assert np.allclose(bigGrid[:3, :3], grid[:3, :3])
+    assert np.allclose(bigGrid[:3, 3], [-7.5, 0.5, 0.5])                           # aligned: whole voxels earlier
+    assert reg.extendGrid(dims, grid, [])[0] == dims
