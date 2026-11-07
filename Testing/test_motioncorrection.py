@@ -136,3 +136,10 @@ def test_layout_orientation_and_names():
     # Review/Edit keeps its axial layout and names
     assert dv.layoutXml(5).count('action="default">Axial<') == 7
     assert dv.frameViewName(0) == "DynPETF1" and dv.frameViewName(0, "DynMCF") == "DynMCF1"
+
+
+def test_initializations_are_brainsfit_modes():
+    """Values of BRAINSFit's --initializeTransformMode (a wrong one fails the CLI's argument check)."""
+    allowed = {"Off", "useMomentsAlign", "useCenterOfHeadAlign", "useGeometryAlign", "useCenterOfROIAlign"}
+    assert {mode for _, mode in mc.INITIALIZATIONS} <= allowed
+    assert mc.DEFAULT_INITIALIZATION in allowed
