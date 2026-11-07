@@ -71,6 +71,7 @@ NORMALIZATION_WORKING_MM = 2.0
 # BRAINSFit B-spline to the template: 12 subdivisions per axis (control points about 16 mm apart over the template;
 # BRAINSFit's own default is 14,10,12) and a stricter stopping factor than BRAINSFit's 2e13 (see registerStep)
 NORMALIZATION_BSPLINE_GRID = 12
+NORMALIZATION_SAMPLING = 0.005      # BRAINSFit samplingPercentage (its default 0.002; the registration module 0.05)
 NORMALIZATION_CONVERGENCE_FACTOR = 1e9
 NORMALIZATION_ITERATIVE_GRID_MM = 30.0     # iterative engine: last control-point spacing (brain to template)
 # The PET is registered to the skull-stripped template by default (the scalp of the T1 has no PET counterpart);
@@ -249,6 +250,7 @@ class DynamicNeuroPETLogic(ScriptedLoadableModuleLogic):
         settings["resample"] = [True] * len(NORMALIZATION_STEPS)
         settings["workingVoxelMm"] = NORMALIZATION_WORKING_MM
         settings["bsplineGrid"] = NORMALIZATION_BSPLINE_GRID
+        settings["samplingPercentage"] = NORMALIZATION_SAMPLING
         settings["bsplineConvergenceFactor"] = NORMALIZATION_CONVERGENCE_FACTOR
         settings["initialization"] = NORMALIZATION_INITIALIZATION[method]
         settings["iterativeDeformable"] = True          # to the template: linear, then deformable
@@ -960,6 +962,14 @@ class DynamicNeuroPETWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             "B-spline control grid: subdivisions along each axis of the template (12: control points about 16 mm "
             "apart). More subdivisions deform more locally (and take longer). BRAINSFit's own default is 14,10,12.")
         brainsForm.addRow("B-spline grid:", self.normGridSpin)
+        self.normSamplingSpin = qt.QDoubleSpinBox()
+        self.normSamplingSpin.setRange(0.001, 1.0)
+        self.normSamplingSpin.setDecimals(3)
+        self.normSamplingSpin.setSingleStep(0.001)
+        self.normSamplingSpin.value = NORMALIZATION_SAMPLING
+        self.normSamplingSpin.toolTip = ("Fraction of the template voxels BRAINSFit samples for the mutual information "
+                                         "(0.005; BRAINSFit's default 0.002). Lower is faster and lighter.")
+        brainsForm.addRow("Sampling:", self.normSamplingSpin)
         form.addRow(self.normBrainsBox)
         form.addRow(self.normIterativeBox)
         self.normInitCombo = qt.QComboBox()
@@ -1105,6 +1115,7 @@ class DynamicNeuroPETWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         settings["engine"] = reg.ENGINE_BRAINSFIT
         settings["steps"] = reg.validateSteps(steps)
         settings["bsplineGrid"] = int(self.normGridSpin.value)
+        settings["samplingPercentage"] = float(self.normSamplingSpin.value)
         working = float(self.normWorkingSpin.value)
         settings["resample"] = [working > 0] * len(settings["steps"])
         settings["workingVoxelMm"] = working

@@ -492,7 +492,7 @@ without, the result is kept, or stay).
    with the CT/MR method the **normalized CT/MR** is on the right, **over the template** (Inferno) in the fusion
    column, and the **PET over the template** in the PET column. BRAINSFit's B-spline to the template uses a
    **12-subdivision grid** (*B-spline grid*; control points about 16 mm apart) and a stopping factor of 1e9 instead of
-   BRAINSFit's 2e13;
+   BRAINSFit's 2e13; it samples 0.005 of the voxels (*Sampling*; BRAINSFit's default 0.002);
    **Harden** resamples every frame and the summed image onto the template's field of view (PET voxel size by
    default) into a new series *"&lt;series&gt; MNI"* (or overwrites it). **Revert** undoes it.
 5. **Regions:** the **CerebrA** atlas as a segmentation with the structure names. The **region atlas** is CerebrA
