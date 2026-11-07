@@ -1296,10 +1296,10 @@ class DynamicPETModelingWidget(ScriptedLoadableModuleWidget, VTKObservationMixin
     def _guessReference(self, ids, names):
         """The segment most likely to be the reference: by its name, for the kind of model."""
         plasma = kin.model(self.modelKey()).inputKind == "plasma"
-        words = (("blood", "aort", "ventric", "lv", "carotid", "sinus", "atri", "heart")
+        words = (("blood", "aort", "left ventric", "carotid", "sinus", "atri", "heart", "arter", "jugular")
                  if plasma else ("cerebell", "reference", "ref", "occipital", "pons", "white"))
         for i, segmentId in enumerate(ids):
-            if any(word in names[segmentId] for word in words):
+            if any(word in names[segmentId] for word in words) or (plasma and names[segmentId].strip() == "lv"):
                 return i
         return len(ids) - 1
 
@@ -1494,8 +1494,8 @@ class DynamicPETModelingWidget(ScriptedLoadableModuleWidget, VTKObservationMixin
         return self.analysis
 
     def _update(self):
+        self._refreshPlot()          # reads the curves when needed, so the input warning can use them
         self._updateInfo()
-        self._refreshPlot()
         self._refreshTable()
         self._updateButtons()
 
@@ -1517,7 +1517,19 @@ class DynamicPETModelingWidget(ScriptedLoadableModuleWidget, VTKObservationMixin
             text += " Pick a segmentation."
         elif self.targetCombo.count == 0:
             text += " The segmentation has no segment."
+        warning = self._inputWarning()
+        if warning:
+            text += f"\nWarning: {warning}"
         self.infoLabel.text = text
+
+    def _inputWarning(self):
+        """Warning when a plasma input model takes its input from a segment that does not look like blood."""
+        if kin.model(self.modelKey()).inputKind != "plasma" or self.usesPlasmaFile():
+            return None
+        analysis, reference = self.analysis, self.referenceId()
+        if analysis is None or reference not in analysis.segments:
+            return None
+        return kin.inputCurveWarning(analysis.frames, analysis.segments[reference]["values"])
 
     def _updateButtons(self):
         ready = (self.sequenceSelector.currentNode() is not None and self.segmentationSelector.currentNode()

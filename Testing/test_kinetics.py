@@ -273,3 +273,15 @@ def test_voxel_maps_clip_negative(setting):
     raw = kin.parametricMaps("LoganRef", frames, data, reference=ref,
                              options={"tStar": 30.0, "clipNegative": False})
     assert float(raw["BPnd"][1]) == pytest.approx(-0.5, abs=0.02)
+
+
+def test_input_curve_warning(setting):
+    frames, starts, ends, _ = setting
+    t = np.arange(0.0, 78.0 + DT, DT)
+    blood = frameMeans(t, plasma(t), starts, ends)
+    assert kin.inputCurveWarning(frames, blood) is None
+    _, tissue = simulate(K1=0.1, k2=0.15)          # a region such as the cerebellum, not blood
+    region = frameMeans(t, tissue, starts, ends)
+    assert "does not look like blood" in kin.inputCurveWarning(frames, region)
+    result = kin.fit("1TC", frames, region, inputFunction=kin.FrameInput(frames, region))
+    assert any("does not look like blood" in w for w in result["warnings"])

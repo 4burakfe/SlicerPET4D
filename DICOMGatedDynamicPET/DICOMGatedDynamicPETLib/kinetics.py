@@ -318,6 +318,36 @@ class SampledInput:
         return np.interp(self.frames.mid, self._grid, cumulative)
 
 
+INPUT_PEAK_MAX_MIN = 5.0        # a blood curve peaks within the first minutes ...
+INPUT_LATE_MAX_FRACTION = 0.5   # ... its last frames are well below the peak ...
+INPUT_WASHOUT_MIN = 4.0         # ... and a few minutes after the peak it has fallen well below it
+INPUT_WASHOUT_MAX_FRACTION = 0.6
+
+
+def inputCurveWarning(frames, values):
+    """Text when a frame-sampled curve used as the plasma input does not look like blood (it peaks late, or stays
+    near its peak at the end, as a tissue region does), else None."""
+    values = np.asarray(values, dtype=float)
+    use = frames.valid & np.isfinite(values)
+    if use.sum() < 3:
+        return None
+    mids, curve = frames.mid[use], values[use]
+    peak = int(np.argmax(curve))
+    if curve[peak] <= 0:
+        return None
+    late = float(curve[-1]) / float(curve[peak])
+    after = mids[peak] + INPUT_WASHOUT_MIN
+    washout = float(np.interp(after, mids, curve)) / float(curve[peak]) if mids[-1] >= after else None
+    if (mids[peak] > INPUT_PEAK_MAX_MIN or (late > INPUT_LATE_MAX_FRACTION and mids[-1] > 3 * INPUT_PEAK_MAX_MIN)
+            or (washout is not None and washout > INPUT_WASHOUT_MAX_FRACTION)):
+        details = f"peak at {mids[peak]:.1f} min"
+        if washout is not None:
+            details += f", {100 * washout:.0f} % of the peak {INPUT_WASHOUT_MIN:g} min later"
+        return (f"the input curve does not look like blood ({details}): is the blood pool segment a tissue "
+                f"region? Use the reference methods (SRTM, Logan reference) for a reference region")
+    return None
+
+
 def readCurveCsv(text, timeUnit="s"):
     """(times in minutes, values) of a two-column CSV / TSV text (time, value); a header line and other columns are
     skipped. timeUnit "s" or "min" (a header naming min / s wins)."""
@@ -537,6 +567,10 @@ def fit(key, frames, tissue, inputFunction=None, reference=None, blood=None, opt
     result["model"] = key
     result["weights"] = weights
     result.setdefault("warnings", [])
+    if spec.inputKind == "plasma" and isinstance(inputFunction, FrameInput):
+        warning = inputCurveWarning(frames, inputFunction.values)
+        if warning:
+            result["warnings"].append(warning)
     result["values"] = {name: _finite(result["values"].get(name)) for name in spec.reports}
     return result
 
