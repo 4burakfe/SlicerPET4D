@@ -230,3 +230,34 @@ def panRange(start, end, steps, lowest, highest, fraction=0.1):
     span = end - start
     newStart = min(max(start - steps * fraction * span, lowest), max(lowest, highest - span))
     return newStart, newStart + span
+
+
+# --- action buttons of the PET4D panels ---------------------------------------------------------------
+BUTTON_COLORS = {"action": "#2f7ed8", "harden": "#2e9e5b", "revert": "#c8553d"}
+BUTTON_STYLE = ("QPushButton {{ background-color: {0}; color: white; font-weight: bold; border: none; "
+                "border-radius: 4px; padding: 5px 10px; }} QPushButton:disabled {{ background-color: #9aa1a7; }} "
+                "QPushButton:checked {{ background-color: #1f5aa0; }}")
+
+
+def buttonStyle(role):
+    """Style sheet of a coloured action button: role is a BUTTON_COLORS key (action, harden, revert) or a colour."""
+    return BUTTON_STYLE.format(BUTTON_COLORS.get(role, role))
+
+
+def colorButton(button, role):
+    """Colour a QPushButton for its role (see buttonStyle) and return it."""
+    button.setStyleSheet(buttonStyle(role))
+    return button
+
+
+# --- jump to a segment ----------------------------------------------------------------------------------
+def focusVoxel(mask_kji):
+    """(k, j, i) of the voxel of the mask nearest its centre of mass (the centre itself for a convex region; a
+    voxel of the region for a ring or a curved one, e.g. a cortex). None for an empty mask."""
+    import numpy as np
+    points = np.argwhere(np.asarray(mask_kji) != 0)
+    if points.size == 0:
+        return None
+    centre = points.mean(axis=0)
+    nearest = points[np.argmin(((points - centre) ** 2).sum(axis=1))]
+    return tuple(int(v) for v in nearest)

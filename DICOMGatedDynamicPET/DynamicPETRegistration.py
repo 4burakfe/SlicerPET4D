@@ -1077,6 +1077,11 @@ class DynamicPETRegistrationWidget(ScriptedLoadableModuleWidget, VTKObservationM
         # --- registration
         regBox = qt.QGroupBox("Registration")
         regForm = qt.QFormLayout(regBox)
+        # the method and its settings fold away (closed at start) so the panel shows the buttons
+        settingsBox = ctk.ctkCollapsibleButton()
+        settingsBox.text = "Registration method and settings"
+        settingsBox.collapsed = True
+        settingsForm = qt.QFormLayout(settingsBox)
         self.engineCombo = qt.QComboBox()
         for title, key in reg.ENGINES:
             self.engineCombo.addItem(title, key)
@@ -1086,7 +1091,7 @@ class DynamicPETRegistrationWidget(ScriptedLoadableModuleWidget, VTKObservationM
             "Iterative multi-resolution (as in EasyReg): a rigid (or affine) stage, then B-spline passes from coarse "
             "to fine control points, each kept only when it improves the match, on a working grid of a few mm: "
             "little memory.")
-        regForm.addRow("Method:", self.engineCombo)
+        settingsForm.addRow("Method:", self.engineCombo)
         self.brainsfitBox = qt.QWidget()
         brainsForm = qt.QFormLayout(self.brainsfitBox)
         brainsForm.setContentsMargins(0, 0, 0, 0)
@@ -1158,10 +1163,11 @@ class DynamicPETRegistrationWidget(ScriptedLoadableModuleWidget, VTKObservationM
         self.stepsNote = qt.QLabel()
         self.stepsNote.wordWrap = True
         brainsForm.addRow(self.stepsNote)
-        regForm.addRow(self.brainsfitBox)
-        regForm.addRow(self.iterativeBox)
-        regForm.addRow("Initialization:", self.initializationCombo)
-        self.registerButton = qt.QPushButton("Register")
+        settingsForm.addRow(self.brainsfitBox)
+        settingsForm.addRow(self.iterativeBox)
+        settingsForm.addRow("Initialization:", self.initializationCombo)
+        regForm.addRow(settingsBox)
+        self.registerButton = dynamicviews.colorButton(qt.QPushButton("Register"), "action")
         self.registerButton.toolTip = "Register the reference to the CT/MR in the steps above"
         regForm.addRow(self.registerButton)
         manualRow = qt.QHBoxLayout()
@@ -1175,10 +1181,10 @@ class DynamicPETRegistrationWidget(ScriptedLoadableModuleWidget, VTKObservationM
         manualRow.addWidget(self.resetManualButton, 1)
         regForm.addRow(manualRow)
         row = qt.QHBoxLayout()
-        self.revertButton = qt.QPushButton("Revert changes")
+        self.revertButton = dynamicviews.colorButton(qt.QPushButton("Revert changes"), "revert")
         self.revertButton.toolTip = ("Before hardening: drop the registration and the manual correction. After "
                                      "hardening: put the overwritten series back, or remove the new one.")
-        self.hardenButton = qt.QPushButton("Harden")
+        self.hardenButton = dynamicviews.colorButton(qt.QPushButton("Harden"), "harden")
         self.hardenButton.toolTip = ("Resample every frame and the summed image onto the CT/MR field of view: "
                                      "overwrite the series or save a new one")
         row.addWidget(self.revertButton)
