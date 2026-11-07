@@ -866,8 +866,8 @@ class DynamicPETModelingWidget(ScriptedLoadableModuleWidget, VTKObservationMixin
         self._computing = False           # reading the curves (the segmentation may convert representations)
         self._segmentsChanged = False
         self.segmentTimer = qt.QTimer()
-        self.segmentTimer.singleShot = True
-        self.segmentTimer.interval = 600
+        self.segmentTimer.setSingleShot(True)
+        self.segmentTimer.setInterval(600)
         self.segmentTimer.connect("timeout()", self.onSegmentsEdited)
 
         # --- inputs
