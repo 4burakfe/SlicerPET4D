@@ -9,8 +9,9 @@ A step-by-step workflow for dynamic receptor PET of the brain, built on the othe
     3. CT/MR registration   the Dynamic PET to CT/MR Registration panel, the series to the CT / MR
     4. Normalization        to the MNI ICBM 152 2009c template (BRAINSFit, rigid + scale + skew then B-spline): the
                             PET registered to the template, or the CT / MR normalized and the same transform applied
-                            to the PET (default when the study has a CT / MR). Checked in the registration layout (PET / fusion / template, checkerboard, manual
-                            correction), then hardened into a new series in the template space.
+                            to the PET (default when the study has a CT / MR). Checked in the registration layout
+                            (PET / fusion / template, checkerboard, manual correction), then hardened into a new
+                            series in the template space.
     5. Regions              the CerebrA atlas (Manera et al. 2020) as a segmentation with the structure names: the
                             regions from the left / right atlas ('Putamen R', 'Putamen L') or the bilateral one
                             ('Putamen'), the reference region from either (default: the bilateral cerebellar grey
