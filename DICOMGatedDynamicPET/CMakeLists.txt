@@ -23,6 +23,7 @@ set(MODULE_PYTHON_SCRIPTS
   ${MODULE_NAME}Lib/kinetics.py
   ${MODULE_NAME}Lib/tacplot.py
   ${MODULE_NAME}Lib/neuro.py
+  ${MODULE_NAME}Lib/normaldb.py
   )
 
 set(MODULE_PYTHON_RESOURCES
@@ -134,4 +135,20 @@ slicerMacroBuildScriptedModule(
 
 if(BUILD_TESTING)
   slicer_add_python_unittest(SCRIPT ${NEURO_MODULE_NAME}.py)
+endif()
+
+#-----------------------------------------------------------------------------
+# Neuro PET Database Manager (visible, Nuclear Medicine): normal databases of brain PET (static first; predefined
+# from mean / SD maps or a package, user defined filled from the Neuro workflows)
+set(NDB_MODULE_NAME NeuroPETDatabaseManager)
+
+slicerMacroBuildScriptedModule(
+  NAME ${NDB_MODULE_NAME}
+  SCRIPTS ${NDB_MODULE_NAME}.py
+  RESOURCES Resources/Icons/${NDB_MODULE_NAME}.png
+  WITH_GENERIC_TESTS
+  )
+
+if(BUILD_TESTING)
+  slicer_add_python_unittest(SCRIPT ${NDB_MODULE_NAME}.py)
 endif()

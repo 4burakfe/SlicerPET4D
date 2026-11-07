@@ -528,6 +528,35 @@ templates, *mni_icbm152_t1_tal_nlin_sym_09c_mask.nii*, *mni_icbm152_CerebrA_tal_
 *CerebrA_LabelDetails.csv*. Please cite Fonov et al., NeuroImage 2011;54:313-327 and NeuroImage 2009;47:S102 (ICBM
 2009c), and Manera et al., Scientific Data 2020;7:237 (CerebrA).
 
+## Neuro PET Database Manager
+
+The **Neuro PET Database Manager** module (Nuclear Medicine > PET4D) keeps normal databases of brain PET in the
+MNI ICBM 152 2009c space (1 mm). Pick a database folder; every database is a folder in it, named after the
+database:
+
+```
+<database folder>/<database name>/
+    database.json          header: mode, kind, nuclide, tracer, acquisition, segmentation, reference region,
+                           smoothing, map type, age groups, notes, version, mean / SD maps with subjects per group
+    reference_mask.nii.gz  the reference region mask
+    subjects.csv           user defined only: one row per subject
+    subjects/              user defined only: SUV and SUVR maps of each subject
+    stats/                 master_mean / master_sd (all subjects) and age_<group>_mean / _sd
+```
+
+- **Static** tab (the Dynamic tab comes next): the databases in a table (type, nuclide, tracer, subjects,
+  reference region, age groups, state of the mean / SD maps, version) with the details of the selected one.
+- **Create new database...**: an empty *user defined* database. Reference region: global (MNI brain mask),
+  whole cerebellum, cerebellar grey matter, brainstem (CerebrA; a pons mask is to come) or a custom mask file;
+  the mask is copied into the database from the Neuro atlas folder. Optional age groups (the master mean / SD of
+  all subjects is always made) and smoothing (FWHM). Subjects will be added from the Neuro workflows.
+- **Add predefined database...**: a *predefined* database has no subject images, only mean and SD maps: either a
+  package (.zip) or the maps picked one by one (master and each age group, with the number of subjects and whether
+  they hold SUVR or SUV).
+- **Export as predefined...**: a user defined database as a .zip without its subject images (the number of
+  subjects and an age summary are kept).
+- **Delete database** removes the folder from disk after a warning.
+
 ## What is stored on the volumes
 
 Node attributes, with the prefix `StaticPET.`, `GatedPET.` or `DynamicPET.`. Every volume also carries
