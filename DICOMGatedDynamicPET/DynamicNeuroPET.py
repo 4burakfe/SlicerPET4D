@@ -61,9 +61,12 @@ DEFAULT_TARGET = "Putamen"
 DEFAULT_MODEL = "SRTM"
 
 METHOD_PET, METHOD_ANATOMY = "pet", "anatomy"
-METHODS = ((METHOD_PET, "Register the PET to the template (default)"),
+METHODS = ((METHOD_PET, "Register the PET to the template"),
            (METHOD_ANATOMY, "Normalize the CT/MR, apply the same transform to the PET"))
 NORMALIZATION_STEPS = ("Affine", "BSpline")
+# BRAINSFit registers a copy of the template and of the CT/MR / PET at this voxel size (as FSL's 2 mm MNI template;
+# a 0.5 mm MR against the 1 mm template otherwise takes tens of GB); the result applies to the original images
+NORMALIZATION_WORKING_MM = 2.0
 NORMALIZATION_ITERATIVE_GRID_MM = 30.0     # iterative engine: last control-point spacing (brain to template)
 # The PET is registered to the skull-stripped template by default (the scalp of the T1 has no PET counterpart);
 # the CT/MR is registered to the whole template.
@@ -238,7 +241,8 @@ class DynamicNeuroPETLogic(ScriptedLoadableModuleLogic):
         from DynamicPETRegistration import DynamicPETRegistrationLogic
         settings = DynamicPETRegistrationLogic.defaultSettings()
         settings["steps"] = list(NORMALIZATION_STEPS)
-        settings["resample"] = reg.resampleFlags(NORMALIZATION_STEPS)
+        settings["resample"] = [True] * len(NORMALIZATION_STEPS)
+        settings["workingVoxelMm"] = NORMALIZATION_WORKING_MM
         settings["initialization"] = NORMALIZATION_INITIALIZATION[method]
         settings["iterativeDeformable"] = True          # to the template: linear, then deformable
         settings["iterativeGridMm"] = NORMALIZATION_ITERATIVE_GRID_MM
@@ -255,8 +259,6 @@ class DynamicNeuroPETLogic(ScriptedLoadableModuleLogic):
                 raise ValueError("Pick the CT/MR in step 1 to normalize it.")
             moving = anatomy
             settings["movingFunctional"] = False
-            # the template is the target grid: kept as it is; the CT/MR is resampled to its voxel size instead
-            settings["resample"] = [False] * len(settings.get("steps") or [])
         else:
             moving = self.referenceImage(sequence)
         if moving.GetParentTransformNode() is not None:
@@ -822,6 +824,7 @@ class DynamicNeuroPETWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         if anatomy is not self.anatomy():
             self.setNode("Anatomy", anatomy)
             self._clearNormalization()
+            self._methodChosen = False          # a new CT/MR: the method follows the data again
         self._updateDataInfo()
         self._updateTemplateChoice()
         self.refresh()
@@ -878,7 +881,7 @@ class DynamicNeuroPETWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         atlasLayout.addWidget(self.atlasInfo)
         layout.addWidget(atlasBox)
 
-        box = qt.QGroupBox("Normalization (BRAINSFit)")
+        box = qt.QGroupBox("Normalization")
         form = qt.QFormLayout(box)
         self.methodCombo = qt.QComboBox()
         for key, title in METHODS:
@@ -930,6 +933,19 @@ class DynamicNeuroPETWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             combo.toolTip = "Affine then B-spline by default (a B-spline only as the last step)"
             self.normStepCombos.append(combo)
             brainsForm.addRow(f"Step {index + 1}:", combo)
+        self.normWorkingSpin = qt.QDoubleSpinBox()
+        self.normWorkingSpin.setRange(0.0, 8.0)
+        self.normWorkingSpin.setDecimals(1)
+        self.normWorkingSpin.setSingleStep(0.5)
+        self.normWorkingSpin.suffix = " mm"
+        self.normWorkingSpin.specialValueText = "Full resolution"
+        self.normWorkingSpin.value = NORMALIZATION_WORKING_MM
+        self.normWorkingSpin.toolTip = (
+            "BRAINSFit registers copies of the template and of the CT/MR (or PET) smoothed and resampled to this voxel "
+            "size (never finer than the image itself); the transform applies to the originals. 2 mm (as the 2 mm "
+            "MNI template of FSL) keeps the memory low: a 0.5 mm MR against the 1 mm template otherwise takes tens "
+            "of GB. 0: the template and the images as they are.")
+        brainsForm.addRow("Register at:", self.normWorkingSpin)
         form.addRow(self.normBrainsBox)
         form.addRow(self.normIterativeBox)
         self.normInitCombo = qt.QComboBox()
@@ -977,6 +993,7 @@ class DynamicNeuroPETWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
 
         self.atlasPath.connect("currentPathChanged(QString)", lambda path: self.onAtlasFolderChanged(path))
         self.methodCombo.connect("currentIndexChanged(int)", self.onMethodChanged)
+        self.methodCombo.connect("activated(int)", lambda i: setattr(self, "_methodChosen", True))
         self.templateCombo.connect("currentIndexChanged(int)", lambda i: self._clearNormalization())
         self.normalizeButton.connect("clicked()", self.onNormalize)
         self.normEngineCombo.connect("currentIndexChanged(int)", self.onNormEngineChanged)
@@ -1071,9 +1088,11 @@ class DynamicNeuroPETWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             settings["steps"] = reg.iterativeSteps(settings["iterativeLinear"], settings["iterativeDeformable"])
             return settings
         steps = [c.currentData for c in self.normStepCombos if c.currentData]
-        settings["engine"] = reg.ENGINE_BRAINSFIT      # the defaults are the iterative engine's
+        settings["engine"] = reg.ENGINE_BRAINSFIT
         settings["steps"] = reg.validateSteps(steps)
-        settings["resample"] = reg.resampleFlags(settings["steps"])
+        working = float(self.normWorkingSpin.value)
+        settings["resample"] = [working > 0] * len(settings["steps"])
+        settings["workingVoxelMm"] = working
         return settings
 
     def _template(self):
@@ -1174,6 +1193,10 @@ class DynamicNeuroPETWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             session.open(self.logic.referenceImage(sequence))
             session.setRegistration(self.normResult["linear"], self.normResult["bspline"])
             session.setFixedWindow(*_percentiles(self.normResult["template"]))
+            if self.normResult.get("method") == METHOD_ANATOMY and self.normResult.get("moving") is not None:
+                # the normalized CT/MR alone on the right, over the template in the fusion column
+                moving = self.normResult["moving"]
+                session.setAnatomy(moving, _percentiles(moving))
             self.normSession = session
         except Exception as error:
             logging.exception("Neuro: could not open the normalization layout")
@@ -1587,9 +1610,19 @@ class DynamicNeuroPETWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         states[STEP_MODEL] = STATE_READY if segmentation is not None else STATE_WAITING
         return states
 
+    def _defaultMethod(self):
+        """Normalize with the patient's CT/MR when the study has one (else the PET), until the method is picked by
+        hand; a pending normalization is not touched."""
+        if getattr(self, "_methodChosen", False) or not hasattr(self, "methodCombo") or self.normResult is not None:
+            return
+        wanted = METHOD_ANATOMY if self.anatomy() is not None else METHOD_PET
+        if self.methodCombo.currentData != wanted:
+            self.methodCombo.setCurrentIndex(self.methodCombo.findData(wanted))
+
     def refresh(self):
         if not hasattr(self, "stepButtons"):
             return
+        self._defaultMethod()
         states = self.stepStates()
         for number, (key, _, title, explanation) in enumerate(STEPS, start=1):
             button = self.stepButtons[key]

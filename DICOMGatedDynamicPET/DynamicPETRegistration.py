@@ -52,6 +52,7 @@ REGISTERED_SUFFIX = " registered"
 PET_COLORMAP = "Inverted grey"   # PET column (and under the checkerboard)
 FUSION_COLORMAP = "PET-DICOM"    # PET over the CT/MR
 CHECKER_COLOR_ID = "vtkMRMLColorTableNodeGreen"
+ANATOMY_FUSION_COLOR_ID = "vtkMRMLColorTableNodeRed"   # a CT/MR (normalized with the PET) over the fixed image
 DEFAULT_FUSION_OPACITY = 0.5
 DEFAULT_CHECKER_OPACITY = 0.35
 THRESHOLD_FRACTION = 0.03        # fusion PET voxels below 3 % of the PET window are transparent over the CT/MR
@@ -303,6 +304,8 @@ class DynamicPETRegistrationLogic(ScriptedLoadableModuleLogic):
             parameters["splineGridSize"] = f"{grid},{grid},{grid}"
         else:
             parameters["linearTransform"] = output.GetID()
+        logging.info(f"BRAINSFit {transformType}: fixed '{fixed.GetName()}' {_gridText(fixed)}, moving "
+                     f"'{moving.GetName()}' {_gridText(moving)}, sampling {parameters['samplingPercentage']:g}")
         try:
             self._runCli(slicer.modules.brainsfit, parameters)
         except Exception:
@@ -638,6 +641,14 @@ class DynamicPETRegistrationLogic(ScriptedLoadableModuleLogic):
 # ---------------------------------------------------------------------------
 # Session: layout, helper volumes and transforms
 # ---------------------------------------------------------------------------
+def _gridText(volume):
+    """'97 x 115 x 97 voxels of 2 x 2 x 2 mm' (for the log)."""
+    dims = volume.GetImageData().GetDimensions() if volume.GetImageData() is not None else (0, 0, 0)
+    spacing = reg.gridSpacing(_ijkToRas(volume))
+    return (" x ".join(str(int(d)) for d in dims) + " voxels of " + " x ".join(f"{v:.3g}" for v in spacing)
+            + " mm")
+
+
 class RegistrationSession:
     """The registration layout of one PET reference and one CT/MR: PET alone, PET over the CT/MR, CT/MR alone (and the
     checkerboard over the PET), in an axial and a coronal row; the transform chain (linear, B-spline, manual) that
@@ -648,6 +659,8 @@ class RegistrationSession:
         self.petView = None         # PET column (and under the checkerboard)
         self.petFusion = None       # PET over the CT/MR
         self.fixedHelper = None     # CT/MR in grey with the module's window
+        self.anatomyView = None     # optional: a volume moved by the same chain (e.g. the MR normalized to a
+        self.anatomyFusion = None   # template), alone in the right column and over the fixed image in the fusion
         self.checkers = {}          # orientation -> checkerboard on the PET grid, in columns across that row's slices
         self.linear = None          # linear transform of the automatic steps
         self.bspline = None         # B-spline of the last step (owned by the widget's result)
@@ -700,11 +713,12 @@ class RegistrationSession:
                 layoutManager.setLayout(self.previousLayout)
         if self.bspline is not None and slicer.mrmlScene.IsNodePresent(self.bspline):
             self.bspline.SetAndObserveTransformNodeID(None)
-        for node in [self.petView, self.petFusion, self.fixedHelper, self.linear, self.manual] + \
-                list(self.checkers.values()):
+        for node in [self.petView, self.petFusion, self.fixedHelper, self.anatomyView, self.anatomyFusion,
+                     self.linear, self.manual] + list(self.checkers.values()):
             if node is not None and slicer.mrmlScene.IsNodePresent(node):
                 slicer.mrmlScene.RemoveNode(node)
         self.petView = self.petFusion = self.fixedHelper = self.linear = self.manual = None
+        self.anatomyView = self.anatomyFusion = None
         self.checkers = {}
         self.bspline = None
 
@@ -731,6 +745,32 @@ class RegistrationSession:
         for node in old:
             if node is not None and slicer.mrmlScene.IsNodePresent(node):
                 slicer.mrmlScene.RemoveNode(node)
+
+    def setAnatomy(self, source, window=None):
+        """Show source (a volume that lies with the PET, e.g. the CT/MR normalized to a template) moved by the same
+        chain: alone in grey in the right column, and in colour over the fixed image in the fusion column (the PET
+        keeps its own column). None goes back to the PET fusion and the fixed image."""
+        logic = DynamicPETRegistrationLogic
+        for node in (self.anatomyView, self.anatomyFusion):
+            if node is not None and slicer.mrmlScene.IsNodePresent(node):
+                slicer.mrmlScene.RemoveNode(node)
+        self.anatomyView = self.anatomyFusion = None
+        if source is not None:
+            if window is None:
+                array = slicer.util.arrayFromVolume(source)
+                window = (float(np.nanmin(array)), _percentile(array)) if array.size else (0.0, 1.0)
+            self.anatomyView = logic.helperVolume(f"{source.GetName()} registration view", source)
+            self.anatomyFusion = logic.helperVolume(f"{source.GetName()} registration fusion", source)
+            for node, color in ((self.anatomyView, "vtkMRMLColorTableNodeGrey"),
+                                (self.anatomyFusion, ANATOMY_FUSION_COLOR_ID)):
+                node.CreateDefaultDisplayNodes()
+                display = node.GetDisplayNode()
+                display.SetAndObserveColorNodeID(color)
+                display.SetInterpolate(True)
+                display.AutoWindowLevelOff()
+                display.SetWindowLevelMinMax(float(window[0]), float(window[1]))
+                node.SetAndObserveTransformNodeID(self.linear.GetID())
+        self._assignVolumes()
 
     def _makeChecker(self, source):
         """One checkerboard per row, on the PET grid: columns along the grid axis closest to the row's slice normal
@@ -935,8 +975,8 @@ class RegistrationSession:
         if column == "PET":
             return self.petView, None, 0.0
         if column == "Fusion":
-            return self.fixedHelper, self.petFusion, self.fusionOpacity
-        return self.fixedHelper, None, 0.0
+            return self.fixedHelper, self.anatomyFusion or self.petFusion, self.fusionOpacity
+        return self.anatomyView or self.fixedHelper, None, 0.0
 
     def _unguard(self):
         for node, tag in [o for o in self.observers if o[0] is not self.manual]:
