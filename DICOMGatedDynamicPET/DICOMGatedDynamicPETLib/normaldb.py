@@ -1,4 +1,4 @@
-"""Neuro PET normal databases on disk (no Slicer imports; numpy only): the folder layout, the header
+"""Neuro PET / SPECT normal databases on disk (no Slicer imports; numpy only): the folder layout, the header
 (database.json), the subjects table (subjects.csv), age groups, the database list of a root folder, deletion,
 predefined databases made from mean / SD maps, and the packaged (.zip) form of a predefined database.
 
@@ -10,8 +10,8 @@ A root folder (picked in the Neuro PET Database Manager) holds one folder per da
                                 free text, statistics (subjects per group, mean / SD map files, when computed)
         reference_mask.nii.gz   copy of the reference region mask in the template space
         subjects.csv            user defined only: one row per subject (ID, age, scan date, added, map files)
-        subjects/               user defined only: the maps of each subject (SUV and SUVR, so the reference
-                                region can be changed later)
+        subjects/               user defined only: the maps of each subject (PET: SUV and SUVR, SPECT: counts and
+                                ratio, so the reference region can be changed later)
         stats/                  mean and SD maps: master_mean / master_sd (all subjects) and <group>_mean /
                                 <group>_sd for each age group
 
@@ -47,25 +47,70 @@ SPACE = "MNI ICBM 152 2009c nonlinear symmetric"
 VOXEL_MM = 1.0
 DEFAULT_SEGMENTATION = "CerebrA (Manera et al. 2020)"
 
-MAP_SUVR, MAP_SUV = "SUVR", "SUV"
-MAP_TYPES = (MAP_SUVR, MAP_SUV)
+PET, SPECT = "PET", "SPECT"
+MODALITIES = (PET, SPECT)
+# What the maps hold: PET SUVR (SUV / reference) or SUV; SPECT counts / reference (ratio) or counts
+MAP_SUVR, MAP_SUV, MAP_RATIO, MAP_COUNTS = "SUVR", "SUV", "Ratio", "Counts"
+MAP_TYPES_BY_MODALITY = {PET: (MAP_SUVR, MAP_SUV), SPECT: (MAP_RATIO, MAP_COUNTS)}
+MAP_TYPES = (MAP_SUVR, MAP_SUV, MAP_RATIO, MAP_COUNTS)
 
 # Reference regions of the static normalization: key, title, CerebrA structures (None: not from CerebrA)
-REF_GLOBAL, REF_CEREBELLUM, REF_CEREBELLUM_GM, REF_BRAINSTEM, REF_CUSTOM = (
-    "global", "cerebellum", "cerebellumGM", "brainstem", "custom")
+REF_GLOBAL, REF_CEREBELLUM, REF_CEREBELLUM_GM, REF_PONS, REF_BRAINSTEM, REF_CUSTOM = (
+    "global", "cerebellum", "cerebellumGM", "pons", "brainstem", "custom")
 REFERENCE_REGIONS = (
     (REF_GLOBAL, "Global (whole brain)", None),
     (REF_CEREBELLUM, "Whole cerebellum (grey + white matter)", ("Cerebellum Gray Matter", "Cerebellum White Matter")),
     (REF_CEREBELLUM_GM, "Cerebellar grey matter", ("Cerebellum Gray Matter",)),
-    # CerebrA has no pons; its brainstem reaches a little further down (a pons mask is to come)
-    (REF_BRAINSTEM, "Brainstem (CerebrA; pons to come)", ("Brainstem",)),
+    # the pons of the CerebrA with pons (..._wpons.seg.nrrd in the atlas folder); CerebrA itself has only the
+    # brainstem, which reaches a little further down
+    (REF_PONS, "Pons", ("Pons",)),
+    (REF_BRAINSTEM, "Brainstem (CerebrA)", ("Brainstem",)),
     (REF_CUSTOM, "Custom mask file", None),
 )
 DEFAULT_REFERENCE = REF_CEREBELLUM_GM
 
-NUCLIDES = ("F-18", "C-11", "Ga-68", "O-15", "N-13", "Cu-64", "Zr-89")
-TRACERS = ("FDG", "FDOPA", "PiB", "Florbetapir", "Florbetaben", "Flutemetamol", "Flortaucipir", "MK-6240",
-           "PI-2620", "Fallypride", "Raclopride", "FE-PE2I", "UCB-J", "Flumazenil")
+# Nuclides of each modality with their brain tracers (the order of the lists). The tracer list of a nuclide starts
+# with the nuclide itself (tracer not given); any other nuclide or tracer can be typed.
+NUCLIDE_TRACERS = {
+    PET: (
+        ("F-18", ("FDG", "FDOPA", "Florbetapir", "Florbetaben", "Flutemetamol", "Flortaucipir", "MK-6240", "PI-2620",
+                  "Fallypride", "FE-PE2I", "FET", "Flumazenil", "UCB-H", "FMISO")),
+        ("C-11", ("PiB", "Raclopride", "UCB-J", "Flumazenil", "Methionine", "DASB", "PBR28", "PK11195")),
+        ("O-15", ("Water",)),
+        ("N-13", ("Ammonia",)),
+        ("Ga-68", ("DOTATATE", "PSMA-11")),
+        ("Cu-64", ()),
+        ("Zr-89", ()),
+    ),
+    SPECT: (
+        ("Tc-99m", ("HMPAO", "ECD", "TRODAT-1")),
+        ("I-123", ("Ioflupane (DaTscan)", "IBZM", "Iomazenil")),
+        ("Tl-201", ("Thallium chloride",)),
+    ),
+}
+
+
+def nuclides(modality=PET):
+    """Nuclides offered for a modality."""
+    return [n for n, _ in NUCLIDE_TRACERS.get(modality, ())]
+
+
+def tracers(nuclide, modality=None):
+    """Tracers offered for a nuclide: the nuclide itself first (tracer not given), then its tracers (of the modality,
+    else of any modality). A nuclide not in the lists offers only itself."""
+    nuclide = str(nuclide or "").strip()
+    if not nuclide:
+        return []
+    out = [nuclide]
+    for mod in ([modality] if modality else MODALITIES):
+        for name, names in NUCLIDE_TRACERS.get(mod, ()):
+            if name.lower() == nuclide.lower():
+                out.extend(t for t in names if t not in out)
+    return out
+
+
+def mapTypes(modality=PET):
+    return MAP_TYPES_BY_MODALITY.get(modality, MAP_TYPES_BY_MODALITY[PET])
 
 MASTER = "master"
 MASTER_TITLE = "Master (all subjects)"
@@ -190,6 +235,7 @@ def newHeader(name, mode=STATIC, kind=USER_DEFINED, **fields):
         "name": str(name).strip(),
         "mode": mode,
         "kind": kind,
+        "modality": PET,
         "created": now(),
         "modified": now(),
         "nuclide": "",
@@ -212,6 +258,8 @@ def newHeader(name, mode=STATIC, kind=USER_DEFINED, **fields):
         if key not in header:
             raise KeyError(key)
         header[key] = value
+    if "mapType" not in fields:
+        header["mapType"] = mapTypes(header["modality"])[0]     # SUVR (PET) / Ratio (SPECT)
     return header
 
 
@@ -224,6 +272,11 @@ def validateHeader(header):
         errors.append("Unknown mode")
     if header.get("kind") not in dict(KINDS):
         errors.append("Unknown database kind")
+    if header.get("modality") not in MODALITIES:
+        errors.append("Pick the modality (PET or SPECT)")
+    elif header.get("mapType") not in mapTypes(header.get("modality")):
+        errors.append(f"The map type of a {header.get('modality')} database is "
+                      + " or ".join(mapTypes(header.get("modality"))))
     if not str(header.get("tracer", "")).strip():
         errors.append("Give the tracer")
     if not str(header.get("nuclide", "")).strip():
@@ -367,8 +420,8 @@ def deleteDatabase(folder, root):
 
 
 def summary(folder, header):
-    """Table row of a database: {"name", "kind", "mode", "nuclide", "tracer", "subjects", "reference", "ageGroups",
-    "created", "statistics", "version"}."""
+    """Table row of a database: {"name", "kind", "modality", "mode", "nuclide", "tracer", "subjects", "reference",
+    "ageGroups", "created", "statistics", "version"}."""
     stats = header.get("statistics") or {}
     if header.get("kind") == PREDEFINED:
         state = "Predefined maps"
@@ -383,6 +436,7 @@ def summary(folder, header):
         "name": header.get("name", os.path.basename(folder)),
         "version": header.get("version", 1),
         "kind": dict(KINDS).get(header.get("kind"), header.get("kind", "")),
+        "modality": header.get("modality", PET),
         "mode": dict(MODES).get(header.get("mode"), header.get("mode", "")),
         "nuclide": header.get("nuclide", ""),
         "tracer": header.get("tracer", ""),

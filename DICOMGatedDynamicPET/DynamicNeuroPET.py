@@ -12,7 +12,8 @@ A step-by-step workflow for dynamic receptor PET of the brain, built on the othe
                             to the PET (default when the study has a CT / MR). Checked in the registration layout
                             (PET / fusion / template, checkerboard, manual correction), then hardened into a new
                             series in the template space.
-    5. Regions              the CerebrA atlas (Manera et al. 2020) as a segmentation with the structure names: the
+    5. Regions              the CerebrA atlas (Manera et al. 2020; the CerebrA with pons, ..._wpons.seg.nrrd and its
+                            CSV, when the atlas folder has it) as a segmentation with the structure names: the
                             regions from the left / right atlas ('Putamen R', 'Putamen L') or the bilateral one
                             ('Putamen'), the reference region from either (default: the bilateral cerebellar grey
                             matter). The bilateral atlas is made on first use and saved next to CerebrA.
@@ -381,9 +382,16 @@ class DynamicNeuroPETLogic(ScriptedLoadableModuleLogic):
         if labelsPath is None or neuro.CEREBRA_CSV not in atlas:
             raise ValueError("The CerebrA files (mni_icbm152_CerebrA_tal_nlin_sym_09c.nii, CerebrA_LabelDetails.csv) "
                              "are not in the atlas folder.")
+        structures = neuro.readCerebraLabels(neuro.labelsCsv(atlas))
         if os.path.isfile(labelsPath) and os.path.isfile(csvPath):
-            return labelsPath, csvPath
-        structures = neuro.readCerebraLabels(atlas[neuro.CEREBRA_CSV])
+            try:
+                existing = [n for _, n, _ in neuro.readBilateralLabels(csvPath)]
+            except ValueError:
+                existing = []
+            if existing == [st["name"] for st in structures]:
+                return labelsPath, csvPath
+            logging.info("Neuro: the bilateral CerebrA does not match the CerebrA structures (e.g. the pons was "
+                         "added); made again")
         _, mapping = neuro.labelTable(structures, mergeSides=True)
         array, source = self._loadLabels(atlas[neuro.CEREBRA_LABELS])
         scene = slicer.mrmlScene
@@ -410,31 +418,98 @@ class DynamicNeuroPETLogic(ScriptedLoadableModuleLogic):
                 if scene.IsNodePresent(node):
                     scene.RemoveNode(node)
 
+    def ensurePonsOverlays(self, atlas):
+        """Overlay label maps of the CerebrA with pons (the pons overlaps the brainstem, so it is not in the label
+        volume): (left / right overlay path, bilateral overlay path), or (None, None) without the CerebrA with pons.
+        Made on first use from its segmentation file (segments named Segment_<value>, or 'Pons R' / 'Pons L' /
+        'Pons'), on the grid of the CerebrA labels, and saved next to it (else in Slicer's temporary folder)."""
+        lateralPath, bilateralPath = neuro.ponsOverlayPaths(atlas)
+        if lateralPath is None:
+            return None, None
+        if os.path.isfile(lateralPath) and os.path.isfile(bilateralPath):
+            return lateralPath, bilateralPath
+        structures = neuro.readCerebraLabels(atlas[neuro.PONS_CSV])
+        lateralValues = neuro.overlayValues(structures)                      # {103: 'Pons R', 104: 'Pons L'}
+        bilateralValues = {n: v for v, n in neuro.overlayValues(structures, mergeSides=True).items()}
+        scene = slicer.mrmlScene
+        array, reference = self._loadLabels(atlas[neuro.CEREBRA_LABELS])
+        segmentationNode = slicer.util.loadSegmentation(atlas[neuro.PONS_LABELS], {"show": False})
+        exported = scene.AddNewNodeByClass("vtkMRMLLabelMapVolumeNode", "pons (temporary)")
+        out = scene.AddNewNodeByClass("vtkMRMLLabelMapVolumeNode", "pons overlay")
+        try:
+            segmentation = segmentationNode.GetSegmentation()
+            names = {}
+            for index in range(segmentation.GetNumberOfSegments()):
+                segmentId = segmentation.GetNthSegmentID(index)
+                names[segmentation.GetSegment(segmentId).GetName().strip().lower()] = segmentId
+            lateral = np.zeros(array.shape, dtype=np.int16)
+            bilateral = np.zeros(array.shape, dtype=np.int16)
+            for value, name in lateralValues.items():
+                base = name[:-2] if name[-2:] in (" R", " L") else name
+                segmentId = names.get(f"segment_{value}") or names.get(name.lower())
+                if segmentId is None:
+                    continue
+                ids = vtk.vtkStringArray()
+                ids.InsertNextValue(segmentId)
+                if not slicer.modules.segmentations.logic().ExportSegmentsToLabelmapNode(
+                        segmentationNode, ids, exported, reference):
+                    raise RuntimeError(f"Could not export the segment '{name}'")
+                mask = slicer.util.arrayFromVolume(exported) > 0
+                lateral[mask] = value
+                bilateral[mask] = bilateralValues.get(base, 0)
+            if not lateral.any():
+                raise ValueError(f"No pons segment in {os.path.basename(atlas[neuro.PONS_LABELS])} (segments named "
+                                 + ", ".join(f"Segment_{v}" for v in lateralValues) + " expected)")
+            out.SetIJKToRASMatrix(_vtkMatrix(_ijkToRas(reference)))
+            for folder in (os.path.dirname(lateralPath), slicer.app.temporaryPath):
+                paths = (os.path.join(folder, os.path.basename(lateralPath)),
+                         os.path.join(folder, os.path.basename(bilateralPath)))
+                try:
+                    for path, values in zip(paths, (lateral, bilateral)):
+                        slicer.util.updateVolumeFromArray(out, values)
+                        if not slicer.util.saveNode(out, path):
+                            raise OSError(f"could not write {path}")
+                    logging.info(f"Neuro: pons overlays saved as {paths[0]} and {paths[1]}")
+                    return paths
+                except OSError:
+                    logging.warning(f"Neuro: could not save the pons overlays in {folder}", exc_info=True)
+            raise RuntimeError("Could not save the pons overlay files.")
+        finally:
+            for node in (reference, segmentationNode, exported, out):
+                if node is not None and scene.IsNodePresent(node):
+                    scene.RemoveNode(node)
+
     @staticmethod
     def atlasEntries(atlas, kind):
         """[(label value, segment name, (r, g, b))] of a CerebrA version: ATLAS_LATERAL ('Putamen R', 'Putamen L')
         or ATLAS_BILATERAL ('Putamen'; from the bilateral CSV when it exists, else from the CerebrA CSV)."""
+        structures = neuro.readCerebraLabels(neuro.labelsCsv(atlas))
         if kind == ATLAS_BILATERAL and neuro.BILATERAL_CSV in atlas and os.path.isfile(atlas[neuro.BILATERAL_CSV]):
-            return neuro.readBilateralLabels(atlas[neuro.BILATERAL_CSV])
-        structures = neuro.readCerebraLabels(atlas[neuro.CEREBRA_CSV])
+            entries = neuro.readBilateralLabels(atlas[neuro.BILATERAL_CSV])
+            if [n for _, n, _ in entries] == [st["name"] for st in structures]:
+                return entries
         return neuro.labelTable(structures, mergeSides=kind == ATLAS_BILATERAL)[0]
 
     def atlasPaths(self, atlas, kind):
-        """(labels path, entries) of a CerebrA version; the bilateral one is made first when it is missing."""
+        """(labels path, entries, overlay path or None) of a CerebrA version; the bilateral one and the pons
+        overlays (CerebrA with pons) are made first when they are missing."""
+        lateralOverlay, bilateralOverlay = self.ensurePonsOverlays(atlas)
         if kind == ATLAS_BILATERAL:
             labelsPath, csvPath = self.ensureBilateral(atlas)
-            return labelsPath, neuro.readBilateralLabels(csvPath)
-        return atlas[neuro.CEREBRA_LABELS], self.atlasEntries(atlas, ATLAS_LATERAL)
+            return labelsPath, neuro.readBilateralLabels(csvPath), bilateralOverlay
+        return atlas[neuro.CEREBRA_LABELS], self.atlasEntries(atlas, ATLAS_LATERAL), lateralOverlay
 
     def loadRegions(self, labelsPath, entries, referencePath=None, referenceName=None, referenceEntries=None,
-                    name=REGIONS_NAME):
+                    name=REGIONS_NAME, overlayPath=None, referenceOverlayPath=None):
         """A segmentation of the atlas labels (labelsPath, entries [(value, name, color)]) with their names. The
         reference region referenceName comes from referencePath (another version of the atlas on the same grid, e.g.
         the bilateral one, with its referenceEntries) as a segment of its own, or, when referencePath is labelsPath
-        (or None), is the segment of that name. Returns (segmentation node, reference segment ID or None)."""
+        (or None), is the segment of that name. overlayPath / referenceOverlayPath: label maps of structures that
+        overlap the others (the pons), added as segments of their own. Returns (segmentation node, reference segment
+        ID or None)."""
         scene = slicer.mrmlScene
         array, source = self._loadLabels(labelsPath)
-        colorNode = labelNode = referenceNode = None
+        colorNode = labelNode = referenceNode = overlayNode = None
         try:
             values = {v for v, _, _ in entries}
             remapped = neuro.remapLabels(array, {v: v for v in values}).astype(np.int16)
@@ -459,6 +534,16 @@ class DynamicNeuroPETLogic(ScriptedLoadableModuleLogic):
                 scene.RemoveNode(segmentation)
                 raise RuntimeError("Could not make the CerebrA segmentation")
             self._nameSegments(segmentation, entries)
+            if overlayPath:
+                overlay, overlayNode = self._loadLabels(overlayPath)
+                if overlay.shape != array.shape:
+                    raise ValueError("The pons overlay is not on the grid of the region atlas.")
+                present = set(np.unique(overlay).tolist()) - {0}
+                for value, label, color in entries:
+                    if value in present and self.segmentIdByName(segmentation, label) is None:
+                        self._addMaskSegment(segmentation, overlay == value, labelNode, label, color)
+                scene.RemoveNode(overlayNode)
+                overlayNode = None
             referenceId = None
             if referenceName:
                 if referencePath is None or os.path.normcase(os.path.abspath(referencePath)) == \
@@ -471,7 +556,12 @@ class DynamicNeuroPETLogic(ScriptedLoadableModuleLogic):
                     referenceValue = self.entryValue(referenceEntries or (), referenceName)
                     if referenceValue is None:
                         raise ValueError(f"No region '{referenceName}' in the reference atlas.")
-                    referenceId = self._addMaskSegment(segmentation, referenceArray == referenceValue, labelNode,
+                    referenceMask = referenceArray == referenceValue
+                    if not referenceMask.any() and referenceOverlayPath:      # an overlapping structure (pons)
+                        overlay, overlayNode = self._loadLabels(referenceOverlayPath)
+                        if overlay.shape == array.shape:
+                            referenceMask = overlay == referenceValue
+                    referenceId = self._addMaskSegment(segmentation, referenceMask, labelNode,
                                                        referenceName + REFERENCE_SUFFIX, (0.85, 0.85, 0.2))
             segmentation.SetAttribute(NEURO_PREFIX + "Atlas", os.path.basename(labelsPath))
             display = segmentation.GetDisplayNode()
@@ -479,7 +569,7 @@ class DynamicNeuroPETLogic(ScriptedLoadableModuleLogic):
                 display.SetOpacity2DFill(0.3)
                 display.SetVisibility3D(False)
         finally:
-            for node in (source, labelNode, colorNode, referenceNode):
+            for node in (source, labelNode, colorNode, referenceNode, overlayNode):
                 if node is not None and scene.IsNodePresent(node):
                     scene.RemoveNode(node)
         logging.info(f"Neuro: '{segmentation.GetName()}' made from {os.path.basename(labelsPath)} "
@@ -496,16 +586,21 @@ class DynamicNeuroPETLogic(ScriptedLoadableModuleLogic):
     def loadAtlasRegions(self, atlas, targetKind=None, referenceKind=None, referenceName=None):
         """Regions of the atlas folder (neuro.findAtlasFiles): the target regions from one CerebrA version, the
         reference region from another (default: the left and right regions, the bilateral cerebellar grey matter
-        as the reference). Makes the bilateral version on first use. Returns (segmentation, reference segment ID)."""
+        as the reference). The CerebrA with pons is used when it is in the folder (its pons as segments of their
+        own, over the brainstem). Makes the bilateral version and the pons overlays on first use. Returns
+        (segmentation, reference segment ID)."""
         targetKind = targetKind or ATLAS_LATERAL
         referenceKind = referenceKind or ATLAS_BILATERAL
         atlas = dict(atlas)
         atlas[neuro.BILATERAL_LABELS], atlas[neuro.BILATERAL_CSV] = self.ensureBilateral(atlas)
-        labelsPath, entries = self.atlasPaths(atlas, targetKind)
-        referencePath, referenceEntries = self.atlasPaths(atlas, referenceKind)
+        if neuro.hasPons(atlas):
+            atlas[neuro.PONS_OVERLAY], atlas[neuro.PONS_BILATERAL_OVERLAY] = self.ensurePonsOverlays(atlas)
+        labelsPath, entries, overlayPath = self.atlasPaths(atlas, targetKind)
+        referencePath, referenceEntries, referenceOverlayPath = self.atlasPaths(atlas, referenceKind)
         if referenceName is None:
             referenceName = defaultReferenceName(referenceEntries)
-        return self.loadRegions(labelsPath, entries, referencePath, referenceName, referenceEntries)
+        return self.loadRegions(labelsPath, entries, referencePath, referenceName, referenceEntries,
+                                overlayPath=overlayPath, referenceOverlayPath=referenceOverlayPath)
 
     @staticmethod
     def _addMaskSegment(segmentation, mask, geometryNode, name, color):
@@ -1118,6 +1213,8 @@ class DynamicNeuroPETWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             text = f"{found} atlas file(s) found."
             if missing:
                 text += " Missing: " + ", ".join(missing) + "."
+            if neuro.hasPons(self.atlas):
+                text += " CerebrA with pons found: its regions are used."
             if any(k not in self.atlas for k in neuro.REQUIRED):
                 text = "<span style='color:#c0392b'>" + text + "</span>"
             self.atlasInfo.text = text
@@ -1476,7 +1573,7 @@ class DynamicNeuroPETWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         current = self.referenceRegionCombo.currentText
         kind = self.referenceAtlasCombo.currentData
         try:
-            entries = self.logic.atlasEntries(self.atlas, kind) if neuro.CEREBRA_CSV in self.atlas else []
+            entries = self.logic.atlasEntries(self.atlas, kind) if neuro.labelsCsv(self.atlas) else []
         except Exception:
             logging.warning("Neuro: could not read the CerebrA labels", exc_info=True)
             entries = []
@@ -1866,6 +1963,35 @@ class DynamicNeuroPETTest(ScriptedLoadableModuleTest):
         # a one-sided reference from the left / right atlas
         _, sideRef = logic.loadAtlasRegions(atlas, ATLAS_BILATERAL, ATLAS_LATERAL, "Cerebellum Gray Matter L")
         self.assertIsNotNone(sideRef)
+        # the CerebrA with pons: a segmentation (Segment_<value>, the pons over the brainstem) and its CSV
+        with open(os.path.join(folder, neuro.PONS_CSV_NAME), "w") as f:
+            f.write("Mindboggle ID;Label Name;RH Label;LH Labels;Notes;Dice Kappa\n"
+                    "51;Putamen;21;72;;0,87\n45;Cerebellum Gray Matter;46;97;;0,83\n444;Pons;103;104;;0\n")
+        ponsArray = np.zeros((20, 20, 20), dtype=np.int16)
+        ponsArray[8:10, 8:10, 8:10] = 103
+        ponsArray[8:10, 10:12, 8:10] = 104
+        ponsLabels = slicer.util.addVolumeFromArray(ponsArray, name="pons", nodeClassName="vtkMRMLLabelMapVolumeNode")
+        ponsSegmentation = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLSegmentationNode")
+        slicer.modules.segmentations.logic().ImportLabelmapToSegmentationNode(ponsLabels, ponsSegmentation)
+        for index, value in enumerate((103, 104)):      # imported in the order of the label values
+            ponsSegmentation.GetSegmentation().GetNthSegment(index).SetName(f"Segment_{value}")
+        slicer.util.saveNode(ponsSegmentation, os.path.join(folder, neuro.PONS_STEM + ".seg.nrrd"))
+        slicer.mrmlScene.RemoveNode(ponsSegmentation)
+        slicer.mrmlScene.RemoveNode(ponsLabels)
+        atlas = neuro.findAtlasFiles(folder)
+        self.assertTrue(neuro.hasPons(atlas))
+        withPons, ponsRef = logic.loadAtlasRegions(atlas, ATLAS_LATERAL, ATLAS_BILATERAL, "Pons")
+        names = sorted(withPons.GetSegmentation().GetSegment(i).GetName() for i in logic.segmentIds(withPons))
+        self.assertIn("Pons R", names)
+        self.assertIn("Pons L", names)
+        self.assertEqual(withPons.GetSegmentation().GetSegment(ponsRef).GetName(), "Pons" + REFERENCE_SUFFIX)
+        self.assertEqual(int(np.count_nonzero(slicer.util.arrayFromSegmentBinaryLabelmap(withPons, ponsRef))), 16)
+        # the overlays and the bilateral atlas with the pons were saved next to the files
+        atlas = neuro.findAtlasFiles(folder)
+        self.assertIn(neuro.PONS_OVERLAY, atlas)
+        self.assertIn(neuro.PONS_BILATERAL_OVERLAY, atlas)
+        self.assertEqual([n for _, n, _ in neuro.readBilateralLabels(atlas[neuro.BILATERAL_CSV])],
+                         ["Putamen", "Cerebellum Gray Matter", "Pons"])
         self.delayDisplay("Regions test passed")
 
     def test_Widget(self):

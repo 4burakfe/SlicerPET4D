@@ -169,3 +169,30 @@ def test_mean_and_sd():
         normaldb.meanAndSd([np.zeros(2), np.zeros(3)])
     with pytest.raises(ValueError):
         normaldb.meanAndSd([])
+
+
+def test_modality_nuclides_tracers():
+    assert normaldb.nuclides(normaldb.SPECT) == ["Tc-99m", "I-123", "Tl-201"]
+    assert "F-18" in normaldb.nuclides() and "Tc-99m" not in normaldb.nuclides()
+    assert normaldb.tracers("F-18", normaldb.PET)[:2] == ["F-18", "FDG"]
+    assert "PiB" not in normaldb.tracers("F-18") and "PiB" in normaldb.tracers("c-11")
+    assert normaldb.tracers("Tc-99m", normaldb.SPECT) == ["Tc-99m", "HMPAO", "ECD", "TRODAT-1"]
+    assert normaldb.tracers("Tc-99m", normaldb.PET) == ["Tc-99m"]
+    assert normaldb.tracers("Lu-177") == ["Lu-177"]
+    assert normaldb.tracers("") == []
+    spect = normaldb.newHeader("perfusion", modality=normaldb.SPECT, nuclide="Tc-99m", tracer="HMPAO")
+    assert spect["mapType"] == normaldb.MAP_RATIO and normaldb.validateHeader(spect) == []
+    spect["mapType"] = normaldb.MAP_SUVR
+    assert any("Ratio or Counts" in e for e in normaldb.validateHeader(spect))
+    assert any("modality" in e for e in normaldb.validateHeader(header(modality="CT")))
+    assert normaldb.newHeader("x")["mapType"] == normaldb.MAP_SUVR
+
+
+def test_old_header_defaults_to_pet(tmp_path):
+    folder = normaldb.createDatabase(str(tmp_path), header(name="old"))
+    data = json.load(open(normaldb.headerPath(folder)))
+    del data["modality"]
+    json.dump(data, open(normaldb.headerPath(folder), "w"))
+    loaded = normaldb.readHeader(folder)
+    assert loaded["modality"] == normaldb.PET
+    assert normaldb.summary(folder, loaded)["modality"] == "PET"

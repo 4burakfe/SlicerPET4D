@@ -1,8 +1,8 @@
 """
 Neuro PET Database Manager (3D Slicer module)
 
-Normal databases of brain PET in the MNI ICBM 152 2009c space, kept in a database folder picked by the user (one
-folder per database, see DICOMGatedDynamicPETLib/normaldb.py for the layout):
+Normal databases of brain PET and SPECT in the MNI ICBM 152 2009c space, kept in a database folder picked by the
+user (one folder per database, see DICOMGatedDynamicPETLib/normaldb.py for the layout):
 
     Static tab      the static databases of the folder in a table (name, kind, nuclide, tracer, subjects, reference
                     region, age groups, statistics), with
@@ -26,6 +26,7 @@ import ctk
 import numpy as np
 import qt
 import slicer
+import vtk
 from slicer.ScriptedLoadableModule import (ScriptedLoadableModule, ScriptedLoadableModuleWidget,
                                            ScriptedLoadableModuleLogic, ScriptedLoadableModuleTest)
 
@@ -37,7 +38,7 @@ from DICOMGatedDynamicPETLib import dynamicviews, neuro, normaldb  # noqa: E402
 
 SETTINGS_ROOT = "DICOMGatedDynamicPET/NeuroDatabase/RootFolder"
 SETTINGS_ATLAS_FOLDER = "DICOMGatedDynamicPET/Neuro/AtlasFolder"     # shared with Dynamic Neuro Receptor PET
-COLUMNS = (("name", "Name"), ("kind", "Type"), ("nuclide", "Nuclide"), ("tracer", "Tracer"),
+COLUMNS = (("name", "Name"), ("kind", "Type"), ("modality", "Modality"), ("nuclide", "Nuclide"), ("tracer", "Tracer"),
            ("subjects", "Subjects"), ("reference", "Reference region"), ("ageGroups", "Age groups"),
            ("statistics", "Mean / SD"), ("version", "Version"), ("created", "Created"))
 DEFAULT_SMOOTHING_MM = 8.0
@@ -46,13 +47,13 @@ DEFAULT_SMOOTHING_MM = 8.0
 class NeuroPETDatabaseManager(ScriptedLoadableModule):
     def __init__(self, parent):
         ScriptedLoadableModule.__init__(self, parent)
-        parent.title = "Neuro PET Database Manager"
+        parent.title = "Neuro PET Database Manager"     # PET and SPECT
         parent.categories = ["Nuclear Medicine.PET4D"]
         parent.dependencies = []
         parent.contributors = ["Burak Demir"]
         parent.helpText = (
-            "Normal databases of brain PET in the MNI ICBM 152 2009c space. Pick the database folder; each database "
-            "is a folder in it with its header (database.json), the reference region mask, the subjects (user "
+            "Normal databases of brain PET and SPECT in the MNI ICBM 152 2009c space. Pick the database folder; each "
+            "database is a folder in it with its header (database.json), the reference region mask, the subjects (user "
             "defined databases) and the mean / SD maps (master and per age group). <b>Create new database</b> makes "
             "an empty user defined database, <b>Add predefined database</b> one from a package (.zip) or from mean / "
             "SD maps. A user defined database can be exported as a predefined one.")
@@ -112,6 +113,11 @@ class NeuroPETDatabaseManagerLogic(ScriptedLoadableModuleLogic):
         if regionKey == normaldb.REF_GLOBAL:
             return None if neuro.BRAIN_MASK in atlas else "The atlas folder has no MNI brain mask " \
                 "(mni_icbm152_t1_tal_nlin_sym_09c_mask)"
+        if regionKey == normaldb.REF_PONS:
+            if neuro.PONS_LABELS not in atlas or neuro.PONS_CSV not in atlas:
+                return (f"The atlas folder has no CerebrA with pons ({neuro.PONS_STEM}.seg.nrrd and "
+                        f"{neuro.PONS_CSV_NAME})")
+            return None
         if neuro.CEREBRA_LABELS not in atlas or neuro.CEREBRA_CSV not in atlas:
             return "The atlas folder has no CerebrA labels (mni_icbm152_CerebrA_tal_nlin_sym_09c and its CSV)"
         return None
@@ -133,6 +139,8 @@ class NeuroPETDatabaseManagerLogic(ScriptedLoadableModuleLogic):
         if problem:
             raise ValueError(problem)
         atlas = neuro.findAtlasFiles(atlasFolder)
+        if key == normaldb.REF_PONS:
+            return self._writeSegmentationMask(folder, header, atlas)
         if key == normaldb.REF_GLOBAL:
             source = slicer.util.loadLabelVolume(atlas[neuro.BRAIN_MASK], {"show": False})
             values = None
@@ -161,6 +169,46 @@ class NeuroPETDatabaseManagerLogic(ScriptedLoadableModuleLogic):
             slicer.mrmlScene.RemoveNode(source)
             if target is not None:
                 slicer.mrmlScene.RemoveNode(target)
+        header["referenceMask"] = relative
+        return relative
+
+    def _writeSegmentationMask(self, folder, header, atlas):
+        """Pons mask from the CerebrA with pons (a segmentation file): the segments of the Pons labels of its CSV,
+        on the grid of the CerebrA labels (else of the T1 template, else the segmentation's own)."""
+        structures = neuro.readCerebraLabels(atlas[neuro.PONS_CSV])
+        values = neuro.structureValues(structures, neuro.PONS)
+        if not values:
+            raise ValueError(f"{neuro.PONS_CSV_NAME} has no '{neuro.PONS}' row")
+        wanted = neuro.segmentNamesOfLabels(values, neuro.PONS)
+        segmentationNode = slicer.util.loadSegmentation(atlas[neuro.PONS_LABELS], {"show": False})
+        referencePath = atlas.get(neuro.CEREBRA_LABELS) or atlas.get(neuro.DEFAULT_TEMPLATE)
+        reference = (slicer.util.loadVolume(referencePath, {"show": False, "labelmap": True})
+                     if referencePath else None)
+        labelNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLLabelMapVolumeNode", "pons mask")
+        try:
+            segmentation = segmentationNode.GetSegmentation()
+            ids = vtk.vtkStringArray()
+            for index in range(segmentation.GetNumberOfSegments()):
+                segmentId = segmentation.GetNthSegmentID(index)
+                if segmentation.GetSegment(segmentId).GetName().strip().lower() in wanted:
+                    ids.InsertNextValue(segmentId)
+            if ids.GetNumberOfValues() == 0:
+                raise ValueError(f"No pons segment in {os.path.basename(atlas[neuro.PONS_LABELS])} (segments named "
+                                 + ", ".join(f"Segment_{v}" for v in values) + " expected)")
+            if not slicer.modules.segmentations.logic().ExportSegmentsToLabelmapNode(
+                    segmentationNode, ids, labelNode, reference):
+                raise ValueError("The pons segments could not be exported")
+            array = slicer.util.arrayFromVolume(labelNode)
+            if not array.any():
+                raise ValueError("The pons mask is empty")
+            slicer.util.updateVolumeFromArray(labelNode, (array > 0).astype(np.uint8))
+            relative = normaldb.REFERENCE_MASK_NAME
+            if not slicer.util.saveNode(labelNode, os.path.join(folder, relative)):
+                raise ValueError("The reference mask could not be saved")
+        finally:
+            for node in (segmentationNode, reference, labelNode):
+                if node is not None:
+                    slicer.mrmlScene.RemoveNode(node)
         header["referenceMask"] = relative
         return relative
 
@@ -211,13 +259,18 @@ class HeaderForm:
         self.nameEdit.placeholderText = "e.g. FDG normals 2026"
         self.nameEdit.toolTip = "The database folder is named after it."
         form.addRow("Name:", self.nameEdit)
+        self.modalityCombo = qt.QComboBox()
+        self.modalityCombo.addItems(list(normaldb.MODALITIES))
+        self.modalityCombo.toolTip = "PET (SUV / SUVR maps) or SPECT (counts / ratio maps)."
+        form.addRow("Modality:", self.modalityCombo)
         self.nuclideCombo = qt.QComboBox()
         self.nuclideCombo.editable = True
-        self.nuclideCombo.addItems(list(normaldb.NUCLIDES))
+        self.nuclideCombo.toolTip = "Nuclides of the modality; another one can be typed."
         form.addRow("Nuclide:", self.nuclideCombo)
         self.tracerCombo = qt.QComboBox()
         self.tracerCombo.editable = True
-        self.tracerCombo.addItems(list(normaldb.TRACERS))
+        self.tracerCombo.toolTip = ("Tracers of the nuclide. The nuclide itself means the tracer is not given; "
+                                    "another tracer can be typed.")
         form.addRow("Tracer:", self.tracerCombo)
         acquisition = qt.QHBoxLayout()
         self.startSpin = qt.QDoubleSpinBox()
@@ -275,8 +328,8 @@ class HeaderForm:
         refForm.addRow("Smoothing:", self.smoothingSpin)
         if predefined:
             self.mapTypeCombo = qt.QComboBox()
-            self.mapTypeCombo.addItems(list(normaldb.MAP_TYPES))
-            self.mapTypeCombo.toolTip = "What the mean / SD maps hold: SUVR (divided by the reference) or SUV."
+            self.mapTypeCombo.toolTip = ("What the mean / SD maps hold: PET SUVR (divided by the reference) or SUV, "
+                                         "SPECT ratio (counts divided by the reference) or counts.")
             refForm.addRow("Map type:", self.mapTypeCombo)
         outer.addWidget(refBox)
 
@@ -323,6 +376,30 @@ class HeaderForm:
         self.referenceCombo.connect("currentIndexChanged(int)", lambda i: self._updateReference())
         self._updateAge()
         self._updateReference()
+        self.modalityCombo.connect("currentIndexChanged(int)", lambda i: self._updateModality())
+        self.nuclideCombo.connect("currentTextChanged(QString)", self._updateTracers)
+        self._updateModality()
+
+    # --- modality, nuclide, tracer --------------------------------------------------------------------
+    def _updateModality(self):
+        modality = self.modalityCombo.currentText
+        self.nuclideCombo.blockSignals(True)
+        self.nuclideCombo.clear()
+        self.nuclideCombo.addItems(normaldb.nuclides(modality))
+        self.nuclideCombo.currentIndex = 0
+        self.nuclideCombo.blockSignals(False)
+        self._updateTracers(self.nuclideCombo.currentText)
+        if self.predefined:
+            self.mapTypeCombo.clear()
+            self.mapTypeCombo.addItems(list(normaldb.mapTypes(modality)))
+
+    def _updateTracers(self, nuclide):
+        """The tracers of the nuclide: the nuclide itself (tracer not given) first, then the second one (the usual
+        tracer) selected."""
+        options = normaldb.tracers(nuclide, self.modalityCombo.currentText)
+        self.tracerCombo.clear()
+        self.tracerCombo.addItems(options)
+        self.tracerCombo.currentIndex = 1 if len(options) > 1 else 0
 
     # --- age table -----------------------------------------------------------------------------------
     def _firstGroupRow(self):
@@ -402,9 +479,11 @@ class HeaderForm:
     def header(self):
         stratified = bool(self.ageCheck.checked)
         fields = dict(
+            modality=self.modalityCombo.currentText,
             nuclide=self.nuclideCombo.currentText.strip(),
             tracer=self.tracerCombo.currentText.strip(),
-            acquisition={"startMinutes": float(self.startSpin.value), "durationMinutes": float(self.durationSpin.value)},
+            acquisition={"startMinutes": float(self.startSpin.value),
+                         "durationMinutes": float(self.durationSpin.value)},
             segmentation=self.segmentationEdit.text.strip(),
             referenceRegion=self.referenceKey(),
             smoothingFwhmMm=float(self.smoothingSpin.value),
@@ -786,4 +865,27 @@ class NeuroPETDatabaseManagerTest(ScriptedLoadableModuleTest):
         self.assertEqual(int(np.count_nonzero(slicer.util.arrayFromVolume(mask))), 16)
         normaldb.deleteDatabase(folder, root)
         self.assertFalse(os.path.exists(folder))
+        # pons from the CerebrA with pons (a segmentation whose segments are named Segment_<label value>)
+        with open(os.path.join(atlasFolder, neuro.PONS_CSV_NAME), "w") as f:
+            f.write("Mindboggle ID;Label Name;RH Label;LH Labels;Notes;Dice Kappa\n"
+                    "16;Brainstem;11;62;;0,65\n444;Pons;103;104;;0\n")
+        ponsArray = np.zeros((10, 10, 10), dtype=np.int16)
+        ponsArray[4:6, 4:6, 4:6] = 103
+        ponsArray[4:6, 4:6, 6:8] = 104
+        ponsArray[0, 0, 0] = 46
+        labels = slicer.util.addVolumeFromArray(ponsArray, name="pons", nodeClassName="vtkMRMLLabelMapVolumeNode")
+        segmentationNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLSegmentationNode")
+        slicer.modules.segmentations.logic().ImportLabelmapToSegmentationNode(labels, segmentationNode)
+        segmentation = segmentationNode.GetSegmentation()
+        values = (46, 103, 104)      # imported in the order of the label values
+        for index in range(segmentation.GetNumberOfSegments()):
+            segmentation.GetNthSegment(index).SetName(f"Segment_{values[index]}")
+        slicer.util.saveNode(segmentationNode, os.path.join(atlasFolder, neuro.PONS_STEM + ".seg.nrrd"))
+        slicer.mrmlScene.RemoveNode(segmentationNode)
+        slicer.mrmlScene.RemoveNode(labels)
+        header = normaldb.newHeader("pons", nuclide="F-18", tracer="FDG", referenceRegion=normaldb.REF_PONS)
+        self.assertIsNone(logic.maskSourceProblem(normaldb.REF_PONS, atlasFolder))
+        folder = logic.createUserDefined(root, header, atlasFolder)
+        mask = slicer.util.loadLabelVolume(os.path.join(folder, normaldb.REFERENCE_MASK_NAME), {"show": False})
+        self.assertEqual(int(np.count_nonzero(slicer.util.arrayFromVolume(mask))), 16)
         self.delayDisplay("Reference mask test passed")
