@@ -1,8 +1,8 @@
 """
 Neuro PET Database Manager (3D Slicer module)
 
-Normal databases of brain PET in the MNI ICBM 152 2009c space, kept in a database folder picked by the user (one
-folder per database, see DICOMGatedDynamicPETLib/normaldb.py for the layout):
+Normal databases of brain PET and SPECT in the MNI ICBM 152 2009c space, kept in a database folder picked by the
+user (one folder per database, see DICOMGatedDynamicPETLib/normaldb.py for the layout):
 
     Static tab      the static databases of the folder in a table (name, kind, nuclide, tracer, subjects, reference
                     region, age groups, statistics), with
@@ -37,7 +37,7 @@ from DICOMGatedDynamicPETLib import dynamicviews, neuro, normaldb  # noqa: E402
 
 SETTINGS_ROOT = "DICOMGatedDynamicPET/NeuroDatabase/RootFolder"
 SETTINGS_ATLAS_FOLDER = "DICOMGatedDynamicPET/Neuro/AtlasFolder"     # shared with Dynamic Neuro Receptor PET
-COLUMNS = (("name", "Name"), ("kind", "Type"), ("nuclide", "Nuclide"), ("tracer", "Tracer"),
+COLUMNS = (("name", "Name"), ("kind", "Type"), ("modality", "Modality"), ("nuclide", "Nuclide"), ("tracer", "Tracer"),
            ("subjects", "Subjects"), ("reference", "Reference region"), ("ageGroups", "Age groups"),
            ("statistics", "Mean / SD"), ("version", "Version"), ("created", "Created"))
 DEFAULT_SMOOTHING_MM = 8.0
@@ -46,13 +46,13 @@ DEFAULT_SMOOTHING_MM = 8.0
 class NeuroPETDatabaseManager(ScriptedLoadableModule):
     def __init__(self, parent):
         ScriptedLoadableModule.__init__(self, parent)
-        parent.title = "Neuro PET Database Manager"
+        parent.title = "Neuro PET Database Manager"     # PET and SPECT
         parent.categories = ["Nuclear Medicine.PET4D"]
         parent.dependencies = []
         parent.contributors = ["Burak Demir"]
         parent.helpText = (
-            "Normal databases of brain PET in the MNI ICBM 152 2009c space. Pick the database folder; each database "
-            "is a folder in it with its header (database.json), the reference region mask, the subjects (user "
+            "Normal databases of brain PET and SPECT in the MNI ICBM 152 2009c space. Pick the database folder; each "
+            "database is a folder in it with its header (database.json), the reference region mask, the subjects (user "
             "defined databases) and the mean / SD maps (master and per age group). <b>Create new database</b> makes "
             "an empty user defined database, <b>Add predefined database</b> one from a package (.zip) or from mean / "
             "SD maps. A user defined database can be exported as a predefined one.")
@@ -211,13 +211,18 @@ class HeaderForm:
         self.nameEdit.placeholderText = "e.g. FDG normals 2026"
         self.nameEdit.toolTip = "The database folder is named after it."
         form.addRow("Name:", self.nameEdit)
+        self.modalityCombo = qt.QComboBox()
+        self.modalityCombo.addItems(list(normaldb.MODALITIES))
+        self.modalityCombo.toolTip = "PET (SUV / SUVR maps) or SPECT (counts / ratio maps)."
+        form.addRow("Modality:", self.modalityCombo)
         self.nuclideCombo = qt.QComboBox()
         self.nuclideCombo.editable = True
-        self.nuclideCombo.addItems(list(normaldb.NUCLIDES))
+        self.nuclideCombo.toolTip = "Nuclides of the modality; another one can be typed."
         form.addRow("Nuclide:", self.nuclideCombo)
         self.tracerCombo = qt.QComboBox()
         self.tracerCombo.editable = True
-        self.tracerCombo.addItems(list(normaldb.TRACERS))
+        self.tracerCombo.toolTip = ("Tracers of the nuclide. The nuclide itself means the tracer is not given; "
+                                    "another tracer can be typed.")
         form.addRow("Tracer:", self.tracerCombo)
         acquisition = qt.QHBoxLayout()
         self.startSpin = qt.QDoubleSpinBox()
@@ -275,8 +280,8 @@ class HeaderForm:
         refForm.addRow("Smoothing:", self.smoothingSpin)
         if predefined:
             self.mapTypeCombo = qt.QComboBox()
-            self.mapTypeCombo.addItems(list(normaldb.MAP_TYPES))
-            self.mapTypeCombo.toolTip = "What the mean / SD maps hold: SUVR (divided by the reference) or SUV."
+            self.mapTypeCombo.toolTip = ("What the mean / SD maps hold: PET SUVR (divided by the reference) or SUV, "
+                                         "SPECT ratio (counts divided by the reference) or counts.")
             refForm.addRow("Map type:", self.mapTypeCombo)
         outer.addWidget(refBox)
 
@@ -323,6 +328,30 @@ class HeaderForm:
         self.referenceCombo.connect("currentIndexChanged(int)", lambda i: self._updateReference())
         self._updateAge()
         self._updateReference()
+        self.modalityCombo.connect("currentIndexChanged(int)", lambda i: self._updateModality())
+        self.nuclideCombo.connect("currentTextChanged(QString)", self._updateTracers)
+        self._updateModality()
+
+    # --- modality, nuclide, tracer --------------------------------------------------------------------
+    def _updateModality(self):
+        modality = self.modalityCombo.currentText
+        self.nuclideCombo.blockSignals(True)
+        self.nuclideCombo.clear()
+        self.nuclideCombo.addItems(normaldb.nuclides(modality))
+        self.nuclideCombo.currentIndex = 0
+        self.nuclideCombo.blockSignals(False)
+        self._updateTracers(self.nuclideCombo.currentText)
+        if self.predefined:
+            self.mapTypeCombo.clear()
+            self.mapTypeCombo.addItems(list(normaldb.mapTypes(modality)))
+
+    def _updateTracers(self, nuclide):
+        """The tracers of the nuclide: the nuclide itself (tracer not given) first, then the second one (the usual
+        tracer) selected."""
+        options = normaldb.tracers(nuclide, self.modalityCombo.currentText)
+        self.tracerCombo.clear()
+        self.tracerCombo.addItems(options)
+        self.tracerCombo.currentIndex = 1 if len(options) > 1 else 0
 
     # --- age table -----------------------------------------------------------------------------------
     def _firstGroupRow(self):
@@ -402,9 +431,11 @@ class HeaderForm:
     def header(self):
         stratified = bool(self.ageCheck.checked)
         fields = dict(
+            modality=self.modalityCombo.currentText,
             nuclide=self.nuclideCombo.currentText.strip(),
             tracer=self.tracerCombo.currentText.strip(),
-            acquisition={"startMinutes": float(self.startSpin.value), "durationMinutes": float(self.durationSpin.value)},
+            acquisition={"startMinutes": float(self.startSpin.value),
+                         "durationMinutes": float(self.durationSpin.value)},
             segmentation=self.segmentationEdit.text.strip(),
             referenceRegion=self.referenceKey(),
             smoothingFwhmMm=float(self.smoothingSpin.value),
