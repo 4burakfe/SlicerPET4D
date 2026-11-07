@@ -150,7 +150,8 @@ def model(key):
 def defaultOptions(key=None):
     """Options of fit() and parametricMaps(); every model ignores the ones it does not use."""
     options = {"weighting": WEIGHT_DURATION, "tStar": DEFAULT_TSTAR_MIN, "autoTStar": False,
-               "maxError": DEFAULT_MAX_ERROR, "k2ref": None, "window": None, "parameters": None, "starts": 4}
+               "maxError": DEFAULT_MAX_ERROR, "k2ref": None, "window": None, "parameters": None, "starts": 4,
+               "clipNegative": True}
     if key is not None:
         options["parameters"] = model(key).defaultParameters()
     return options
@@ -863,7 +864,8 @@ VOXEL_MAPS = {"1TC": ("K1", "k2", "vB", "VT"), "Patlak": ("Ki", "V0"), "Logan": 
 def parametricMaps(key, frames, data, inputFunction=None, reference=None, blood=None, options=None):
     """Voxel-wise values of a model for data (frames x voxels): {name: array of voxels} (VOXEL_MAPS[key]). The
     compartment models with more than one tissue compartment have no voxel-wise version. The graphical methods
-    use options["tStar"] (fixed, minutes), the same for every voxel."""
+    use options["tStar"] (fixed, minutes), the same for every voxel. With options["clipNegative"] (default) negative
+    values (noise in voxels with little uptake, not physical for these parameters) are set to 0."""
     spec = model(key)
     if key not in VOXEL_MAPS:
         raise ValueError(f"{spec.title} has no voxel-wise version (use the region fit)")
@@ -910,7 +912,10 @@ def parametricMaps(key, frames, data, inputFunction=None, reference=None, blood=
         array = np.asarray(values[name], dtype=float)
         if array.ndim == 0:
             array = np.full(data.shape[1], float(array))
-        out[name] = np.where(np.isfinite(array), array, 0.0).astype(np.float32)
+        array = np.where(np.isfinite(array), array, 0.0)
+        if opts.get("clipNegative"):
+            array = np.maximum(array, 0.0)
+        out[name] = array.astype(np.float32)
     return out
 
 

@@ -261,3 +261,15 @@ def test_parameters_from_dicts():
     assert kin.model("2TC").parameters[3].fitted       # the model's own defaults stay as they were
     with pytest.raises(ValueError):
         kin.model("XYZ")
+
+
+def test_voxel_maps_clip_negative(setting):
+    frames, starts, ends, _ = setting
+    t, reference = simulate(K1=0.1, k2=0.15)
+    ref = kin.FrameInput(frames, frameMeans(t, reference, starts, ends))
+    data = np.column_stack([ref.frameMeans(), 0.5 * ref.frameMeans()])     # SUVR 1 and 0.5: BPnd 0 and -0.5
+    clipped = kin.parametricMaps("LoganRef", frames, data, reference=ref, options={"tStar": 30.0})
+    assert float(clipped["BPnd"][1]) == 0.0
+    raw = kin.parametricMaps("LoganRef", frames, data, reference=ref,
+                             options={"tStar": 30.0, "clipNegative": False})
+    assert float(raw["BPnd"][1]) == pytest.approx(-0.5, abs=0.02)

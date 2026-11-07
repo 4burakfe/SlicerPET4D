@@ -424,8 +424,9 @@ The **Dynamic PET Modeling** module (Nuclear Medicine > PET4D) fits kinetic mode
 - **Voxel-wise calculation:** parametric maps for **1TC** (K1, k2, vB, VT, basis functions), **Patlak** (Ki, V0),
   **Logan** (VT), **Logan reference** (DVR, BPnd), **SRTM** (BPnd, R1, k2, basis functions, Gunn 1997) and **SUVR**,
   as new volumes on the PET grid. Voxels below a percentage (5 %) of the 99.9th percentile of the mean activity, or
-  outside the segments when asked, are 0. The graphical methods use the target's t\*. The first map is shown over
-  the summed image.
+  outside the segments when asked, are 0. **Negative values are clipped to 0** by default (noise in voxels with
+  little uptake; untick *Clip negative values to 0* to keep them; the region fits are not clipped). The graphical
+  methods use the target's t\*. The BPnd map (else the first map) is shown in the large view at full opacity.
 - **Layout:** the upper half has the **summed image** (or the middle frame) with the **target and reference
   segments** on the left third and the **frames** (as in Review/Edit) on the right. The lower half is a dock with the
   **TACs** on the left (target and reference thick and opaque, the other segments faint; fitted models dashed; the
