@@ -676,7 +676,7 @@ class ModelingSession:
                 self.mapVolume.GetID() if self.mapVolume is not None and slicer.mrmlScene.IsNodePresent(
                     self.mapVolume) else None, None)
 
-    def setMapVolume(self, volume, opacity=0.6):
+    def setMapVolume(self, volume, opacity=1.0):
         """A parametric map over the summed image in the large view (None: none)."""
         self.mapVolume = volume
         main = self._widget(MAIN_VIEW)
@@ -1052,6 +1052,11 @@ class DynamicPETModelingWidget(ScriptedLoadableModuleWidget, VTKObservationMixin
         mapForm.addRow("Background threshold:", self.mapThresholdSpin)
         self.insideCheck = qt.QCheckBox("Only inside the segments")
         mapForm.addRow(self.insideCheck)
+        self.clipCheck = qt.QCheckBox("Clip negative values to 0")
+        self.clipCheck.checked = True
+        self.clipCheck.toolTip = ("Negative map values (noise in voxels with little uptake, e.g. BPnd < 0 or Ki < 0) "
+                                  "are set to 0. The region fits are not changed.")
+        mapForm.addRow(self.clipCheck)
         self.mapButton = qt.QPushButton("Compute parametric maps")
         mapForm.addRow(self.mapButton)
         self.mapLabel = qt.QLabel()
@@ -1729,6 +1734,7 @@ class DynamicPETModelingWidget(ScriptedLoadableModuleWidget, VTKObservationMixin
             return
         key = self.modelKey()
         options = self.options()
+        options["clipNegative"] = self.clipCheck.checked
         target = self.results.get(self.targetId())
         if kin.model(key).method == "graphical" and self.autoTStarCheck.checked:
             if target is None or target.get("error") or self.resultsModel != key:
@@ -1759,9 +1765,10 @@ class DynamicPETModelingWidget(ScriptedLoadableModuleWidget, VTKObservationMixin
             return
         names = ", ".join(node.GetName() for node in maps.values())
         tStar = f" (t* {options['tStar']:.1f} min)" if kin.model(key).method == "graphical" else ""
-        self.mapLabel.text = f"Made {names}{tStar}. The first one is shown over the summed image."
+        shown = maps.get("BPnd") or next(iter(maps.values()))
+        self.mapLabel.text = f"Made {names}{tStar}. {shown.GetName()} is shown in the large view."
         if self.session is not None:
-            self.session.setMapVolume(next(iter(maps.values())))
+            self.session.setMapVolume(shown)
 
     # --- layout --------------------------------------------------------------------------------
     def onOpen(self):
