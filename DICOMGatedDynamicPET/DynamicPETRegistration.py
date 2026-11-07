@@ -107,6 +107,30 @@ def _center(node, world=False):
     return [(bounds[2 * a] + bounds[2 * a + 1]) / 2.0 for a in range(3)]
 
 
+def setDisplacementField(transformNode, displacement, ijkToWorld):
+    """Displacement field [k, j, i, 3] (world RAS mm, from parent: the child point of world point x is x + d(x)) on a
+    grid placed by ijkToWorld, as the transform from parent of a grid transform node (as in EasyReg)."""
+    from vtk.util import numpy_support
+    matrix = np.asarray(ijkToWorld, dtype=float)
+    spacing = np.linalg.norm(matrix[:3, :3], axis=0)
+    direction = np.eye(4)
+    direction[:3, :3] = matrix[:3, :3] / spacing[None, :]
+    nk, nj, ni = displacement.shape[:3]
+    grid = vtk.vtkImageData()
+    grid.SetOrigin(*matrix[:3, 3])
+    grid.SetSpacing(*spacing)
+    grid.SetExtent(0, ni - 1, 0, nj - 1, 0, nk - 1)
+    vectors = numpy_support.numpy_to_vtk(np.ascontiguousarray(displacement, dtype=np.float64).reshape(-1, 3),
+                                         deep=True, array_type=vtk.VTK_DOUBLE)
+    vectors.SetNumberOfComponents(3)
+    grid.GetPointData().SetScalars(vectors)
+    gridTransform = slicer.vtkOrientedGridTransform()
+    gridTransform.SetDisplacementGridData(grid)
+    gridTransform.SetGridDirectionMatrix(_vtkMatrix(direction))
+    gridTransform.SetInterpolationModeToCubic()
+    transformNode.SetAndObserveTransformFromParent(gridTransform)
+
+
 def _modality(node):
     """'CT', 'MR', 'PT', ... from the DICOM database for a volume loaded from DICOM, else ''."""
     try:
@@ -140,6 +164,58 @@ def _looksLikeCT(node):
     return array.size > 0 and float(np.min(array[::4, ::4, ::4])) < -500.0
 
 
+def iterativeOptions(form, gridMm=reg.DEFAULT_ITERATIVE_GRID_MM, linear=reg.DEFAULT_ITERATIVE_LINEAR):
+    """The iterative engine's options in a form layout (also used by the Neuro normalization). Returns the widgets
+    for iterativeSettings()."""
+    from DICOMGatedDynamicPETLib import sitkreg as SR
+    linearCombo = qt.QComboBox()
+    for name in reg.ITERATIVE_LINEAR_TYPES:
+        linearCombo.addItem(name, name)
+    linearCombo.setCurrentIndex(linearCombo.findData(linear))
+    linearCombo.toolTip = "Linear stage, run first: rigid (shifts and angles) or affine (adds scaling and shear)"
+    form.addRow("Linear stage:", linearCombo)
+    deformableCheck = qt.QCheckBox("Then deformable (iterative B-spline passes)")
+    deformableCheck.checked = reg.DEFAULT_ITERATIVE_DEFORMABLE
+    deformableCheck.toolTip = (f"{SR.DEFAULT_DEFORMABLE_PASSES} B-spline passes after the linear stage, the control "
+                               "points twice as close each pass, ending at the grid below; a pass is kept only when "
+                               "it improves the match and does not fold the image")
+    form.addRow(deformableCheck)
+    gridCombo = qt.QComboBox()
+    for title, mm in SR.GRID_SPACING_CHOICES:
+        gridCombo.addItem(title.replace("; liver", ""), mm)
+    index = gridCombo.findData(gridMm)
+    gridCombo.setCurrentIndex(index if index >= 0 else 0)
+    gridCombo.toolTip = "Control-point spacing of the last deformable pass: coarser is stiffer"
+    form.addRow("Deformable grid:", gridCombo)
+    spacingCombo = qt.QComboBox()
+    for title, mm in SR.FINAL_SPACING_CHOICES:
+        spacingCombo.addItem(title, mm)
+    spacingCombo.setCurrentIndex(spacingCombo.findData(reg.DEFAULT_ITERATIVE_SPACING_MM))
+    spacingCombo.toolTip = ("Resolution of the last level (the images are averaged down to it): 2 mm is plenty for "
+                            "PET; finer takes longer")
+    form.addRow("Final resolution:", spacingCombo)
+    qualityCombo = qt.QComboBox()
+    for name in SR.QUALITY_SAMPLES:
+        qualityCombo.addItem(name, name)
+    qualityCombo.setCurrentIndex(qualityCombo.findData(reg.DEFAULT_ITERATIVE_QUALITY))
+    qualityCombo.toolTip = "Number of sample points of the metric per level"
+    form.addRow("Quality:", qualityCombo)
+    deformableCheck.connect("toggled(bool)", lambda on: setattr(gridCombo, "enabled", on))
+    return {"linear": linearCombo, "deformable": deformableCheck, "grid": gridCombo, "spacing": spacingCombo,
+            "quality": qualityCombo}
+
+
+def iterativeSettings(widgets):
+    """Settings of the iterative engine from the widgets of iterativeOptions()."""
+    def data(combo):
+        return combo.itemData(combo.currentIndex)
+    return {"iterativeLinear": data(widgets["linear"]) or reg.DEFAULT_ITERATIVE_LINEAR,
+            "iterativeDeformable": bool(widgets["deformable"].checked),
+            "iterativeGridMm": float(data(widgets["grid"]) or reg.DEFAULT_ITERATIVE_GRID_MM),
+            "iterativeSpacingMm": float(data(widgets["spacing"]) or reg.DEFAULT_ITERATIVE_SPACING_MM),
+            "iterativeQuality": data(widgets["quality"]) or reg.DEFAULT_ITERATIVE_QUALITY}
+
+
 # ---------------------------------------------------------------------------
 # Logic
 # ---------------------------------------------------------------------------
@@ -152,14 +228,26 @@ class DynamicPETRegistrationLogic(ScriptedLoadableModuleLogic):
         samplingPercentage, bsplineGrid    BRAINSFit details
         workingVoxelMm       voxel size of the CT/MR copy the resampled steps register to (0: the PET voxel size; a
                              CT/MR that is not finer is used as it is), see workingFixed()
+        engine               reg.ENGINE_BRAINSFIT (the steps above) or reg.ENGINE_ITERATIVE (registerIterative: the
+                             multi-resolution engine of EasyReg, a rigid / affine stage then iterative B-spline passes)
+        iterativeLinear, iterativeDeformable, iterativeGridMm, iterativeSpacingMm, iterativeQuality
+                             the iterative engine's linear stage, deformable passes on / off, control-point spacing of
+                             the last pass, final working resolution (mm) and quality (sitkreg.QUALITY_SAMPLES)
+        movingFunctional     the moving image is a PET (True) or an anatomical image (iterative engine intensities)
     """
 
     @staticmethod
     def defaultSettings():
-        return {"steps": list(reg.DEFAULT_STEPS), "resample": reg.resampleFlags(reg.DEFAULT_STEPS),
+        return {"engine": reg.DEFAULT_ENGINE,
+                "steps": list(reg.DEFAULT_STEPS), "resample": reg.resampleFlags(reg.DEFAULT_STEPS),
                 "initialization": reg.DEFAULT_INITIALIZATION,
                 "samplingPercentage": reg.DEFAULT_SAMPLING, "bsplineGrid": reg.DEFAULT_BSPLINE_GRID,
-                "workingVoxelMm": reg.DEFAULT_WORKING_VOXEL_MM}
+                "workingVoxelMm": reg.DEFAULT_WORKING_VOXEL_MM,
+                "iterativeLinear": reg.DEFAULT_ITERATIVE_LINEAR,
+                "iterativeDeformable": reg.DEFAULT_ITERATIVE_DEFORMABLE,
+                "iterativeGridMm": reg.DEFAULT_ITERATIVE_GRID_MM,
+                "iterativeSpacingMm": reg.DEFAULT_ITERATIVE_SPACING_MM,
+                "iterativeQuality": reg.DEFAULT_ITERATIVE_QUALITY, "movingFunctional": True}
 
     @staticmethod
     def helperVolume(name, source=None):
@@ -240,13 +328,70 @@ class DynamicPETRegistrationLogic(ScriptedLoadableModuleLogic):
                      f"{', '.join(f'{v:.3g}' for v in spacing)} mm ({dims[0]} x {dims[1]} x {dims[2]})")
         return working
 
+    def registerIterative(self, fixed, moving, settings, progress=None):
+        """The iterative multi-resolution engine (sitkreg): moving (not under a transform) registered to fixed with a
+        rigid / affine stage, then B-spline passes coarse to fine, on a working grid of a few mm (little memory).
+        Returns the same dict as register(): "linear" is the linear matrix, "bspline" a hidden grid transform node with
+        the deformable part (to go under the linear one), "deformation" its stats; also "notes" and "metric"."""
+        from DICOMGatedDynamicPETLib import sitkreg as SR
+        if fixed.GetParentTransformNode() is not None:
+            raise ValueError(f"The CT/MR '{fixed.GetName()}' is under a transform. Harden or remove it first.")
+        if not SR.sitkAvailable():
+            raise RuntimeError("SimpleITK is not available in this Slicer.")
+        defaults = self.defaultSettings()
+        get = lambda key: settings.get(key, defaults[key])  # noqa: E731
+        linear, deformable = get("iterativeLinear"), bool(get("iterativeDeformable"))
+        steps = reg.iterativeSteps(linear, deformable)
+        fixedArray = slicer.util.arrayFromVolume(fixed)
+        movingArray = slicer.util.arrayFromVolume(moving)
+        fixedMatrix = _ijkToRas(fixed)
+        images = (SR.ImageInput(fixedArray, fixedMatrix, SR.imageKind(fixedArray)),
+                  SR.ImageInput(movingArray, _ijkToRas(moving),
+                                SR.imageKind(movingArray, functional=bool(get("movingFunctional")))))
+        state = {"cancelled": False}
+
+        def report(text):
+            if progress is not None and progress(0, len(steps), text) is False:
+                state["cancelled"] = True
+
+        result = {"steps": [], "linear": np.eye(4), "bspline": None, "deformation": None, "center": _center(moving),
+                  "stopped": False, "notes": [], "metric": None}
+        try:
+            output = SR.register(images[0], images[1], None, SR.AFFINE if linear == "Affine" else SR.RIGID,
+                                 float(get("iterativeSpacingMm")), get("iterativeQuality"), None,
+                                 reg.iterativeInitialization(get("initialization")), progress=report,
+                                 isCancelled=lambda: state["cancelled"], deformable=deformable,
+                                 gridSpacingMm=float(get("iterativeGridMm")),
+                                 fieldGeometry=(fixedArray.shape, fixedMatrix) if deformable else None)
+        except SR.RegistrationCancelled:
+            result["stopped"] = True
+            return result
+        result.update(linear=np.asarray(output["matrix"], dtype=float), notes=list(output["notes"]),
+                      metric=(output["initialMetric"], output["finalMetric"]))
+        displacement = output.get("displacement")
+        if displacement is not None:
+            residual = reg.residualField(displacement, output["fieldIjkToWorld"], result["linear"])
+            node = self.transformNode("vtkMRMLGridTransformNode", "PET registration deformable")
+            setDisplacementField(node, residual, output["fieldIjkToWorld"])
+            result["bspline"] = node
+            result["deformation"] = reg.fieldStats(residual)
+            result["steps"] = steps
+        else:
+            result["steps"] = steps[:1]
+        logging.info(f"Dynamic PET to CT/MR registration (iterative) of '{moving.GetName()}' to '{fixed.GetName()}' "
+                     f"in {output['seconds']:.0f} s: " + " ".join(result["notes"]))
+        return result
+
     def register(self, fixed, petSource, settings, progress=None):
         """Register petSource (a PET volume, not under a transform) to fixed (CT/MR) in the settings' steps. Every
         step starts where the previous ended: the linear steps are chained by moving the PET's geometry (lossless),
         and a B-spline step registers the PET as the linear steps left it. progress(index, total, text) returns
         False to stop. Returns {"steps", "linear" (4x4, PET -> CT/MR), "bspline" (B-spline transform node, hidden,
         from the PET after the linear steps to the CT/MR, or None), "deformation" (reg.displacementStats of the
-        B-spline, or None), "center" (centre of the PET, mm), "stopped"}."""
+        B-spline, or None), "center" (centre of the PET, mm), "stopped"}. With settings["engine"] ENGINE_ITERATIVE the
+        iterative engine runs instead (registerIterative)."""
+        if settings.get("engine") == reg.ENGINE_ITERATIVE:
+            return self.registerIterative(fixed, petSource, settings, progress)
         steps = reg.validateSteps(settings["steps"])
         if fixed.GetParentTransformNode() is not None:
             raise ValueError(f"The CT/MR '{fixed.GetName()}' is under a transform. Harden or remove it first.")
@@ -841,8 +986,25 @@ class DynamicPETRegistrationWidget(ScriptedLoadableModuleWidget, VTKObservationM
         self.layout.addWidget(inputBox)
 
         # --- registration
-        regBox = qt.QGroupBox("Registration (BRAINSFit)")
+        regBox = qt.QGroupBox("Registration")
         regForm = qt.QFormLayout(regBox)
+        self.engineCombo = qt.QComboBox()
+        for title, key in reg.ENGINES:
+            self.engineCombo.addItem(title, key)
+        self.engineCombo.setCurrentIndex(self.engineCombo.findData(reg.DEFAULT_ENGINE))
+        self.engineCombo.toolTip = (
+            "BRAINSFit: the steps below, at the CT/MR resolution (a B-spline on a fine MR can take many GB). "
+            "Iterative multi-resolution (as in EasyReg): a rigid (or affine) stage, then B-spline passes from coarse "
+            "to fine control points, each kept only when it improves the match, on a working grid of a few mm: "
+            "little memory.")
+        regForm.addRow("Method:", self.engineCombo)
+        self.brainsfitBox = qt.QWidget()
+        brainsForm = qt.QFormLayout(self.brainsfitBox)
+        brainsForm.setContentsMargins(0, 0, 0, 0)
+        self.iterativeBox = qt.QWidget()
+        iterativeForm = qt.QFormLayout(self.iterativeBox)
+        iterativeForm.setContentsMargins(0, 0, 0, 0)
+        self.iterativeWidgets = iterativeOptions(iterativeForm)
         self.stepCombos = []
         self.resampleChecks = []
         for index, default in enumerate(reg.DEFAULT_STEPS):
@@ -864,7 +1026,7 @@ class DynamicPETRegistrationWidget(ScriptedLoadableModuleWidget, VTKObservationM
             row.addWidget(check)
             self.stepCombos.append(combo)
             self.resampleChecks.append(check)
-            regForm.addRow(f"Step {index + 1}:", row)
+            brainsForm.addRow(f"Step {index + 1}:", row)
         self.initializationCombo = qt.QComboBox()
         for title, mode in reg.INITIALIZATIONS:
             self.initializationCombo.addItem(title, mode)
@@ -873,7 +1035,6 @@ class DynamicPETRegistrationWidget(ScriptedLoadableModuleWidget, VTKObservationM
                                             "PET and CT/MR volumes (as Motion Correction); centers of mass aligns "
                                             "the intensities; none starts from the scanner coordinates (PET/CT of "
                                             "the same scanner).")
-        regForm.addRow("Initialization:", self.initializationCombo)
         advanced = ctk.ctkCollapsibleButton()
         advanced.text = "Advanced"
         advanced.collapsed = True
@@ -903,10 +1064,13 @@ class DynamicPETRegistrationWidget(ScriptedLoadableModuleWidget, VTKObservationM
             "full resolution makes the B-spline step take many GB of memory. A CT/MR that is not finer is used as "
             "it is.")
         advancedForm.addRow("Register CT/MR at:", self.workingVoxelSpin)
-        regForm.addRow(advanced)
+        brainsForm.addRow(advanced)
         self.stepsNote = qt.QLabel()
         self.stepsNote.wordWrap = True
-        regForm.addRow(self.stepsNote)
+        brainsForm.addRow(self.stepsNote)
+        regForm.addRow(self.brainsfitBox)
+        regForm.addRow(self.iterativeBox)
+        regForm.addRow("Initialization:", self.initializationCombo)
         self.registerButton = qt.QPushButton("Register")
         self.registerButton.toolTip = "Register the reference to the CT/MR in the steps above"
         regForm.addRow(self.registerButton)
@@ -1014,6 +1178,7 @@ class DynamicPETRegistrationWidget(ScriptedLoadableModuleWidget, VTKObservationM
             combo.connect("currentIndexChanged(int)", lambda i, combo=combo, check=check: self.onStepTypeChanged(
                 combo, check))
         self.registerButton.connect("clicked()", self.onRegister)
+        self.engineCombo.connect("currentIndexChanged(int)", self.onEngineChanged)
         self.manualButton.connect("toggled(bool)", self.onManualToggled)
         self.resetManualButton.connect("clicked()", self.onResetManual)
         self.revertButton.connect("clicked()", self.onRevert)
@@ -1040,7 +1205,7 @@ class DynamicPETRegistrationWidget(ScriptedLoadableModuleWidget, VTKObservationM
         self.closeButton.connect("clicked()", self.onClose)
         self.addObserver(slicer.mrmlScene, slicer.mrmlScene.StartCloseEvent, self.onSceneClose)
         self.addObserver(slicer.mrmlScene, slicer.mrmlScene.NodeRemovedEvent, self.onNodeRemoved)
-        self.onStepsChanged()
+        self.onEngineChanged()
         self.selectInputs()
         self.onSequenceChanged(self.sequenceSelector.currentNode(), openLayout=False)
         self.sequenceSelector.connect("currentNodeChanged(vtkMRMLNode*)", self.onSequenceChanged)
@@ -1064,12 +1229,38 @@ class DynamicPETRegistrationWidget(ScriptedLoadableModuleWidget, VTKObservationM
             check.checked = reg.RESAMPLE_BY_DEFAULT[step]
         self.onStepsChanged()
 
+    def engine(self):
+        return self.engineCombo.itemData(self.engineCombo.currentIndex) or reg.DEFAULT_ENGINE
+
+    def onEngineChanged(self, *args):
+        iterative = self.engine() == reg.ENGINE_ITERATIVE
+        self.brainsfitBox.visible = not iterative
+        self.iterativeBox.visible = iterative
+        self.onStepsChanged()
+
     def settings(self):
-        return {"steps": reg.validateSteps(self.steps()), "resample": self.resampleFlags(),
+        if self.engine() == reg.ENGINE_ITERATIVE:
+            settings = DynamicPETRegistrationLogic.defaultSettings()
+            settings.update(iterativeSettings(self.iterativeWidgets), engine=reg.ENGINE_ITERATIVE,
+                            initialization=self.initializationCombo.itemData(self.initializationCombo.currentIndex)
+                            or reg.DEFAULT_INITIALIZATION)
+            settings["steps"] = reg.iterativeSteps(settings["iterativeLinear"], settings["iterativeDeformable"])
+            return settings
+        return {"engine": reg.ENGINE_BRAINSFIT, "steps": reg.validateSteps(self.steps()),
+                "resample": self.resampleFlags(),
                 "initialization": self.initializationCombo.itemData(self.initializationCombo.currentIndex) or
                 reg.DEFAULT_INITIALIZATION,
                 "samplingPercentage": self.samplingSpin.value, "bsplineGrid": self.gridSpin.value,
                 "workingVoxelMm": self.workingVoxelSpin.value}
+
+    def _stepsValid(self):
+        if self.engine() == reg.ENGINE_ITERATIVE:
+            return True
+        try:
+            reg.validateSteps(self.steps())
+            return True
+        except ValueError:
+            return False
 
     def onStepsChanged(self, *args):
         try:
@@ -1080,7 +1271,7 @@ class DynamicPETRegistrationWidget(ScriptedLoadableModuleWidget, VTKObservationM
             self.stepsNote.text = str(error)
             valid = False
         if hasattr(self, "registerButton"):
-            self.registerButton.enabled = valid and self._inputsReady()
+            self.registerButton.enabled = (valid or self.engine() == reg.ENGINE_ITERATIVE) and self._inputsReady()
 
     # --- inputs --------------------------------------------------------------------------------
     def selectInputs(self):
@@ -1305,11 +1496,7 @@ class DynamicPETRegistrationWidget(ScriptedLoadableModuleWidget, VTKObservationM
         if not hasattr(self, "hardenButton"):
             return
         ready = self._inputsReady()
-        try:
-            reg.validateSteps(self.steps())
-            stepsOk = True
-        except ValueError:
-            stepsOk = False
+        stepsOk = self._stepsValid()
         self.registerButton.enabled = ready and stepsOk and not self.hardened
         self.openButton.enabled = ready
         self.manualButton.enabled = self.session is not None and not self.hardened
@@ -1383,6 +1570,8 @@ class DynamicPETRegistrationWidget(ScriptedLoadableModuleWidget, VTKObservationM
         self._updateTransformText()
         if result["stopped"]:
             self.transformLabel.text += "\nStopped before the last step."
+        if result.get("notes"):
+            self.transformLabel.text += "\n" + " ".join(result["notes"])
 
     def onManualToggled(self, on):
         if self.session is None:

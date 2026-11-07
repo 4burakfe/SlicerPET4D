@@ -40,6 +40,23 @@ DEFAULT_INTERPOLATION = "Linear"
 OVERWRITE = "overwrite"                 # Harden replaces the frames (and the summed image) of the series
 SAVE_SEPARATELY = "separate"            # Harden makes a new series next to the original
 
+# Registration engines: BRAINSFit in steps, or the iterative multi-resolution engine (sitkreg, as in EasyReg): a rigid
+# or affine stage, then iterative B-spline passes (coarse to fine control points), at a working resolution of a few mm
+ENGINE_BRAINSFIT = "brainsfit"
+ENGINE_ITERATIVE = "iterative"
+ENGINES = (("BRAINSFit (steps)", ENGINE_BRAINSFIT),
+           ("Iterative multi-resolution (rigid, then deformable)", ENGINE_ITERATIVE))
+DEFAULT_ENGINE = ENGINE_BRAINSFIT
+ITERATIVE_LINEAR_TYPES = ("Rigid", "Affine")
+DEFAULT_ITERATIVE_LINEAR = "Rigid"
+DEFAULT_ITERATIVE_DEFORMABLE = True
+DEFAULT_ITERATIVE_GRID_MM = 50.0        # control points of the last deformable pass
+DEFAULT_ITERATIVE_SPACING_MM = 2.0      # final working resolution
+DEFAULT_ITERATIVE_QUALITY = "Standard"
+ITERATIVE_SUFFIX = " (iterative)"
+DEFORMABLE_STEP = "Deformable"
+FIELD_MOVED_MM = 0.05                   # field points that move less are left out of the mean deformation
+
 # CT windows (title, lower, upper); "Auto" is the 1st - 99.5th percentile
 CT_WINDOWS = (("Soft tissue (W 400, L 40)", -160.0, 240.0), ("Brain (W 80, L 40)", 0.0, 80.0),
               ("Bone (W 2000, L 400)", -600.0, 1400.0), ("Lung (W 1500, L -600)", -1350.0, 150.0))
@@ -84,6 +101,47 @@ def stepsText(steps):
 
 def isLinearStep(step):
     return step in ("Rigid", "Affine")
+
+
+def iterativeSteps(linear=DEFAULT_ITERATIVE_LINEAR, deformable=DEFAULT_ITERATIVE_DEFORMABLE):
+    """Step names of an iterative registration: ['Rigid (iterative)', 'Deformable (iterative)']."""
+    if linear not in ITERATIVE_LINEAR_TYPES:
+        raise ValueError(f"Unknown linear stage {linear!r}")
+    return [linear + ITERATIVE_SUFFIX] + ([DEFORMABLE_STEP + ITERATIVE_SUFFIX] if deformable else [])
+
+
+def iterativeInitialization(mode):
+    """The iterative engine's start for a BRAINSFit initialization mode: the image centres (geometric centres and
+    centres of mass), or the current position (Off)."""
+    return "current" if mode == "Off" else "centres"
+
+
+def residualField(displacement, fieldIjkToWorld, matrix):
+    """The deformable part of an iterative result, for a chain PET -> linear (matrix) -> grid -> world. displacement
+    [k, j, i, 3] (world RAS mm) maps each world point x of the field grid to the PET point x + d(x) (linear part
+    included); the grid transform under the linear one must map x to matrix (x + d(x)), so its displacement (from
+    parent) is matrix (x + d(x)) - x."""
+    d = np.asarray(displacement, dtype=float)
+    nk, nj, ni = d.shape[:3]
+    k, j, i = np.meshgrid(np.arange(nk), np.arange(nj), np.arange(ni), indexing="ij")
+    ijk = np.stack([i, j, k, np.ones_like(i)], axis=-1).reshape(-1, 4).astype(float)
+    world = (ijk @ np.asarray(fieldIjkToWorld, dtype=float).T)[:, :3]
+    moved = world + d.reshape(-1, 3)
+    m = np.asarray(matrix, dtype=float)
+    mapped = moved @ m[:3, :3].T + m[:3, 3]
+    return (mapped - world).reshape(d.shape)
+
+
+def fieldStats(residual, minimumMm=FIELD_MOVED_MM):
+    """displacementStats-like {"mean", "max", "maxAxis"} of a residual field [k, j, i, 3]: the mean over the points that
+    move (the field fades to 0 away from the body)."""
+    d = np.asarray(residual, dtype=float).reshape(-1, 3)
+    if d.size == 0:
+        return {"mean": 0.0, "max": 0.0, "maxAxis": (0.0, 0.0, 0.0)}
+    lengths = np.linalg.norm(d, axis=1)
+    moving = lengths > minimumMm
+    return {"mean": float(lengths[moving].mean()) if moving.any() else 0.0, "max": float(lengths.max()),
+            "maxAxis": tuple(float(v) for v in np.abs(d).max(axis=0))}
 
 
 # ---------------------------------------------------------------------------
@@ -144,7 +202,7 @@ def summaryLines(steps, linear, center, deformation=None, manual=None, manualCen
             lines.append(f"Scaling R, A, S: {mc.vectorText(s['scales'])} %")
             lines.append("Shear xy, xz, yz: " + ", ".join(f"{v:.3f}" for v in s["shears"]))
     if deformation is not None:
-        lines.append(f"B-spline deformation: mean {deformation['mean']:.1f} mm, max {deformation['max']:.1f} mm "
+        lines.append(f"Deformation: mean {deformation['mean']:.1f} mm, max {deformation['max']:.1f} mm "
                      f"(largest R, A, S: {mc.vectorText(deformation['maxAxis'])} mm)")
     if manual is not None and not np.allclose(manual, np.eye(4), atol=1e-6):
         if manualCenter is None:
