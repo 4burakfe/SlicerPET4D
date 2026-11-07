@@ -800,6 +800,13 @@ class ModelingSession:
         self.table.setSelectionMode(qt.QAbstractItemView.SingleSelection)
         self.table.toolTip = "Results of the fits; click a row to make that segment the target"
         self.table.verticalHeader().setVisible(False)
+        self.sortTitle, self.sortDescending = None, False      # click a column header to sort, again to reverse
+        self._tableData = None
+        header = self.table.horizontalHeader()
+        header.setSectionsClickable(True)
+        header.setSortIndicatorShown(False)
+        header.toolTip = "Click a column to sort the rows by it (again for the reverse order)"
+        header.connect("sectionClicked(int)", self._onHeaderClicked)
         splitter.addWidget(left)
         splitter.addWidget(self.table)
         splitter.setStretchFactor(0, 3)
@@ -820,8 +827,26 @@ class ModelingSession:
         if item is not None and self.onRowClicked:
             self.onRowClicked(item.data(qt.Qt.UserRole))
 
+    def _onHeaderClicked(self, column):
+        if self._tableData is None:
+            return
+        header = self._tableData[0]
+        if not 0 <= column < len(header):
+            return
+        if header[column] == self.sortTitle:
+            self.sortDescending = not self.sortDescending
+        else:
+            self.sortTitle, self.sortDescending = header[column], False
+        self.setTable(*self._tableData)
+
     def setTable(self, header, rows, boldRow=None):
-        """rows: (segment ID, [texts], color). boldRow: segment ID of the target."""
+        """rows: (segment ID, [texts], color, role). boldRow: segment ID of the target. The rows are shown in the
+        order of the column picked in the header (by its title, so it holds when the model changes), else as given."""
+        self._tableData = (header, rows, boldRow)
+        sortColumn = header.index(self.sortTitle) if self.sortTitle in header else None
+        if sortColumn is not None and rows:
+            texts = [r[1][sortColumn] if sortColumn < len(r[1]) else "" for r in rows]
+            rows = [rows[i] for i in kin.sortTexts(texts, self.sortDescending)]
         self.table.clear()
         self.table.setColumnCount(len(header))
         self.table.setRowCount(len(rows))
@@ -842,6 +867,13 @@ class ModelingSession:
                     font.setItalic(bool(role) and segmentId != boldRow)
                     item.setFont(font)
                 self.table.setItem(r, c, item)
+        horizontal = self.table.horizontalHeader()
+        if sortColumn is not None:
+            horizontal.setSortIndicatorShown(True)
+            horizontal.setSortIndicator(sortColumn,
+                                        qt.Qt.DescendingOrder if self.sortDescending else qt.Qt.AscendingOrder)
+        else:
+            horizontal.setSortIndicatorShown(False)
         self.table.resizeColumnsToContents()
 
 
@@ -1027,6 +1059,11 @@ class DynamicPETModelingWidget(ScriptedLoadableModuleWidget, VTKObservationMixin
         self.showAllCheck.toolTip = ("Show every segment that has a result (after Fit all segments) on the summed "
                                      "image, not only the target and the reference")
         modelForm.addRow(self.showAllCheck)
+        self.allCurvesCheck = qt.QCheckBox("Show all segments in the curves")
+        self.allCurvesCheck.checked = True
+        self.allCurvesCheck.toolTip = ("Time-activity curves of every segment (faint) besides the target and the "
+                                       "reference; off: only the target and the reference")
+        modelForm.addRow(self.allCurvesCheck)
         exportRow = qt.QHBoxLayout()
         self.tableCheck = qt.QCheckBox("Results table in the scene")
         self.tableCheck.checked = True
@@ -1125,6 +1162,7 @@ class DynamicPETModelingWidget(ScriptedLoadableModuleWidget, VTKObservationMixin
         self.previewButton.connect("clicked()", self.onPreview)
         self.fitAllButton.connect("clicked()", self.onFitAll)
         self.showAllCheck.connect("toggled(bool)", lambda on: self._showSegments())
+        self.allCurvesCheck.connect("toggled(bool)", lambda on: self._refreshPlot())
         self.exportButton.connect("clicked()", self.onExport)
         self.mapButton.connect("clicked()", self.onMaps)
         self.orientationCombo.connect("currentIndexChanged(int)", self.onOrientationChanged)
@@ -1571,10 +1609,13 @@ class DynamicPETModelingWidget(ScriptedLoadableModuleWidget, VTKObservationMixin
         target, reference = self.targetId(), self.referenceId()
         plasmaFile = self.usesPlasmaFile()
         curves = []
+        allCurves = self.allCurvesCheck.checked
         for segmentId, segment in analysis.segments.items():
             role = "target" if segmentId == target else ("reference" if segmentId == reference else "")
             if segmentId == reference and kin.model(self.modelKey()).inputKind == "plasma":
                 role = "blood"
+            if not role and not allCurves:
+                continue
             curve = {"name": segment["name"], "color": segment["color"], "times": mids,
                      "values": np.where(frames.valid, segment["values"], np.nan), "emphasis": bool(role),
                      "role": role}

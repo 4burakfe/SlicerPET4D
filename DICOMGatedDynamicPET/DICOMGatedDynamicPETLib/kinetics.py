@@ -953,6 +953,31 @@ def formatNumber(value, digits=4):
     return f"{value:.{digits}g}"
 
 
+def sortTexts(texts, descending=False):
+    """Order (indices) of table cell texts: numbers by value when every non-empty text is a number, else
+    alphabetically (case-insensitive, numbers inside names in their order, e.g. "Region 2" before "Region 10").
+    Empty cells stay at the end in both directions; equal values keep their order."""
+    import re
+
+    def number(text):
+        try:
+            value = float(str(text).strip())
+        except ValueError:
+            return None
+        return value if math.isfinite(value) else None
+
+    filled = [i for i, t in enumerate(texts) if str(t).strip()]
+    empty = [i for i, t in enumerate(texts) if not str(t).strip()]
+    values = {i: number(texts[i]) for i in filled}
+    if filled and all(v is not None for v in values.values()):
+        key = values.get
+    else:
+        def key(i):
+            parts = re.split(r"(\d+(?:\.\d+)?)", str(texts[i]).strip().lower())
+            return [(0, float(p), "") if k % 2 else (1, 0.0, p) for k, p in enumerate(parts)]
+    return sorted(filled, key=key, reverse=descending) + empty
+
+
 def resultsCsv(rows, key, extraColumns=(), delimiter=","):
     """CSV text of results: rows are (name, result, extra values); columns: Region, extra columns, the model's
     values and metrics, Warnings."""
