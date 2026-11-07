@@ -450,8 +450,9 @@ maps = logic.parametricMaps(analysis, "SRTM", referenceId=cerebellumId)   # {"BP
 ## Dynamic Neuro Receptor PET (workflow)
 
 The **Dynamic Neuro Receptor PET** module (Nuclear Medicine > PET4D) is a step-by-step workflow for **dynamic
-receptor PET of the brain**. A step bar on top of the panel shows each step's state (done, ready, waiting); steps can
-be skipped. Steps 2, 3 and 6 are the panels of the modules above, shown inside the workflow; the series a step makes
+receptor PET of the brain**. A **workflow toolbar** at the top of the main window (shown while the module is open)
+has the steps with their state (done, ready, waiting); click a step to open it, or use Back / Next in the panel. Steps
+can be skipped. Steps 2, 3 and 6 are the panels of the modules above, shown inside the workflow; the series a step makes
 (e.g. a motion corrected series saved separately) is the series of the next step.
 
 1. **Data:** the patient's **dynamic PET** series and the **CT / MR**. The MR contrast is read from the DICOM tags
