@@ -11,7 +11,7 @@ from DICOMGatedDynamicPETLib import registration as reg  # noqa: E402
 
 
 def test_steps():
-    assert reg.validateSteps(reg.DEFAULT_STEPS) == ["Rigid", "Affine"]
+    assert reg.validateSteps(reg.DEFAULT_STEPS) == ["Rigid"]
     assert reg.validateSteps(["Rigid", None, ""]) == ["Rigid"]
     assert reg.validateSteps(["Affine", "BSpline"]) == ["Affine", "BSpline"]
     assert reg.validateSteps(["Rigid", "Rigid"]) == ["Rigid", "Rigid"]
@@ -143,14 +143,15 @@ def test_closest_axis():
 
 
 def test_resample_flags():
-    assert reg.resampleFlags(reg.DEFAULT_STEPS) == [False, False]          # linear steps on the CT/MR as it is
+    assert reg.resampleFlags(reg.DEFAULT_STEPS) == [False]          # linear steps on the CT/MR as it is
     assert reg.resampleFlags(["Rigid", "BSpline"]) == [False, True]
     assert reg.resampleFlags(["Rigid", "BSpline"], [True, False]) == [True, False]
     assert reg.resampleFlags(["Affine", "BSpline"], [True]) == [True, True]
 
 
 def test_iterative_helpers():
-    assert reg.iterativeSteps() == ["Rigid (iterative)", "Deformable (iterative)"]
+    assert reg.iterativeSteps() == ["Rigid (iterative)"]
+    assert reg.iterativeSteps("Rigid", True) == ["Rigid (iterative)", "Deformable (iterative)"]
     assert reg.iterativeSteps("Affine", False) == ["Affine (iterative)"]
     with pytest.raises(ValueError):
         reg.iterativeSteps("BSpline")

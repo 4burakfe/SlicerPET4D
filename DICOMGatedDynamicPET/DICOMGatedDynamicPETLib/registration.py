@@ -17,7 +17,8 @@ import numpy as np
 from . import motioncorrection as mc
 
 STEP_TYPES = ("Rigid", "Affine", "BSpline")
-DEFAULT_STEPS = ("Rigid", "Affine")
+# the PET to the same patient's CT/MR: rigid only by default (step 2 "(none)"); affine/B-spline can be added
+DEFAULT_STEPS = ("Rigid",)
 MAX_STEPS = 2
 # whether a step registers to the CT/MR resampled to the PET voxel size (workingSpacing), by default: only the B-spline,
 # which takes tens of GB of memory on a sub-millimetre MR; the linear steps run on the CT/MR as it is
@@ -45,11 +46,11 @@ SAVE_SEPARATELY = "separate"            # Harden makes a new series next to the 
 ENGINE_BRAINSFIT = "brainsfit"
 ENGINE_ITERATIVE = "iterative"
 ENGINES = (("BRAINSFit (steps)", ENGINE_BRAINSFIT),
-           ("Iterative multi-resolution (rigid, then deformable)", ENGINE_ITERATIVE))
+           ("Iterative multi-resolution (linear, then optional deformable)", ENGINE_ITERATIVE))
 DEFAULT_ENGINE = ENGINE_BRAINSFIT
 ITERATIVE_LINEAR_TYPES = ("Rigid", "Affine")
 DEFAULT_ITERATIVE_LINEAR = "Rigid"
-DEFAULT_ITERATIVE_DEFORMABLE = True
+DEFAULT_ITERATIVE_DEFORMABLE = False   # same patient: rigid only; the Neuro normalization turns it on
 DEFAULT_ITERATIVE_GRID_MM = 50.0        # control points of the last deformable pass
 DEFAULT_ITERATIVE_SPACING_MM = 2.0      # final working resolution
 DEFAULT_ITERATIVE_QUALITY = "Standard"

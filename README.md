@@ -345,14 +345,16 @@ summed image** of the series.
 - **Dynamic sequence** (the most recent one is picked), **Reference frame** (the series' summed image when it has one,
   else the frame with the highest activity; any frame can be picked) and **CT / MR** (a CT or MR loaded from DICOM is
   picked for you).
-- **Method:** **BRAINSFit (steps)** (default, below) or **Iterative multi-resolution (rigid, then deformable)**, the
+- **Method:** **BRAINSFit (steps)** (default, below) or **Iterative multi-resolution**, the
   SimpleITK engine of EasyReg (Radioembolization Dosimetry): a rigid (or affine) Mattes mutual information fit over a
-  coarse-to-fine pyramid, then B-spline passes from coarse to fine (grid 50 mm by default); each pass is kept only
+  coarse-to-fine pyramid, **rigid only by default** (the PET and the CT/MR are the same patient); *Then deformable*
+  adds B-spline passes from coarse to fine (grid 50 mm by default); each pass is kept only
   when it improves the match and does not fold. It works on a 2 mm grid (*Final resolution*), so it needs a fraction
   of the memory of BRAINSFit on a sub-millimetre MR. The deformation is stored as a grid transform under the linear
   one, so the views, manual correction and Harden work the same way.
 - **Steps:** up to two BRAINSFit steps run one after the other, the second starting where the first ended:
-  **Rigid, then Affine** by default. BSpline can be picked (as the last step); step 2 can be *(none)*. A
+  **Rigid only** by default (step 2 *(none)*: the PET and the CT/MR are the same patient). Affine or BSpline can
+  be picked as step 2 (BSpline only as the last step). A
   B-spline can only be the last step and a rigid step cannot follow an affine one. The first step starts from the
   **geometric centres** (as Motion Correction; *Initialization* also offers the centres of mass or none, e.g. for a
   PET/CT of the same scanner). Mattes mutual information; sampling 0.05 and B-spline grid 5 under *Advanced*.

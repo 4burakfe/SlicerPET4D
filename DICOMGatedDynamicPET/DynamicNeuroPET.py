@@ -240,6 +240,8 @@ class DynamicNeuroPETLogic(ScriptedLoadableModuleLogic):
         settings["steps"] = list(NORMALIZATION_STEPS)
         settings["resample"] = reg.resampleFlags(NORMALIZATION_STEPS)
         settings["initialization"] = NORMALIZATION_INITIALIZATION[method]
+        settings["iterativeDeformable"] = True          # to the template: linear, then deformable
+        settings["iterativeGridMm"] = NORMALIZATION_ITERATIVE_GRID_MM
         return settings
 
     def normalize(self, sequence, template, method=METHOD_PET, anatomy=None, settings=None, mask=None,
@@ -914,7 +916,7 @@ class DynamicNeuroPETWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.normIterativeBox = qt.QWidget()
         iterativeForm = qt.QFormLayout(self.normIterativeBox)
         iterativeForm.setContentsMargins(0, 0, 0, 0)
-        self.normIterative = iterativeOptions(iterativeForm, gridMm=NORMALIZATION_ITERATIVE_GRID_MM)
+        self.normIterative = iterativeOptions(iterativeForm, gridMm=NORMALIZATION_ITERATIVE_GRID_MM, deformable=True)
         self.normStepCombos = []
         for index, default in enumerate(NORMALIZATION_STEPS):
             combo = qt.QComboBox()

@@ -164,7 +164,8 @@ def _looksLikeCT(node):
     return array.size > 0 and float(np.min(array[::4, ::4, ::4])) < -500.0
 
 
-def iterativeOptions(form, gridMm=reg.DEFAULT_ITERATIVE_GRID_MM, linear=reg.DEFAULT_ITERATIVE_LINEAR):
+def iterativeOptions(form, gridMm=reg.DEFAULT_ITERATIVE_GRID_MM, linear=reg.DEFAULT_ITERATIVE_LINEAR,
+                     deformable=reg.DEFAULT_ITERATIVE_DEFORMABLE):
     """The iterative engine's options in a form layout (also used by the Neuro normalization). Returns the widgets
     for iterativeSettings()."""
     from DICOMGatedDynamicPETLib import sitkreg as SR
@@ -175,7 +176,7 @@ def iterativeOptions(form, gridMm=reg.DEFAULT_ITERATIVE_GRID_MM, linear=reg.DEFA
     linearCombo.toolTip = "Linear stage, run first: rigid (shifts and angles) or affine (adds scaling and shear)"
     form.addRow("Linear stage:", linearCombo)
     deformableCheck = qt.QCheckBox("Then deformable (iterative B-spline passes)")
-    deformableCheck.checked = reg.DEFAULT_ITERATIVE_DEFORMABLE
+    deformableCheck.checked = deformable
     deformableCheck.toolTip = (f"{SR.DEFAULT_DEFORMABLE_PASSES} B-spline passes after the linear stage, the control "
                                "points twice as close each pass, ending at the grid below; a pass is kept only when "
                                "it improves the match and does not fold the image")
@@ -1007,7 +1008,8 @@ class DynamicPETRegistrationWidget(ScriptedLoadableModuleWidget, VTKObservationM
         self.iterativeWidgets = iterativeOptions(iterativeForm)
         self.stepCombos = []
         self.resampleChecks = []
-        for index, default in enumerate(reg.DEFAULT_STEPS):
+        for index in range(reg.MAX_STEPS):
+            default = reg.DEFAULT_STEPS[index] if index < len(reg.DEFAULT_STEPS) else ""
             combo = qt.QComboBox()
             if index > 0:
                 combo.addItem("(none)", "")
@@ -1017,7 +1019,7 @@ class DynamicPETRegistrationWidget(ScriptedLoadableModuleWidget, VTKObservationM
             combo.toolTip = ("Steps run one after the other, each from where the previous ended. Rigid: shifts and "
                              "angles. Affine: adds scaling and shear. BSpline: local deformation (last step only).")
             check = qt.QCheckBox("Resample CT/MR to PET")
-            check.checked = reg.RESAMPLE_BY_DEFAULT[default]
+            check.checked = reg.RESAMPLE_BY_DEFAULT.get(default, False)
             check.toolTip = ("Register this step to a copy of the CT/MR smoothed and resampled to the PET voxel size "
                              "(Advanced: Register CT/MR at). Default on for BSpline only: a sub-millimetre MR at full "
                              "resolution makes the B-spline take many GB of memory.")
