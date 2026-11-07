@@ -1614,6 +1614,7 @@ class DynamicNeuroPETWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             logging.warning(f"Neuro: could not set the inputs of step {key}", exc_info=True)
 
     def _prepareModeling(self, widget):
+        self._prepareBrainMask(widget)
         segmentation = self.node("Segmentation")
         if segmentation is None:
             return
@@ -1633,6 +1634,24 @@ class DynamicNeuroPETWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             index = widget.targetCombo.findData(target) if target else -1
             if index >= 0:
                 widget.targetCombo.setCurrentIndex(index)
+
+    def _prepareBrainMask(self, widget):
+        """The MNI template's brain mask for 'Mask outside the brain' of the voxel-wise maps (the series is in MNI
+        space after the normalization), unless another mask was picked. A series that is not normalized gets no
+        mask (the template's mask is taken off), so 'Mask outside the brain' is off."""
+        selector = getattr(widget, "brainMaskSelector", None)
+        if selector is None:
+            return
+        sequence = self.sequence()
+        normalized = sequence is not None and bool(sequence.GetAttribute(NEURO_PREFIX + "Template"))
+        current = selector.currentNode()
+        if not normalized:
+            if current is not None and current.GetAttribute(ATLAS_FILE_ATTRIBUTE):
+                selector.setCurrentNode(None)
+            return
+        if current is None and neuro.BRAIN_MASK in self.atlas:
+            selector.setCurrentNode(self.logic.loadAtlasVolume(self.atlas[neuro.BRAIN_MASK],
+                                                               name="MNI ICBM152 2009c brain mask"))
 
     def pendingHarden(self, key):
         """Whether step key (motion correction, CT/MR registration, normalization) has a result that is not hardened

@@ -1000,3 +1000,26 @@ def tacCsv(frames, curves, units=""):
         writer.writerow([f"{frames.rawStart[i]:.6g}", f"{frames.rawEnd[i]:.6g}", f"{frames.mid[i]:.6g}",
                          *[f"{float(v[i]):.6g}" for v in curves.values()]])
     return out.getvalue()
+
+
+def maskOnGrid(mask_kji, maskIjkToRas, shape_kji, ijkToRas, slicesPerChunk=16):
+    """A mask (array [k, j, i], non-zero inside; 4x4 IJK to RAS matrix) sampled onto another grid (shape [k, j, i],
+    4x4 matrix) by nearest neighbour: a boolean array of that shape, False outside the mask's grid."""
+    mask = np.asarray(mask_kji) != 0
+    toMask = np.linalg.inv(np.asarray(maskIjkToRas, dtype=float)) @ np.asarray(ijkToRas, dtype=float)
+    nk, nj, ni = (int(v) for v in shape_kji)
+    out = np.zeros((nk, nj, ni), dtype=bool)
+    j, i = np.mgrid[0:nj, 0:ni]
+    j, i = j.ravel().astype(float), i.ravel().astype(float)
+    limits = np.array(mask.shape[::-1])           # i, j, k sizes of the mask
+    for k0 in range(0, nk, slicesPerChunk):
+        ks = np.arange(k0, min(nk, k0 + slicesPerChunk), dtype=float)
+        kk = np.repeat(ks, i.size)
+        ii, jj = np.tile(i, ks.size), np.tile(j, ks.size)
+        points = toMask[:3, :3] @ np.vstack([ii, jj, kk]) + toMask[:3, 3:4]
+        index = np.rint(points).astype(np.int64)
+        valid = np.all((index >= 0) & (index < limits[:, None]), axis=0)
+        values = np.zeros(index.shape[1], dtype=bool)
+        values[valid] = mask[index[2, valid], index[1, valid], index[0, valid]]
+        out[k0:k0 + ks.size] = values.reshape(ks.size, nj, ni)
+    return out
