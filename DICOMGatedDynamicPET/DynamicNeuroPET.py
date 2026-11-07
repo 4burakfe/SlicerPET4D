@@ -79,6 +79,13 @@ NORMALIZATION_BRAINSFIT = {"numberOfIterations": 1500, "histogramBins": 50,
                            "bsplineConvergenceFactor": NORMALIZATION_CONVERGENCE_FACTOR,
                            "projectedGradientTolerance": 1e-5, "maximumNumberOfEvaluations": 900,
                            "maximumNumberOfCorrections": 25, "maxBSplineDisplacement": 0.0, "numberOfThreads": -1}
+# Default engine (user 2026-11-07, tried by hand): the iterative engine, one affine stage on the 1 mm level with
+# the "Thorough" sampling; BRAINSFit (the steps above) and the deformable passes can be picked
+NORMALIZATION_ENGINE = reg.ENGINE_ITERATIVE
+NORMALIZATION_ITERATIVE_LINEAR = "Affine"
+NORMALIZATION_ITERATIVE_DEFORMABLE = False
+NORMALIZATION_ITERATIVE_SPACING_MM = 1.0
+NORMALIZATION_ITERATIVE_QUALITY = "Thorough"
 NORMALIZATION_ITERATIVE_GRID_MM = 30.0     # iterative engine: last control-point spacing (brain to template)
 # The PET is registered to the skull-stripped template by default (the scalp of the T1 has no PET counterpart);
 # the CT/MR is registered to the whole template.
@@ -259,8 +266,14 @@ class DynamicNeuroPETLogic(ScriptedLoadableModuleLogic):
         settings["samplingPercentage"] = NORMALIZATION_SAMPLING
         settings.update(NORMALIZATION_BRAINSFIT)
         settings["initialization"] = NORMALIZATION_INITIALIZATION[method]
-        settings["iterativeDeformable"] = True          # to the template: linear, then deformable
+        settings["iterativeLinear"] = NORMALIZATION_ITERATIVE_LINEAR
+        settings["iterativeDeformable"] = NORMALIZATION_ITERATIVE_DEFORMABLE
         settings["iterativeGridMm"] = NORMALIZATION_ITERATIVE_GRID_MM
+        settings["iterativeSpacingMm"] = NORMALIZATION_ITERATIVE_SPACING_MM
+        settings["iterativeQuality"] = NORMALIZATION_ITERATIVE_QUALITY
+        settings["engine"] = NORMALIZATION_ENGINE
+        if NORMALIZATION_ENGINE == reg.ENGINE_ITERATIVE:
+            settings["steps"] = reg.iterativeSteps(NORMALIZATION_ITERATIVE_LINEAR, NORMALIZATION_ITERATIVE_DEFORMABLE)
         return settings
 
     def normalize(self, sequence, template, method=METHOD_PET, anatomy=None, settings=None, mask=None,
@@ -925,7 +938,7 @@ class DynamicNeuroPETWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.normEngineCombo = qt.QComboBox()
         for title, key in reg.ENGINES:
             self.normEngineCombo.addItem(title, key)
-        self.normEngineCombo.setCurrentIndex(self.normEngineCombo.findData(reg.DEFAULT_ENGINE))
+        self.normEngineCombo.setCurrentIndex(self.normEngineCombo.findData(NORMALIZATION_ENGINE))
         self.normEngineCombo.toolTip = ("BRAINSFit: the steps below. Iterative multi-resolution (as in EasyReg): a "
                                         "rigid (or affine) stage, then B-spline passes coarse to fine on a working "
                                         "grid of a few mm (little memory).")
@@ -936,7 +949,11 @@ class DynamicNeuroPETWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.normIterativeBox = qt.QWidget()
         iterativeForm = qt.QFormLayout(self.normIterativeBox)
         iterativeForm.setContentsMargins(0, 0, 0, 0)
-        self.normIterative = iterativeOptions(iterativeForm, gridMm=NORMALIZATION_ITERATIVE_GRID_MM, deformable=True)
+        self.normIterative = iterativeOptions(iterativeForm, gridMm=NORMALIZATION_ITERATIVE_GRID_MM,
+                                              linear=NORMALIZATION_ITERATIVE_LINEAR,
+                                              deformable=NORMALIZATION_ITERATIVE_DEFORMABLE,
+                                              spacingMm=NORMALIZATION_ITERATIVE_SPACING_MM,
+                                              quality=NORMALIZATION_ITERATIVE_QUALITY)
         self.normStepCombos = []
         for index, default in enumerate(NORMALIZATION_STEPS):
             combo = qt.QComboBox()
@@ -1148,7 +1165,7 @@ class DynamicNeuroPETWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.templateNote.text = note
 
     def normEngine(self):
-        return self.normEngineCombo.currentData or reg.DEFAULT_ENGINE
+        return self.normEngineCombo.currentData or NORMALIZATION_ENGINE
 
     def onNormEngineChanged(self, *args):
         iterative = self.normEngine() == reg.ENGINE_ITERATIVE

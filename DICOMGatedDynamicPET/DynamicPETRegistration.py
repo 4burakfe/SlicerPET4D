@@ -166,7 +166,8 @@ def _looksLikeCT(node):
 
 
 def iterativeOptions(form, gridMm=reg.DEFAULT_ITERATIVE_GRID_MM, linear=reg.DEFAULT_ITERATIVE_LINEAR,
-                     deformable=reg.DEFAULT_ITERATIVE_DEFORMABLE):
+                     deformable=reg.DEFAULT_ITERATIVE_DEFORMABLE, spacingMm=reg.DEFAULT_ITERATIVE_SPACING_MM,
+                     quality=reg.DEFAULT_ITERATIVE_QUALITY):
     """The iterative engine's options in a form layout (also used by the Neuro normalization). Returns the widgets
     for iterativeSettings()."""
     from DICOMGatedDynamicPETLib import sitkreg as SR
@@ -192,16 +193,19 @@ def iterativeOptions(form, gridMm=reg.DEFAULT_ITERATIVE_GRID_MM, linear=reg.DEFA
     spacingCombo = qt.QComboBox()
     for title, mm in SR.FINAL_SPACING_CHOICES:
         spacingCombo.addItem(title, mm)
-    spacingCombo.setCurrentIndex(spacingCombo.findData(reg.DEFAULT_ITERATIVE_SPACING_MM))
+    index = spacingCombo.findData(spacingMm)
+    spacingCombo.setCurrentIndex(index if index >= 0 else spacingCombo.findData(reg.DEFAULT_ITERATIVE_SPACING_MM))
     spacingCombo.toolTip = ("Resolution of the last level (the images are averaged down to it): 2 mm is plenty for "
                             "PET; finer takes longer")
     form.addRow("Final resolution:", spacingCombo)
     qualityCombo = qt.QComboBox()
     for name in SR.QUALITY_SAMPLES:
         qualityCombo.addItem(name, name)
-    qualityCombo.setCurrentIndex(qualityCombo.findData(reg.DEFAULT_ITERATIVE_QUALITY))
+    index = qualityCombo.findData(quality)
+    qualityCombo.setCurrentIndex(index if index >= 0 else qualityCombo.findData(reg.DEFAULT_ITERATIVE_QUALITY))
     qualityCombo.toolTip = "Number of sample points of the metric per level"
     form.addRow("Quality:", qualityCombo)
+    gridCombo.enabled = deformable
     deformableCheck.connect("toggled(bool)", lambda on: setattr(gridCombo, "enabled", on))
     return {"linear": linearCombo, "deformable": deformableCheck, "grid": gridCombo, "spacing": spacingCombo,
             "quality": qualityCombo}
