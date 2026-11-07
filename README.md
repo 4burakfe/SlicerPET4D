@@ -441,8 +441,9 @@ The **Dynamic PET Modeling** module (Nuclear Medicine > PET4D) fits kinetic mode
   as new volumes on the PET grid. Voxels below a percentage of the 99.9th percentile of the mean activity
   (*Background threshold*, **0 % by default**: a percentage of the maximum drops a low-uptake cortex next to a hot
   striatum, e.g. with [18F]fallypride), voxels with no activity, or voxels outside the segments when asked, are 0.
-  **Mask outside the brain** (on by default) also leaves the voxels outside a brain mask at 0 when one is picked
-  (the Neuro workflow picks the MNI template's brain mask once the series is normalized).
+  **Mask outside the brain** leaves the voxels outside a brain mask at 0; it is on whenever a mask is picked and off
+  without one. The Neuro workflow picks the MNI template's brain mask once the series is normalized, and none (mask
+  off) for a series that is not normalized.
   **Negative values are clipped to 0** by default (noise in voxels with
   little uptake; untick *Clip negative values to 0* to keep them; the region fits are not clipped). The graphical
   methods use the target's t\*. The BPnd map (else the first map) is shown in the large view at full opacity.

@@ -1174,8 +1174,9 @@ class DynamicPETModelingWidget(ScriptedLoadableModuleWidget, VTKObservationMixin
         self.insideCheck = qt.QCheckBox("Only inside the segments")
         mapForm.addRow(self.insideCheck)
         self.brainMaskCheck = qt.QCheckBox("Mask outside the brain")
-        self.brainMaskCheck.checked = True
-        self.brainMaskCheck.toolTip = ("Leave the voxels outside the brain mask at 0 (when a brain mask is picked; "
+        self.brainMaskCheck.checked = False     # follows the mask: on when one is picked, off without one
+        self.brainMaskCheck.enabled = False
+        self.brainMaskCheck.toolTip = ("Leave the voxels outside the brain mask at 0 (on when a brain mask is picked; "
                                        "the Neuro workflow picks the MNI template's brain mask)")
         self.brainMaskSelector = self._nodeSelector(["vtkMRMLScalarVolumeNode", "vtkMRMLLabelMapVolumeNode"],
                                                     "Volume that is non-zero in the brain (any grid in the same "
@@ -1232,6 +1233,7 @@ class DynamicPETModelingWidget(ScriptedLoadableModuleWidget, VTKObservationMixin
         # --- connections
         self.sequenceSelector.connect("currentNodeChanged(vtkMRMLNode*)", self.onSequenceChanged)
         self.segmentationSelector.connect("currentNodeChanged(vtkMRMLNode*)", self.onSegmentationChanged)
+        self.brainMaskSelector.connect("currentNodeChanged(vtkMRMLNode*)", self.onBrainMaskChanged)
         self.targetCombo.connect("currentIndexChanged(int)", self.onTargetChanged)
         self.referenceCombo.connect("currentIndexChanged(int)", self.onReferenceChanged)
         self.inputCombo.connect("currentIndexChanged(int)", self.onSettingsChanged)
@@ -1283,6 +1285,12 @@ class DynamicPETModelingWidget(ScriptedLoadableModuleWidget, VTKObservationMixin
     # --- state ---------------------------------------------------------------------------------
     def modelKey(self):
         return self.modelCombo.currentData or kin.MODEL_ORDER[0]
+
+    def onBrainMaskChanged(self, node=None):
+        """'Mask outside the brain' is on when a mask is picked and off (greyed) without one."""
+        picked = self.brainMaskSelector.currentNode() is not None
+        self.brainMaskCheck.enabled = picked
+        self.brainMaskCheck.checked = picked
 
     def brainMask(self):
         """The brain mask of the voxel-wise maps: the picked volume when 'Mask outside the brain' is on, else None."""
