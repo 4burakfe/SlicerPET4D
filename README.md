@@ -517,6 +517,13 @@ without, the result is kept, or stay).
    added as *"Cerebellum Gray Matter (reference)"*). The bilateral atlas is made from CerebrA **on first use and
    saved next to it** (*mni_icbm152_CerebrA_bilateral_tal_nlin_sym_09c.nii*, *CerebrA_bilateral_LabelDetails.csv*;
    in Slicer's temporary folder when that folder is read-only).
+   **CerebrA with pons:** when the atlas folder also holds *mni_icbm152_CerebrA_tal_nlin_sym_09c_wpons.seg.nrrd*
+   (a segmentation, the pons as *Segment_103* / *Segment_104* over the brainstem) and
+   *mni_icbm152_CerebrA_tal_nlin_sym_09c_wpons.csv* (the label table with a *Pons* row), its regions are used by
+   default: *Pons R* / *Pons L* (bilateral: *Pons*) are added as segments of their own over the brainstem, and the
+   pons can be the reference region. On first use its pons overlays are saved next to it
+   (*..._wpons_overlay.nii*, *mni_icbm152_CerebrA_bilateral_tal_nlin_sym_09c_wpons_overlay.nii*) and the bilateral
+   atlas is made again with the pons in its table.
 6. **Modeling** (Dynamic PET Modeling), ready with the normalized series, the regions, **SRTM**, the reference region
    and the putamen as the target.
 

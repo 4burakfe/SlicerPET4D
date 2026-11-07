@@ -162,3 +162,26 @@ def test_cerebra_semicolon_csv_and_pons(tmp_path):
     assert not any("wpons" in name for name in neuro.missingFiles({}))
     assert neuro.segmentNamesOfLabels((103, 104), "Pons") == {"segment_103", "segment_104", "pons", "pons r",
                                                               "pons l"}
+
+
+def test_pons_overlay_helpers(tmp_path):
+    text = ("Mindboggle ID;Label Name;RH Label;LH Labels;Notes;Dice Kappa\n"
+            "51;Putamen;21;72;;0,87\n16;Brainstem;11;62;;0,65\n444;Pons;103;104;;0\n")
+    structures = neuro.readCerebraLabels(text)
+    assert neuro.overlayValues(structures) == {103: "Pons R", 104: "Pons L"}
+    assert neuro.overlayValues(structures, mergeSides=True) == {3: "Pons"}
+    assert neuro.labelsCsv({}) is None
+    assert neuro.labelsCsv({neuro.CEREBRA_CSV: "a.csv"}) == "a.csv"
+    found = {neuro.CEREBRA_CSV: "a.csv", neuro.PONS_CSV: str(tmp_path / "p.csv"),
+             neuro.PONS_LABELS: str(tmp_path / "p.seg.nrrd")}
+    assert neuro.hasPons(found) and neuro.labelsCsv(found).endswith("p.csv")
+    lateral, bilateral = neuro.ponsOverlayPaths(found)
+    assert lateral == str(tmp_path / (neuro.PONS_OVERLAY_STEM + ".nii"))
+    assert bilateral == str(tmp_path / (neuro.PONS_BILATERAL_OVERLAY_STEM + ".nii"))
+    assert neuro.ponsOverlayPaths({}) == (None, None)
+    for path in (lateral, bilateral):
+        open(path, "wb").close()
+    (tmp_path / "mni_icbm152_CerebrA_tal_nlin_sym_09c_wpons.seg.nrrd").write_bytes(b"")
+    again = neuro.findAtlasFiles(str(tmp_path))
+    assert again[neuro.PONS_OVERLAY] == lateral and again[neuro.PONS_BILATERAL_OVERLAY] == bilateral
+    assert again[neuro.PONS_LABELS].endswith(".seg.nrrd")

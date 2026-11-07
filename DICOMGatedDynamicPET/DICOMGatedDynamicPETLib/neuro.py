@@ -45,15 +45,24 @@ PONS_CSV = "cerebraPonsCsv"
 PONS_STEM = "mni_icbm152_CerebrA" + TEMPLATE_SUFFIX + "_wpons"
 PONS_CSV_NAME = PONS_STEM + ".csv"
 PONS = "Pons"
+# Structures of the CerebrA with pons that overlap others (the pons lies inside the brainstem): kept apart from the
+# label volume, in overlay label maps made on first use next to the segmentation file
+OVERLAY_STRUCTURES = (PONS,)
+PONS_OVERLAY = "cerebraPonsOverlay"
+PONS_BILATERAL_OVERLAY = "cerebraPonsBilateralOverlay"
+PONS_OVERLAY_STEM = PONS_STEM + "_overlay"
+PONS_BILATERAL_OVERLAY_STEM = BILATERAL_STEM + "_wpons_overlay"
 EXTRA_FILES = (
     (BRAIN_MASK, "mni_icbm152_t1" + TEMPLATE_SUFFIX + "_mask"),
     (CEREBRA_LABELS, "mni_icbm152_CerebrA" + TEMPLATE_SUFFIX),
     (BILATERAL_LABELS, BILATERAL_STEM),
     (PONS_LABELS, PONS_STEM),
+    (PONS_OVERLAY, PONS_OVERLAY_STEM),
+    (PONS_BILATERAL_OVERLAY, PONS_BILATERAL_OVERLAY_STEM),
 )
 CSV_NAME = "CerebrA_LabelDetails.csv"
 BILATERAL_CSV_NAME = "CerebrA_bilateral_LabelDetails.csv"
-GENERATED = (BILATERAL_LABELS, BILATERAL_CSV)     # made by the workflow, never reported missing
+GENERATED = (BILATERAL_LABELS, BILATERAL_CSV, PONS_OVERLAY, PONS_BILATERAL_OVERLAY)  # made by the workflow
 OPTIONAL = (PONS_LABELS, PONS_CSV)                # the CerebrA with pons, never reported missing
 IMAGE_EXTENSIONS = (".seg.nrrd", ".nii", ".nii.gz", ".nrrd", ".mnc")
 MAX_SEARCH_DEPTH = 4
@@ -116,6 +125,44 @@ def bilateralPaths(found):
         return None, None
     folder = os.path.dirname(source)
     return os.path.join(folder, BILATERAL_STEM + ".nii"), os.path.join(folder, BILATERAL_CSV_NAME)
+
+
+def hasPons(found):
+    """Whether the atlas folder holds the CerebrA with pons (segmentation and CSV)."""
+    return PONS_LABELS in found and PONS_CSV in found
+
+
+def labelsCsv(found):
+    """CSV of the CerebrA structures: the one of the CerebrA with pons when it is there (all CerebrA rows and the
+    pons), else CerebrA_LabelDetails.csv; None without either."""
+    if hasPons(found):
+        return found[PONS_CSV]
+    return found.get(CEREBRA_CSV)
+
+
+def ponsOverlayPaths(found):
+    """(left / right overlay, bilateral overlay) of the CerebrA with pons: the files found, else where they are
+    written (next to the segmentation file), or (None, None) without it."""
+    if not hasPons(found):
+        return None, None
+    folder = os.path.dirname(found[PONS_LABELS])
+    return (found.get(PONS_OVERLAY) or os.path.join(folder, PONS_OVERLAY_STEM + ".nii"),
+            found.get(PONS_BILATERAL_OVERLAY) or os.path.join(folder, PONS_BILATERAL_OVERLAY_STEM + ".nii"))
+
+
+def overlayValues(structures, mergeSides=False):
+    """{label value: name} of the overlapping structures (OVERLAY_STRUCTURES) in the CerebrA values (sides) or the
+    bilateral numbering (labelTable with mergeSides)."""
+    entries, _ = labelTable(structures, mergeSides)
+    wanted = {n.lower() for n in OVERLAY_STRUCTURES}
+    out = {}
+    for value, name, _ in entries:
+        base = name.lower()
+        if not mergeSides and base[-2:] in (" r", " l"):
+            base = base[:-2]
+        if base in wanted:
+            out[value] = name
+    return out
 
 
 def templateTitle(key):
