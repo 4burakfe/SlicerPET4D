@@ -345,7 +345,7 @@ summed image** of the series.
 - **Dynamic sequence** (the most recent one is picked), **Reference frame** (the series' summed image when it has one,
   else the frame with the highest activity; any frame can be picked) and **CT / MR** (a CT or MR loaded from DICOM is
   picked for you).
-- **Method:** **Iterative multi-resolution** (default) or **BRAINSFit (steps)** (below). The iterative one is the
+- **Method:** **BRAINSFit (steps)** (default, below) or **Iterative multi-resolution**. The iterative one is the
   SimpleITK engine of EasyReg (Radioembolization Dosimetry): a rigid (or affine) Mattes mutual information fit over a
   coarse-to-fine pyramid, **rigid only by default** (the PET and the CT/MR are the same patient); *Then deformable*
   adds B-spline passes from coarse to fine (grid 50 mm by default); each pass is kept only
@@ -475,11 +475,13 @@ without, the result is kept, or stay).
    (also FLAIR), PD, or CT; it can be set by hand.
 2. **Motion correction** (Dynamic PET Motion Correction).
 3. **CT/MR registration** (Dynamic PET to CT/MR Registration).
-4. **Normalization** to the **MNI ICBM 152 nonlinear symmetric 2009c** template with the **iterative
-   multi-resolution** engine by default (rigid, then deformable, B-spline grid 30 mm; affine can be picked), which
-   uses little memory; *Registration* can be switched to BRAINSFit (affine then B-spline). With the CT/MR method the
-   CT/MR is resampled to the template's voxel size before it is registered:
-   - **Register the PET to the template** (default): the summed image (else the frame of the highest activity) to the
+4. **Normalization** to the **MNI ICBM 152 nonlinear symmetric 2009c** template with **BRAINSFit**, **affine then
+   B-spline** by default, or the **iterative multi-resolution** engine (rigid, then deformable, B-spline grid 30 mm).
+   BRAINSFit registers copies of the template and of the CT/MR (or PET) **smoothed and resampled to 2 mm**
+   (*Register at*, as FSL's 2 mm MNI template; 0 for the images as they are); the transform applies to the original
+   images. A 0.5 mm MR against the 1 mm template otherwise takes tens of GB. The sizes BRAINSFit gets are written to
+   the log. The method is **the CT/MR when the study has one**, else the PET (until it is picked by hand):
+   - **Register the PET to the template:** the summed image (else the frame of the highest activity) to the
      **T1** template, centres of mass as the start (skull-stripped with the template's brain mask, on by default; off
      for the CT/MR method).
    - **Normalize the CT/MR, apply the same transform to the PET:** the CT/MR is registered to the template of its
@@ -487,6 +489,8 @@ without, the result is kept, or stay).
      (step 3, or PET/MR). The CT/MR is normalized too.
 
    The result is shown in the registration layout (PET, fusion, template, checkerboard) with manual correction;
+   with the CT/MR method the **normalized CT/MR** is on the right and **over the template** (in red) in the fusion
+   column;
    **Harden** resamples every frame and the summed image onto the template's field of view (PET voxel size by
    default) into a new series *"&lt;series&gt; MNI"* (or overwrites it). **Revert** undoes it.
 5. **Regions:** the **CerebrA** atlas as a segmentation with the structure names. The **region atlas** is CerebrA

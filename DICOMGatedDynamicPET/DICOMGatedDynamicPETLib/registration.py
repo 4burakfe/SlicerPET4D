@@ -48,7 +48,7 @@ ENGINE_BRAINSFIT = "brainsfit"
 ENGINE_ITERATIVE = "iterative"
 ENGINES = (("BRAINSFit (steps)", ENGINE_BRAINSFIT),
            ("Iterative multi-resolution (linear, then optional deformable)", ENGINE_ITERATIVE))
-DEFAULT_ENGINE = ENGINE_ITERATIVE
+DEFAULT_ENGINE = ENGINE_BRAINSFIT
 ITERATIVE_LINEAR_TYPES = ("Rigid", "Affine")
 DEFAULT_ITERATIVE_LINEAR = "Rigid"
 DEFAULT_ITERATIVE_DEFORMABLE = False   # same patient: rigid only; the Neuro normalization turns it on
