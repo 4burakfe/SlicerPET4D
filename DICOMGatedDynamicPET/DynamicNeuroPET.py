@@ -80,6 +80,8 @@ STEPS = (
     (STEP_REGIONS, None, "Regions", "CerebrA atlas regions with their names"),
     (STEP_MODEL, "DynamicPETModeling", "Modeling", "Kinetic modelling of the regions (SRTM, Logan, ...)"),
 )
+TOOLBAR_OBJECT_NAME = "DynamicNeuroPETWorkflowToolbar"
+ICON_PATH = os.path.join(_MODULE_DIR, "Resources", "Icons", "DynamicNeuroPET.png")
 STATE_DONE, STATE_READY, STATE_WAITING = "done", "ready", "waiting"
 STATE_COLORS = {STATE_DONE: "#2e9e5b", STATE_READY: "#2f7ed8", STATE_WAITING: "#8f969c"}
 BUTTON_STYLE = ("QPushButton {{ background-color: {0}; color: white; font-weight: bold; border: none; "
@@ -585,24 +587,20 @@ class DynamicNeuroPETWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self._updating = False
         self._entered = False
 
-        # --- step bar
-        bar = qt.QFrame()
-        bar.setFrameShape(qt.QFrame.StyledPanel)
-        barLayout = qt.QGridLayout(bar)
-        barLayout.setContentsMargins(4, 4, 4, 4)
-        barLayout.setSpacing(4)
-        for index, (key, _, title, explanation) in enumerate(STEPS):
-            button = qt.QToolButton()
-            button.setText(title)
-            button.setToolButtonStyle(qt.Qt.ToolButtonTextBesideIcon)
-            button.setAutoRaise(True)
-            button.setCheckable(True)
-            button.setSizePolicy(qt.QSizePolicy.Expanding, qt.QSizePolicy.Fixed)
-            button.toolTip = f"{index + 1}. {title}: {explanation}"
-            button.connect("clicked(bool)", lambda checked, k=key: self.showStep(k))
-            barLayout.addWidget(button, index // 3, index % 3)
-            self.stepButtons[key] = button
-        self.layout.addWidget(bar)
+        # --- step bar: a toolbar at the top of the main window (shown while this module is open), in the panel
+        # when there is no main window
+        self.toolbar = self._buildToolbar()
+        if self.toolbar is None:
+            bar = qt.QFrame()
+            bar.setFrameShape(qt.QFrame.StyledPanel)
+            barLayout = qt.QGridLayout(bar)
+            barLayout.setContentsMargins(4, 4, 4, 4)
+            barLayout.setSpacing(4)
+            for index, (key, _, title, explanation) in enumerate(STEPS):
+                button = self._stepButton(index, key, title, explanation)
+                button.setSizePolicy(qt.QSizePolicy.Expanding, qt.QSizePolicy.Fixed)
+                barLayout.addWidget(button, index // 3, index % 3)
+            self.layout.addWidget(bar)
         self.titleLabel = qt.QLabel()
         self.titleLabel.wordWrap = True
         self.layout.addWidget(self.titleLabel)
@@ -636,6 +634,71 @@ class DynamicNeuroPETWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.onAtlasFolderChanged(self.logic.atlasFolder(), save=False)
         self.selectInputs()
         self.showStep(STEP_DATA, enterStep=False)
+
+    # --- workflow toolbar ------------------------------------------------------------------------------
+    def _stepButton(self, index, key, title, explanation):
+        button = qt.QToolButton()
+        button.setText(title)
+        button.setToolButtonStyle(qt.Qt.ToolButtonTextBesideIcon)
+        button.setAutoRaise(True)
+        button.setCheckable(True)
+        button.setFocusPolicy(qt.Qt.NoFocus)
+        button.toolTip = f"{index + 1}. {title}: {explanation}"
+        button.connect("clicked(bool)", lambda checked, k=key: self.showStep(k))
+        self.stepButtons[key] = button
+        return button
+
+    def _buildToolbar(self):
+        """The workflow toolbar: the module's name and the steps with their state, like the Tarvos toolbar. One per
+        widget; a toolbar left by a developer reload is hidden and renamed, never deleted (Python may still wrap
+        it)."""
+        try:
+            if slicer.app.commandOptions().noMainWindow:
+                return None
+            mainWindow = slicer.util.mainWindow()
+        except Exception:
+            mainWindow = None
+        if mainWindow is None:
+            return None
+        for old in [w for w in mainWindow.findChildren(qt.QToolBar) if w.objectName == TOOLBAR_OBJECT_NAME]:
+            old.setVisible(False)
+            old.objectName = TOOLBAR_OBJECT_NAME + "Retired"
+            try:
+                old.toggleViewAction().setVisible(False)
+            except Exception:
+                pass
+        toolbar = qt.QToolBar("Neuro receptor PET workflow", mainWindow)
+        toolbar.objectName = TOOLBAR_OBJECT_NAME
+        mainWindow.addToolBarBreak()
+        mainWindow.addToolBar(toolbar)
+        toolbar.setMovable(True)
+        toolbar.setVisible(False)
+        title = qt.QToolButton()
+        title.setText("Neuro Receptor PET")
+        title.setToolButtonStyle(qt.Qt.ToolButtonTextBesideIcon)
+        title.setAutoRaise(True)
+        title.setFocusPolicy(qt.Qt.NoFocus)
+        title.setStyleSheet("QToolButton { font-weight: bold; }")
+        if os.path.exists(ICON_PATH):
+            title.setIcon(qt.QIcon(ICON_PATH))
+        title.toolTip = "Dynamic Neuro Receptor PET: back to the first step"
+        title.connect("clicked(bool)", lambda checked: self.showStep(STEP_DATA))
+        toolbar.addWidget(title)
+        toolbar.addSeparator()
+        for index, (key, _, stepTitle, explanation) in enumerate(STEPS):
+            if index > 0:
+                arrow = qt.QLabel("\u203a")
+                arrow.setStyleSheet("color: #8f969c; font-weight: bold; padding: 0 2px;")
+                toolbar.addWidget(arrow)
+            toolbar.addWidget(self._stepButton(index, key, stepTitle, explanation))
+        return toolbar
+
+    def _showToolbar(self, show):
+        if getattr(self, "toolbar", None) is not None:
+            try:
+                self.toolbar.setVisible(bool(show))
+            except Exception:
+                logging.debug("Neuro: the toolbar is gone", exc_info=True)
 
     # --- parameter node: the series and images shared by the steps ---------------------------------
     def _parameter(self):
@@ -1446,15 +1509,18 @@ class DynamicNeuroPETWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
     # --- module ------------------------------------------------------------------------------------
     def enter(self):
         self._entered = True
+        self._showToolbar(True)
         self.selectInputs()
         self.showStep(self.current)
 
     def exit(self):
+        self._showToolbar(False)
         if self.current in self.embedded:
             self._takeSeriesFrom(self.current)
         self._callStep(self.current, "exit")
 
     def cleanup(self):
+        self._showToolbar(False)
         self._closeNormSession()
         self.refreshTimer.stop()
         self.removeObservers()
