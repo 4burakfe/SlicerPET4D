@@ -65,6 +65,9 @@ METHODS = ((METHOD_PET, "Register the PET to the template (default)"),
            (METHOD_ANATOMY, "Normalize the CT/MR, apply the same transform to the PET"))
 NORMALIZATION_STEPS = ("Affine", "BSpline")
 NORMALIZATION_ITERATIVE_GRID_MM = 30.0     # iterative engine: last control-point spacing (brain to template)
+# The PET is registered to the skull-stripped template by default (the scalp of the T1 has no PET counterpart);
+# the CT/MR is registered to the whole template.
+NORMALIZATION_BRAIN_MASK = {METHOD_PET: True, METHOD_ANATOMY: False}
 NORMALIZATION_INITIALIZATION = {METHOD_PET: "useMomentsAlign", METHOD_ANATOMY: "useGeometryAlign"}
 # Harden: the template's field of view with the PET voxel size (default), the template grid (1 mm), or custom
 NORMALIZATION_GRIDS = (("Keep the PET voxel size (over the template field of view)", reg.OUTPUT_PET_SPACING),
@@ -891,10 +894,10 @@ class DynamicNeuroPETWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.templateNote.wordWrap = True
         form.addRow(self.templateNote)
         self.maskCheck = qt.QCheckBox("Skull-stripped template (brain mask)")
-        self.maskCheck.checked = False
+        self.maskCheck.checked = NORMALIZATION_BRAIN_MASK[METHOD_PET]
         self.maskCheck.toolTip = ("Register to the template with the voxels outside its brain mask "
                                   "(mni_icbm152_t1_tal_nlin_sym_09c_mask) set to 0, so the scalp and the neck do not "
-                                  "pull the fit. Off by default.")
+                                  "pull the fit. On by default when the PET is registered, off for the CT/MR method.")
         form.addRow(self.maskCheck)
         from DynamicPETRegistration import iterativeOptions
         self.normEngineCombo = qt.QComboBox()
@@ -1021,6 +1024,7 @@ class DynamicNeuroPETWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
     def onMethodChanged(self, *args):
         method = self.method()
         self.normInitCombo.setCurrentIndex(self.normInitCombo.findData(NORMALIZATION_INITIALIZATION[method]))
+        self.maskCheck.checked = NORMALIZATION_BRAIN_MASK[method]
         self._updateTemplateChoice()
         self._clearNormalization()
 

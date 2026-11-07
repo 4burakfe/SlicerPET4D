@@ -470,8 +470,8 @@ can be skipped. Steps 2, 3 and 6 are the panels of the modules above, shown insi
    B-spline** by default. *Registration* can be switched to the **iterative multi-resolution** engine (rigid, then
    deformable, B-spline grid 30 mm; affine can be picked), which uses far less memory:
    - **Register the PET to the template** (default): the summed image (else the frame of the highest activity) to the
-     **T1** template, centres of mass as the start (optionally skull-stripped with the template's brain mask, off by
-     default).
+     **T1** template, centres of mass as the start (skull-stripped with the template's brain mask, on by default; off
+     for the CT/MR method).
    - **Normalize the CT/MR, apply the same transform to the PET:** the CT/MR is registered to the template of its
      contrast (T1, T2 or PD; CT to the T1) and the same transform moves the PET, which must already lie on the CT/MR
      (step 3, or PET/MR). The CT/MR is normalized too.
