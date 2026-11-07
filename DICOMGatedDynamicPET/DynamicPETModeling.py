@@ -64,6 +64,8 @@ DEFAULT_ORIENTATION = "Axial"
 FRAME_COLORMAP = "PET-DICOM"
 SUMMED_COLORMAP = "Inverted grey"
 MAP_COLORMAP = "PET-Rainbow2"
+MARKER_SECONDS = 5            # the marker shown where a segment picked in the table is
+MARKER_COLOR = (1.0, 0.85, 0.1)
 AUTO_PERCENTILE = 99.9
 TIME_FIRST_FRAME, TIME_INJECTION, TIME_MANUAL = "first", "injection", "manual"
 TIME_ZEROS = ((TIME_FIRST_FRAME, "Start of the first frame"), (TIME_INJECTION, "Injection time (from the PET)"),
@@ -516,6 +518,7 @@ class ModelingSession:
         self.segmentation = None
         self.segmentState = None        # (display node, view IDs, {segment ID: visible}) to restore
         self.uppers = []
+        self.marker = None              # markups point at the segment picked in the table (removed after a while)
 
     # --- open / close ----------------------------------------------------------------------------
     def open(self):
@@ -530,6 +533,7 @@ class ModelingSession:
         self._setupViews()
 
     def close(self):
+        self._removeMarker()
         self.setSegmentation(None)
         for node, tag in self.observers:
             node.RemoveObserver(tag)
@@ -768,6 +772,56 @@ class ModelingSession:
         for segmentId in DynamicPETModelingLogic.segmentIds(self.segmentation):
             display.SetSegmentVisibility(segmentId, segmentId in shown)
 
+    def jumpToSegment(self, segmentId):
+        """Move the views to the slice of the segment (its voxel nearest its centre of mass) and show a marker
+        there for MARKER_SECONDS."""
+        if not segmentId or self.segmentation is None or self.mainVolume is None:
+            return
+        mask = slicer.util.arrayFromSegmentBinaryLabelmap(self.segmentation, segmentId, self.mainVolume)
+        voxel = dynamicviews.focusVoxel(mask) if mask is not None else None
+        if voxel is None:
+            return
+        k, j, i = voxel
+        ijkToRas = vtk.vtkMatrix4x4()
+        self.mainVolume.GetIJKToRASMatrix(ijkToRas)
+        ras = ijkToRas.MultiplyPoint((i, j, k, 1.0))[:3]
+        self._link(False)
+        try:
+            for widget in self._allWidgets():
+                widget.mrmlSliceNode().JumpSliceByOffsetting(*ras)
+        finally:
+            self._link(True)
+        self._showMarker(ras)
+
+    def _showMarker(self, ras):
+        self._removeMarker()
+        marker = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLMarkupsFiducialNode", "Segment position")
+        marker.SetSaveWithScene(False)
+        marker.SetHideFromEditors(True)
+        marker.SetAttribute(HELPER_ATTRIBUTE, "1")
+        marker.AddControlPoint(vtk.vtkVector3d(*ras), "")
+        marker.SetLocked(True)
+        display = marker.GetDisplayNode()
+        if display is not None:
+            for widget in self._allWidgets():
+                display.AddViewNodeID(widget.mrmlSliceNode().GetID())
+            display.SetGlyphTypeFromString("ThickCross2D")
+            display.SetGlyphScale(6.0)
+            display.SetPointLabelsVisibility(False)
+            display.SetSelectedColor(*MARKER_COLOR)
+            display.SetColor(*MARKER_COLOR)
+        self.marker = marker
+        qt.QTimer.singleShot(int(MARKER_SECONDS * 1000), lambda node=marker: self._removeMarker(node))
+
+    def _removeMarker(self, node=None):
+        """Remove the marker (only that node when given: a later click has its own marker)."""
+        marker = self.marker
+        if marker is None or (node is not None and node is not marker):
+            return
+        self.marker = None
+        if slicer.mrmlScene.IsNodePresent(marker):
+            slicer.mrmlScene.RemoveNode(marker)
+
     # --- dock -------------------------------------------------------------------------------------
     def _makeDock(self):
         mainWindow = slicer.util.mainWindow()
@@ -824,8 +878,15 @@ class ModelingSession:
 
     def _onCellClicked(self, row, column):
         item = self.table.item(row, 0)
-        if item is not None and self.onRowClicked:
-            self.onRowClicked(item.data(qt.Qt.UserRole))
+        if item is None:
+            return
+        segmentId = item.data(qt.Qt.UserRole)
+        if self.onRowClicked:
+            self.onRowClicked(segmentId)
+        try:
+            self.jumpToSegment(segmentId)
+        except Exception:
+            logging.warning(f"Could not go to segment {segmentId}", exc_info=True)
 
     def _onHeaderClicked(self, column):
         if self._tableData is None:

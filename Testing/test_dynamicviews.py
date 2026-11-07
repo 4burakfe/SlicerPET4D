@@ -93,3 +93,20 @@ def test_playback_helpers():
     assert dv.defaultPlaySpeed(intervals) == 90                      # 1:30:00 in 60 s
     assert dv.speedText(90) == "x90  (1 s = 1:30)"
     assert dv.speedText(0.5) == "x0.5  (1 s = 0:00.5)"
+
+
+def test_focus_voxel():
+    import numpy as np
+    assert dv.focusVoxel(np.zeros((3, 3, 3))) is None
+    box = np.zeros((5, 5, 5), dtype=bool)
+    box[1:4, 1:4, 1:4] = True
+    assert dv.focusVoxel(box) == (2, 2, 2)
+    ring = np.zeros((1, 7, 7), dtype=bool)          # a ring: its centre is not in it
+    ring[0, 1, 1:6] = ring[0, 5, 1:6] = ring[0, 1:6, 1] = ring[0, 1:6, 5] = True
+    k, j, i = dv.focusVoxel(ring)
+    assert ring[k, j, i]
+
+
+def test_button_style():
+    assert dv.BUTTON_COLORS["revert"] in dv.buttonStyle("revert")
+    assert "#123456" in dv.buttonStyle("#123456")

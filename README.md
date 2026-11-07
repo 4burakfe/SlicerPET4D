@@ -290,7 +290,9 @@ pitch is nodding, roll is tilting the head toward a shoulder, yaw is turning it 
   views*), and *Bottom panel: Motion plots / Frame timeline* show or hide the plots and the timeline (with both off
   the panel closes).
 
-Settings in the panel:
+Settings in the panel (the registration settings, from *Method* to *Advanced*, are in the **Registration
+settings** section, closed at start; *Register frames*, *Revert changes* and *Harden transforms* are coloured
+buttons below it):
 
 | Setting | Default | |
 |---|---|---|
@@ -352,6 +354,8 @@ summed image** of the series.
   when it improves the match and does not fold. It works on a 2 mm grid (*Final resolution*); both images are averaged
   down to about that voxel size before anything else, so a sub-millimetre MR needs a fraction of the memory. The deformation is stored as a grid transform under the linear
   one, so the views, manual correction and Harden work the same way.
+- The method (BRAINSFit or iterative), its steps and options and the initialization are in the **Registration method
+  and settings** section, closed at start; *Register*, *Revert changes* and *Harden* are coloured buttons below it.
 - **Steps:** up to two BRAINSFit steps run one after the other, the second starting where the first ended:
   **Rigid only** by default (step 2 *(none)*: the PET and the CT/MR are the same patient). Affine or BSpline can
   be picked as step 2 (BSpline only as the last step). A
@@ -442,8 +446,9 @@ The **Dynamic PET Modeling** module (Nuclear Medicine > PET4D) fits kinetic mode
   segments** on the left third and the **frames** (as in Review/Edit) on the right. The lower half is a dock with the
   **TACs** on the left (target and reference thick and opaque, the other segments faint; fitted models dashed; the
   t\* line or the SUVR window marked; for Patlak / Logan the linear plot of the target can be shown) and the
-  **results table** on the right (click a row to make that segment the target; click a column header to sort the rows
-  by it, e.g. by name or BPnd, again for the reverse order). **Show all fitted segments** shows every segment with a
+  **results table** on the right (click a row to make that segment the target; the views also go to the slice of
+  that segment, its voxel nearest its centre of mass, and a yellow cross marks it for 5 seconds; click a column
+  header to sort the rows by it, e.g. by name or BPnd, again for the reverse order). **Show all fitted segments** shows every segment with a
   result (after *Fit all segments*) on the summed image, not only the target and the reference. **Show all segments
   in the curves** (on by default) draws the other segments' TACs faintly; off, only the target and the reference.
 

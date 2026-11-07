@@ -1516,13 +1516,18 @@ class DynamicPETMotionCorrectionWidget(ScriptedLoadableModuleWidget, VTKObservat
         # --- registration
         regBox = qt.QGroupBox("Registration (BRAINSFit)")
         reg = qt.QFormLayout(regBox)
+        # the settings fold away (closed at start) so the panel shows the buttons; Advanced is inside
+        settingsBox = ctk.ctkCollapsibleButton()
+        settingsBox.text = "Registration settings"
+        settingsBox.collapsed = True
+        settingsForm = qt.QFormLayout(settingsBox)
         self.methodCombo = qt.QComboBox()
         for name in mc.METHODS:
             self.methodCombo.addItem(name)
         self.methodCombo.setCurrentIndex(self.methodCombo.findText(mc.DEFAULT_METHOD))
         self.methodCombo.toolTip = ("Rigid: 3 shifts + 3 angles (whole-body motion; the timeline shows them). "
                                     "Affine: adds scaling and shear. BSpline: local deformation.")
-        reg.addRow("Method:", self.methodCombo)
+        settingsForm.addRow("Method:", self.methodCombo)
         self.initializationCombo = qt.QComboBox()
         for title, mode in mc.INITIALIZATIONS:
             self.initializationCombo.addItem(title, mode)
@@ -1532,7 +1537,7 @@ class DynamicPETMotionCorrectionWidget(ScriptedLoadableModuleWidget, VTKObservat
             "frame and the reference volumes before registering (needed when a frame comes from another "
             "acquisition, e.g. added in Review/Edit); centers of mass aligns the activity; none starts from the "
             "frames as they are. The second pass starts from the first.")
-        reg.addRow("Initialization:", self.initializationCombo)
+        settingsForm.addRow("Initialization:", self.initializationCombo)
         self.twoPassCheck = qt.QCheckBox("Enable two pass")
         self.twoPassCheck.checked = False
         self.twoPassCheck.toolTip = ("After the first pass, sum the corrected frames (weighted as the series' summed "
@@ -1550,7 +1555,7 @@ class DynamicPETMotionCorrectionWidget(ScriptedLoadableModuleWidget, VTKObservat
         row.addWidget(self.twoPassCheck)
         row.addWidget(qt.QLabel("second pass:"))
         row.addWidget(self.secondMethodCombo, 1)
-        reg.addRow(row)
+        settingsForm.addRow(row)
         self.lowActivityCheck = qt.QCheckBox("Do not register low activity frames, below")
         self.lowActivityCheck.checked = True
         self.lowActivitySpin = qt.QDoubleSpinBox()
@@ -1566,7 +1571,7 @@ class DynamicPETMotionCorrectionWidget(ScriptedLoadableModuleWidget, VTKObservat
         row.addWidget(self.lowActivitySpin)
         row.addWidget(qt.QLabel("of the max frame"))
         row.addStretch(1)
-        reg.addRow(row)
+        settingsForm.addRow(row)
         self.limitCheck = qt.QCheckBox("Limit motion to")
         self.limitCheck.checked = True
         self.limitSpin = qt.QDoubleSpinBox()
@@ -1582,7 +1587,7 @@ class DynamicPETMotionCorrectionWidget(ScriptedLoadableModuleWidget, VTKObservat
         row.addWidget(self.limitSpin)
         row.addWidget(qt.QLabel("per axis (R, A, S)"))
         row.addStretch(1)
-        reg.addRow(row)
+        settingsForm.addRow(row)
         advanced = ctk.ctkCollapsibleButton()
         advanced.text = "Advanced"
         advanced.collapsed = True
@@ -1599,19 +1604,20 @@ class DynamicPETMotionCorrectionWidget(ScriptedLoadableModuleWidget, VTKObservat
         self.gridSpin.value = mc.DEFAULT_BSPLINE_GRID
         self.gridSpin.toolTip = "B-spline control grid size along each axis"
         advancedForm.addRow("B-spline grid:", self.gridSpin)
-        reg.addRow(advanced)
+        settingsForm.addRow(advanced)
+        reg.addRow(settingsBox)
         self.rowsNote = qt.QLabel()
         self.rowsNote.wordWrap = True
         reg.addRow(self.rowsNote)
-        self.registerButton = qt.QPushButton("Register frames")
+        self.registerButton = dynamicviews.colorButton(qt.QPushButton("Register frames"), "action")
         self.registerButton.toolTip = "Register every frame to the reference and show the corrected frames"
         reg.addRow(self.registerButton)
-        self.revertButton = qt.QPushButton("Revert changes")
+        self.revertButton = dynamicviews.colorButton(qt.QPushButton("Revert changes"), "revert")
         self.revertButton.toolTip = ("Before hardening: drop the registration. After hardening: put the overwritten "
                                      "frames and summed image back, or remove the new motion corrected series, its "
                                      "table and summed image, and go back to the original series.")
         self.revertButton.enabled = False
-        self.hardenButton = qt.QPushButton("Harden transforms")
+        self.hardenButton = dynamicviews.colorButton(qt.QPushButton("Harden transforms"), "harden")
         self.hardenButton.toolTip = ("Make the motion corrected series: every frame, corrected or (when it was not "
                                      "registered) as it was, with a table of the per-frame motion and, with Resum, the "
                                      "summed image again. A dialog asks for the voxels (original or a new voxel "

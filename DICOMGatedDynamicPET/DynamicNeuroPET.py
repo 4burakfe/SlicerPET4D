@@ -41,7 +41,7 @@ _MODULE_DIR = os.path.dirname(os.path.abspath(globals().get("__file__", "") or "
 if globals().get("__file__") and _MODULE_DIR not in sys.path:
     sys.path.insert(0, _MODULE_DIR)
 
-from DICOMGatedDynamicPETLib import neuro  # noqa: E402
+from DICOMGatedDynamicPETLib import dynamicviews, neuro  # noqa: E402
 from DICOMGatedDynamicPETLib import registration as reg  # noqa: E402
 from DICOMGatedDynamicPETLib import resampling  # noqa: E402
 from DICOMGatedDynamicPETLib.hardendialog import hardenDialog  # noqa: E402
@@ -110,8 +110,6 @@ TOOLBAR_OBJECT_NAME = "DynamicNeuroPETWorkflowToolbar"
 ICON_PATH = os.path.join(_MODULE_DIR, "Resources", "Icons", "DynamicNeuroPET.png")
 STATE_DONE, STATE_READY, STATE_WAITING = "done", "ready", "waiting"
 STATE_COLORS = {STATE_DONE: "#2e9e5b", STATE_READY: "#2f7ed8", STATE_WAITING: "#8f969c"}
-BUTTON_STYLE = ("QPushButton {{ background-color: {0}; color: white; font-weight: bold; border: none; "
-                "border-radius: 4px; padding: 5px 10px; }} QPushButton:disabled {{ background-color: #9aa1a7; }}")
 
 
 class DynamicNeuroPET(ScriptedLoadableModule):
@@ -598,10 +596,8 @@ def _badge(state, number, size=22):
     return qt.QIcon(pixmap)
 
 
-def _button(text, color="#2f7ed8"):
-    button = qt.QPushButton(text)
-    button.setStyleSheet(BUTTON_STYLE.format(color))
-    return button
+def _button(text, role="action"):
+    return dynamicviews.colorButton(qt.QPushButton(text), role)
 
 
 class DynamicNeuroPETWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
@@ -1056,10 +1052,10 @@ class DynamicNeuroPETWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.normManualButton = qt.QPushButton("Correct manually")
         self.normManualButton.checkable = True
         self.normManualButton.toolTip = "Move / rotate handles on the PET, on top of the normalization"
-        self.normRevertButton = qt.QPushButton("Revert")
+        self.normRevertButton = _button("Revert", "revert")
         self.normRevertButton.toolTip = ("Before Harden: drop the normalization. After Harden: remove the normalized "
                                          "series (or put an overwritten one back).")
-        self.normHardenButton = _button("Harden", "#2e9e5b")
+        self.normHardenButton = _button("Harden", "harden")
         self.normHardenButton.toolTip = "Resample every frame (and the summed image) into the template space"
         row.addWidget(self.normManualButton)
         row.addWidget(self.normRevertButton)
