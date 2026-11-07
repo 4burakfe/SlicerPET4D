@@ -380,8 +380,10 @@ summed image** of the series.
 - **Correct manually:** move / rotate handles (as in EasyReg) on the PET in the slice views, on a manual transform on
   top of the registration; rotations turn about the centre of the PET. *Reset manual* drops it. A new *Register*
   starts from scratch (the manual correction is reset).
-- **Harden** opens a dialog: the **output grid**, always over the CT/MR field of view and in its directions:
-  *Keep the PET voxel size* (default), *Resample to the CT/MR grid* or *Resample to this voxel size*; the **resample
+- **Harden** opens a dialog: the **output grid**, in the CT/MR directions over the CT/MR field of view, **grown to
+  the registered PET's field of view where the CT/MR is smaller** (the PET is not cut; the voxels stay aligned):
+  *Keep the PET voxel size* (default) or *Resample to this voxel size*; *Resample to the CT/MR grid* keeps exactly
+  the CT/MR grid (a sub-millimetre grid over the whole PET would be huge). Then the **resample
   method** (linear, nearest neighbour, cubic); and **Overwrite** (the frames and the summed image of the series are
   replaced), **Save separately** (a new series *"&lt;series&gt; registered"* with its browser and a new summed image
   *"&lt;summed&gt; registered"*) or **Cancel**. A B-spline is turned into a displacement grid once, so every frame is
