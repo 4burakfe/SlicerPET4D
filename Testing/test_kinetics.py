@@ -281,3 +281,16 @@ def test_sort_texts():
     assert kin.sortTexts(["Region 10", "region 2", "Caudate L", ""]) == [2, 1, 0, 3]        # names, natural order
     assert kin.sortTexts(["b", "a", "b"]) == [1, 0, 2]                                      # stable
     assert kin.sortTexts([]) == []
+
+
+def test_mask_on_grid():
+    mask = np.zeros((10, 10, 10), dtype=np.uint8)       # 1 mm grid, cube of voxels 2..7
+    mask[2:8, 2:8, 2:8] = 1
+    same = kin.maskOnGrid(mask, np.eye(4), mask.shape, np.eye(4), slicesPerChunk=3)
+    assert np.array_equal(same, mask != 0)
+    coarse = np.diag([2.0, 2.0, 2.0, 1.0])               # 2 mm grid over the same space
+    out = kin.maskOnGrid(mask, np.eye(4), (6, 6, 6), coarse)
+    assert out[2, 2, 2] and out[3, 3, 3] and not out[0, 0, 0] and not out[5, 5, 5]
+    shifted = np.eye(4)
+    shifted[:3, 3] = 100.0                               # entirely outside the mask's grid
+    assert not kin.maskOnGrid(mask, np.eye(4), (4, 4, 4), shifted).any()

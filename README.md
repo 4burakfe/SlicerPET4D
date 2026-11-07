@@ -438,8 +438,12 @@ The **Dynamic PET Modeling** module (Nuclear Medicine > PET4D) fits kinetic mode
   **Export CSV** saves the results and, next to them, *&lt;name&gt;_TACs.csv* with every curve and fit.
 - **Voxel-wise calculation:** parametric maps for **1TC** (K1, k2, vB, VT, basis functions), **Patlak** (Ki, V0),
   **Logan** (VT), **Logan reference** (DVR, BPnd), **SRTM** (BPnd, R1, k2, basis functions, Gunn 1997) and **SUVR**,
-  as new volumes on the PET grid. Voxels below a percentage (5 %) of the 99.9th percentile of the mean activity, or
-  outside the segments when asked, are 0. **Negative values are clipped to 0** by default (noise in voxels with
+  as new volumes on the PET grid. Voxels below a percentage of the 99.9th percentile of the mean activity
+  (*Background threshold*, **0 % by default**: a percentage of the maximum drops a low-uptake cortex next to a hot
+  striatum, e.g. with [18F]fallypride), voxels with no activity, or voxels outside the segments when asked, are 0.
+  **Mask outside the brain** (on by default) also leaves the voxels outside a brain mask at 0 when one is picked
+  (the Neuro workflow picks the MNI template's brain mask once the series is normalized).
+  **Negative values are clipped to 0** by default (noise in voxels with
   little uptake; untick *Clip negative values to 0* to keep them; the region fits are not clipped). The graphical
   methods use the target's t\*. The BPnd map (else the first map) is shown in the large view at full opacity.
 - **Layout:** the upper half has the **summed image** (or the middle frame) with the **target and reference

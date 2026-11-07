@@ -71,7 +71,9 @@ TIME_FIRST_FRAME, TIME_INJECTION, TIME_MANUAL = "first", "injection", "manual"
 TIME_ZEROS = ((TIME_FIRST_FRAME, "Start of the first frame"), (TIME_INJECTION, "Injection time (from the PET)"),
               (TIME_MANUAL, "Injection at (s from the first frame):"))
 INPUT_SEGMENT, INPUT_FILE = "segment", "file"
-DEFAULT_MAP_THRESHOLD = 5.0     # % of the 99.9th percentile of the summed activity
+# % of the 99.9th percentile of the summed activity; 0 by default (user 2026-11-07): with a high-uptake region (e.g.
+# the striatum with [18F]fallypride) a percentage of the maximum also drops the low-uptake cortex
+DEFAULT_MAP_THRESHOLD = 0.0
 MAP_CHUNK = 200000              # voxels per step of the parametric maps
 
 
@@ -397,9 +399,10 @@ class DynamicPETModelingLogic(ScriptedLoadableModuleLogic):
         return written
 
     # --- parametric maps -----------------------------------------------------------------------
-    def mapMask(self, analysis, thresholdPercent=DEFAULT_MAP_THRESHOLD, insideSegments=False):
+    def mapMask(self, analysis, thresholdPercent=DEFAULT_MAP_THRESHOLD, insideSegments=False, brainMask=None):
         """Flat voxel indexes of the parametric maps: voxels whose duration weighted mean activity is at least
-        thresholdPercent % of its 99.9th percentile (optionally only inside the segments)."""
+        thresholdPercent % of its 99.9th percentile (optionally only inside the segments, and only inside
+        brainMask, a volume node that is non-zero in the brain, on any grid)."""
         sequence, frames = analysis.sequence, analysis.frames
         total = None
         for f in range(sequence.GetNumberOfDataNodes()):
@@ -421,12 +424,25 @@ class DynamicPETModelingLogic(ScriptedLoadableModuleLogic):
             finally:
                 slicer.mrmlScene.RemoveNode(helper)
             keep &= inside
+        if brainMask is not None:
+            first = sequence.GetNthDataNode(0)
+            shape = slicer.util.arrayFromVolume(first).shape
+            keep &= kin.maskOnGrid(slicer.util.arrayFromVolume(brainMask), self._ijkToRas(brainMask), shape,
+                                   self._ijkToRas(first)).ravel()
         return np.flatnonzero(keep)
 
+    @staticmethod
+    def _ijkToRas(volume):
+        matrix = vtk.vtkMatrix4x4()
+        volume.GetIJKToRASMatrix(matrix)
+        return np.array([[matrix.GetElement(r, c) for c in range(4)] for r in range(4)])
+
     def parametricMaps(self, analysis, modelKey, referenceId=None, options=None, plasma=None,
-                       thresholdPercent=DEFAULT_MAP_THRESHOLD, insideSegments=False, progress=None, names=None):
+                       thresholdPercent=DEFAULT_MAP_THRESHOLD, insideSegments=False, progress=None, names=None,
+                       brainMask=None):
         """Voxel-wise maps of a model (kinetics.VOXEL_MAPS) as new volumes on the grid of the first frame:
-        {map name: volume node}. Every frame must have the grid of the first one."""
+        {map name: volume node}. Every frame must have the grid of the first one. brainMask: voxels outside it
+        are 0 (see mapMask)."""
         if modelKey not in kin.VOXEL_MAPS:
             raise ValueError(f"{kin.model(modelKey).title} has no voxel-wise version")
         sequence = analysis.sequence
@@ -435,7 +451,7 @@ class DynamicPETModelingLogic(ScriptedLoadableModuleLogic):
         if any(self._geometryKey(sequence.GetNthDataNode(f)) != key for f in range(sequence.GetNumberOfDataNodes())):
             raise ValueError("The frames do not share one grid; resample or harden them first")
         inputFunction, reference, blood = self.inputs(analysis, modelKey, referenceId, plasma)
-        indexes = self.mapMask(analysis, thresholdPercent, insideSegments)
+        indexes = self.mapMask(analysis, thresholdPercent, insideSegments, brainMask)
         shape = slicer.util.arrayFromVolume(first).shape
         arrays = [self.frameArray(sequence, f).ravel() for f in range(sequence.GetNumberOfDataNodes())]
         outputs = {name: np.zeros(int(np.prod(shape)), dtype=np.float32) for name in kin.VOXEL_MAPS[modelKey]}
@@ -1151,10 +1167,23 @@ class DynamicPETModelingWidget(ScriptedLoadableModuleWidget, VTKObservationMixin
         self.mapThresholdSpin.suffix = " %"
         self.mapThresholdSpin.value = DEFAULT_MAP_THRESHOLD
         self.mapThresholdSpin.toolTip = ("Voxels whose mean activity is below this % of the 99.9th percentile are "
-                                         "left at 0")
+                                         "left at 0. 0 % (default): every voxel with activity; a percentage of the "
+                                         "maximum can drop low-uptake regions next to a hot one (cortex next to the "
+                                         "striatum with fallypride)")
         mapForm.addRow("Background threshold:", self.mapThresholdSpin)
         self.insideCheck = qt.QCheckBox("Only inside the segments")
         mapForm.addRow(self.insideCheck)
+        self.brainMaskCheck = qt.QCheckBox("Mask outside the brain")
+        self.brainMaskCheck.checked = True
+        self.brainMaskCheck.toolTip = ("Leave the voxels outside the brain mask at 0 (when a brain mask is picked; "
+                                       "the Neuro workflow picks the MNI template's brain mask)")
+        self.brainMaskSelector = self._nodeSelector(["vtkMRMLScalarVolumeNode", "vtkMRMLLabelMapVolumeNode"],
+                                                    "Volume that is non-zero in the brain (any grid in the same "
+                                                    "space as the series, e.g. the MNI brain mask)")
+        row = qt.QHBoxLayout()
+        row.addWidget(self.brainMaskCheck)
+        row.addWidget(self.brainMaskSelector, 1)
+        mapForm.addRow(row)
         self.clipCheck = qt.QCheckBox("Clip negative values to 0")
         self.clipCheck.checked = True
         self.clipCheck.toolTip = ("Negative map values (noise in voxels with little uptake, e.g. BPnd < 0 or Ki < 0) "
@@ -1254,6 +1283,10 @@ class DynamicPETModelingWidget(ScriptedLoadableModuleWidget, VTKObservationMixin
     # --- state ---------------------------------------------------------------------------------
     def modelKey(self):
         return self.modelCombo.currentData or kin.MODEL_ORDER[0]
+
+    def brainMask(self):
+        """The brain mask of the voxel-wise maps: the picked volume when 'Mask outside the brain' is on, else None."""
+        return self.brainMaskSelector.currentNode() if self.brainMaskCheck.checked else None
 
     def targetId(self):
         return self.targetCombo.currentData
@@ -1879,7 +1912,8 @@ class DynamicPETModelingWidget(ScriptedLoadableModuleWidget, VTKObservationMixin
             qt.QApplication.setOverrideCursor(qt.Qt.WaitCursor)
             try:
                 return self.logic.parametricMaps(analysis, key, self.referenceId(), options, self.plasma(),
-                                                 self.mapThresholdSpin.value, self.insideCheck.checked, progress)
+                                                 self.mapThresholdSpin.value, self.insideCheck.checked, progress,
+                                                 brainMask=self.brainMask())
             finally:
                 qt.QApplication.restoreOverrideCursor()
                 dialog.close()
