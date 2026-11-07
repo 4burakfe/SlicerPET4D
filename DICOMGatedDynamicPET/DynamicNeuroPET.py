@@ -1488,8 +1488,53 @@ class DynamicNeuroPETWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             if index >= 0:
                 widget.targetCombo.setCurrentIndex(index)
 
+    def pendingHarden(self, key):
+        """Whether step key (motion correction, CT/MR registration, normalization) has a result that is not hardened
+        yet."""
+        if key == STEP_NORM:
+            return self.normResult is not None
+        if key in (STEP_MC, STEP_REG) and key in self.embedded:
+            button = getattr(self.stepWidget(key), "hardenButton", None)
+            return bool(button is not None and button.enabled)
+        return False
+
+    def _hardenStep(self, key):
+        if key == STEP_NORM:
+            self.onNormHarden()
+        else:
+            widget = self.stepWidget(key)
+            if widget is not None:
+                widget.onHarden()
+
+    def _confirmLeaving(self, key):
+        """Leaving a step with a result that is not hardened: offer Harden. False to stay on the step."""
+        if not self.pendingHarden(key):
+            return True
+        title = dict((k, t) for k, _, t, _ in STEPS)[key]
+        box = qt.QMessageBox(slicer.util.mainWindow())
+        box.setIcon(qt.QMessageBox.Question)
+        box.setWindowTitle(title)
+        box.setText(f"The {title.lower()} result is not hardened yet. Harden it now?")
+        box.setInformativeText("Without Harden the series stays as it was; the result is kept and you can come back "
+                               "to harden it.")
+        hardenButton = box.addButton("Harden", qt.QMessageBox.AcceptRole)
+        continueButton = box.addButton("Continue without", qt.QMessageBox.DestructiveRole)
+        box.addButton(qt.QMessageBox.Cancel)
+        box.setDefaultButton(hardenButton)
+        box.exec_()
+        clicked = box.clickedButton()
+        if clicked == continueButton:
+            return True
+        if clicked == hardenButton:
+            self._hardenStep(key)
+            return not self.pendingHarden(key)          # the Harden dialog cancelled: stay
+        return False
+
     def showStep(self, key, enterStep=True):
         previous = self.current
+        if previous != key and not self._confirmLeaving(previous):
+            self.refresh()
+            return
         if previous != key:
             if previous in self.embedded:
                 self._takeSeriesFrom(previous)

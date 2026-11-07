@@ -437,8 +437,10 @@ The **Dynamic PET Modeling** module (Nuclear Medicine > PET4D) fits kinetic mode
   segments** on the left third and the **frames** (as in Review/Edit) on the right. The lower half is a dock with the
   **TACs** on the left (target and reference thick and opaque, the other segments faint; fitted models dashed; the
   t\* line or the SUVR window marked; for Patlak / Logan the linear plot of the target can be shown) and the
-  **results table** on the right (click a row to make that segment the target). **Show all fitted segments** shows
-  every segment with a result (after *Fit all segments*) on the summed image, not only the target and the reference.
+  **results table** on the right (click a row to make that segment the target; click a column header to sort the rows
+  by it, e.g. by name or BPnd, again for the reverse order). **Show all fitted segments** shows every segment with a
+  result (after *Fit all segments*) on the summed image, not only the target and the reference. **Show all segments
+  in the curves** (on by default) draws the other segments' TACs faintly; off, only the target and the reference.
 
 The models are in `DICOMGatedDynamicPETLib/kinetics.py` (numpy only) and the module's logic works without the panel,
 so other modules and scripts can use them:
@@ -459,7 +461,9 @@ The **Dynamic Neuro Receptor PET** module (Nuclear Medicine > PET4D) is a step-b
 receptor PET of the brain**. A **workflow toolbar** at the top of the main window (shown while the module is open)
 has the steps with their state (done, ready, waiting); click a step to open it, or use Back / Next in the panel. Steps
 can be skipped. Steps 2, 3 and 6 are the panels of the modules above, shown inside the workflow; the series a step makes
-(e.g. a motion corrected series saved separately) is the series of the next step.
+(e.g. a motion corrected series saved separately) is the series of the next step. Leaving motion correction, CT/MR
+registration or normalization with a result that is not hardened asks whether to **Harden** it first (or continue
+without, the result is kept, or stay).
 
 1. **Data:** the patient's **dynamic PET** series and the **CT / MR**. The MR contrast is read from the DICOM tags
    (series description, protocol and sequence name, else TR / TE / TI): T1 (MPRAGE, SPGR, BRAVO, TFE, ...), T2

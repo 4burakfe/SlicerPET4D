@@ -273,3 +273,11 @@ def test_voxel_maps_clip_negative(setting):
     raw = kin.parametricMaps("LoganRef", frames, data, reference=ref,
                              options={"tStar": 30.0, "clipNegative": False})
     assert float(raw["BPnd"][1]) == pytest.approx(-0.5, abs=0.02)
+
+
+def test_sort_texts():
+    assert kin.sortTexts(["1.5", "", "0.2", "1.000e-05", "3"]) == [3, 2, 0, 4, 1]           # numbers, empty last
+    assert kin.sortTexts(["1.5", "", "0.2", "3"], descending=True) == [3, 0, 2, 1]
+    assert kin.sortTexts(["Region 10", "region 2", "Caudate L", ""]) == [2, 1, 0, 3]        # names, natural order
+    assert kin.sortTexts(["b", "a", "b"]) == [1, 0, 2]                                      # stable
+    assert kin.sortTexts([]) == []
