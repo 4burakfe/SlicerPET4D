@@ -1071,6 +1071,7 @@ class DynamicNeuroPETWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             settings["steps"] = reg.iterativeSteps(settings["iterativeLinear"], settings["iterativeDeformable"])
             return settings
         steps = [c.currentData for c in self.normStepCombos if c.currentData]
+        settings["engine"] = reg.ENGINE_BRAINSFIT      # the defaults are the iterative engine's
         settings["steps"] = reg.validateSteps(steps)
         settings["resample"] = reg.resampleFlags(settings["steps"])
         return settings
