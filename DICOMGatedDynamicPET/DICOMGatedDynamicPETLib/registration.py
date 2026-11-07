@@ -20,9 +20,9 @@ STEP_TYPES = ("Rigid", "Affine", "BSpline")
 # the PET to the same patient's CT/MR: rigid only by default (step 2 "(none)"); affine/B-spline can be added
 DEFAULT_STEPS = ("Rigid",)
 MAX_STEPS = 2
-# whether a step registers to the CT/MR resampled to the PET voxel size (workingSpacing), by default: only the B-spline,
-# which takes tens of GB of memory on a sub-millimetre MR; the linear steps run on the CT/MR as it is
-RESAMPLE_BY_DEFAULT = {"Rigid": False, "Affine": False, "BSpline": True}
+# whether a step registers to the CT/MR resampled to the PET voxel size (workingSpacing), by default: every step (a
+# sub-millimetre MR at full resolution takes tens of GB of memory; the PET resolution limits the match anyway)
+RESAMPLE_BY_DEFAULT = {"Rigid": True, "Affine": True, "BSpline": True}
 DEFAULT_SAMPLING = 0.05
 DEFAULT_BSPLINE_GRID = 5
 DEFAULT_INITIALIZATION = mc.DEFAULT_INITIALIZATION      # geometric centres, as in Motion Correction
@@ -47,7 +47,7 @@ ENGINE_BRAINSFIT = "brainsfit"
 ENGINE_ITERATIVE = "iterative"
 ENGINES = (("BRAINSFit (steps)", ENGINE_BRAINSFIT),
            ("Iterative multi-resolution (linear, then optional deformable)", ENGINE_ITERATIVE))
-DEFAULT_ENGINE = ENGINE_BRAINSFIT
+DEFAULT_ENGINE = ENGINE_ITERATIVE
 ITERATIVE_LINEAR_TYPES = ("Rigid", "Affine")
 DEFAULT_ITERATIVE_LINEAR = "Rigid"
 DEFAULT_ITERATIVE_DEFORMABLE = False   # same patient: rigid only; the Neuro normalization turns it on
@@ -274,6 +274,19 @@ def workingSpacing(fixedSpacing, petSpacing, voxelMm=None):
     if np.allclose(spacing, fixedSpacing, rtol=1e-3):
         return None
     return tuple(float(v) for v in spacing)
+
+
+def poolToSpacing(voxels, ijkToWorld, spacingMm):
+    """Average blocks of voxels (whole voxel counts per axis) so the voxel size gets as close to spacingMm as it can
+    without exceeding it. Returns (voxels, IJK-to-world of the block centres); the input itself when no axis is finer
+    than half of spacingMm."""
+    from . import sitkreg
+    matrix = np.asarray(ijkToWorld, dtype=float)
+    spacing = np.linalg.norm(matrix[:3, :3], axis=0)
+    factors = [max(1, int(np.floor(float(spacingMm) / s + 1e-6))) if s > 0 else 1 for s in spacing]
+    if factors == [1, 1, 1]:
+        return voxels, matrix
+    return sitkreg.blockMean(voxels, matrix, factors)
 
 
 def smoothingSigmas(inputSpacing, outputSpacing):

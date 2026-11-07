@@ -255,6 +255,8 @@ class DynamicNeuroPETLogic(ScriptedLoadableModuleLogic):
                 raise ValueError("Pick the CT/MR in step 1 to normalize it.")
             moving = anatomy
             settings["movingFunctional"] = False
+            # the template is the target grid: kept as it is; the CT/MR is resampled to its voxel size instead
+            settings["resample"] = [False] * len(settings.get("steps") or [])
         else:
             moving = self.referenceImage(sequence)
         if moving.GetParentTransformNode() is not None:

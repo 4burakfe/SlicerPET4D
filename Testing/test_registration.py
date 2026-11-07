@@ -143,8 +143,8 @@ def test_closest_axis():
 
 
 def test_resample_flags():
-    assert reg.resampleFlags(reg.DEFAULT_STEPS) == [False]          # linear steps on the CT/MR as it is
-    assert reg.resampleFlags(["Rigid", "BSpline"]) == [False, True]
+    assert reg.resampleFlags(reg.DEFAULT_STEPS) == [True]           # every step on the resampled CT/MR
+    assert reg.resampleFlags(["Rigid", "BSpline"]) == [True, True]
     assert reg.resampleFlags(["Rigid", "BSpline"], [True, False]) == [True, False]
     assert reg.resampleFlags(["Affine", "BSpline"], [True]) == [True, True]
 
@@ -184,3 +184,15 @@ def test_residual_field():
     stats = reg.fieldStats(residual2)
     assert stats["max"] == pytest.approx(1.5) and stats["mean"] == pytest.approx(1.5)
     assert reg.fieldStats(np.zeros((2, 2, 2, 3)))["mean"] == 0.0
+
+
+def test_pool_to_spacing():
+    voxels = np.arange(8 * 10 * 12, dtype=np.float32).reshape(8, 10, 12)        # k, j, i
+    matrix = np.diag([0.5, 0.5, 2.0, 1.0])                                        # 0.5 x 0.5 x 2 mm
+    pooled, pooledMatrix = reg.poolToSpacing(voxels, matrix, 2.0)
+    assert pooled.shape == (8, 2, 3)                                              # i, j by 4; k kept
+    assert np.allclose(np.diag(pooledMatrix)[:3], [2.0, 2.0, 2.0])
+    assert np.allclose(pooledMatrix[:3, 3], [0.75, 0.75, 0.0])                    # block centres
+    assert np.isclose(pooled[0, 0, 0], voxels[0, :4, :4].mean())
+    same, sameMatrix = reg.poolToSpacing(voxels, np.diag([2.0, 2.0, 2.0, 1.0]), 2.0)
+    assert same is voxels
