@@ -272,7 +272,19 @@ def test_voxel_maps_clip_negative(setting):
     assert float(clipped["BPnd"][1]) == 0.0
     raw = kin.parametricMaps("LoganRef", frames, data, reference=ref,
                              options={"tStar": 30.0, "clipNegative": False})
-    assert float(raw["BPnd"][1]) == pytest.approx(-0.5, abs=0.02)
+    assert float(raw["DVR"][1]) == pytest.approx(0.5, abs=0.02)
+    assert float(raw["BPnd"][1]) == 0.0                  # BPnd stays within BPND_RANGE
+
+
+def test_bpnd_limits(setting):
+    frames, starts, ends, _ = setting
+    t, reference = simulate(K1=0.1, k2=0.15)
+    ref = kin.FrameInput(frames, frameMeans(t, reference, starts, ends))
+    result = kin.fit("SUVR", frames, 0.5 * ref.frameMeans(), reference=ref)        # BPnd -0.5
+    assert result["values"]["BPnd"] == 0.0
+    assert result["values"]["SUVR"] == pytest.approx(0.5, abs=0.01)
+    assert any("BPnd" in w for w in result["warnings"])
+    assert kin.limitBPnd(250.0) == kin.BPND_RANGE[1] and kin.limitBPnd(None) is None
 
 
 def test_sort_texts():
