@@ -99,6 +99,47 @@ def resampleFlags(steps, flags=None):
             for i, step in enumerate(steps)]
 
 
+# BRAINSFit options a caller may set (settings key -> BRAINSFit parameter, the steps it is passed to); a key that is
+# missing or None leaves BRAINSFit's own default
+BRAINSFIT_OPTIONS = (
+    ("numberOfIterations", "numberOfIterations", "all"),
+    ("histogramBins", "numberOfHistogramBins", "all"),
+    ("numberOfThreads", "numberOfThreads", "all"),
+    ("bsplineConvergenceFactor", "costFunctionConvergenceFactor", "BSpline"),
+    ("projectedGradientTolerance", "projectedGradientTolerance", "BSpline"),
+    ("maximumNumberOfEvaluations", "maximumNumberOfEvaluations", "BSpline"),
+    ("maximumNumberOfCorrections", "maximumNumberOfCorrections", "BSpline"),
+    ("maxBSplineDisplacement", "maxBSplineDisplacement", "BSpline"),
+)
+
+
+def brainsfitOptions(settings, transformType):
+    """{BRAINSFit parameter: value} of the BRAINSFIT_OPTIONS set in settings for a step of transformType."""
+    out = {}
+    for key, name, applies in BRAINSFIT_OPTIONS:
+        value = settings.get(key)
+        if value is None or (applies == "BSpline" and transformType != "BSpline"):
+            continue
+        out[name] = value
+    return out
+
+
+def parseGrid(value):
+    """B-spline grid subdivisions (i, j, k) from 12, '12', '14,10,12' or (14, 10, 12); each at least 3."""
+    if isinstance(value, str):
+        parts = [p for p in value.replace(";", ",").replace(" ", ",").split(",") if p.strip()]
+        numbers = [int(float(p)) for p in parts]
+    elif np.ndim(value) == 0:
+        numbers = [int(value)]
+    else:
+        numbers = [int(v) for v in value]
+    if len(numbers) == 1:
+        numbers = numbers * 3
+    if len(numbers) != 3 or min(numbers) < 3:
+        raise ValueError("The B-spline grid is one number or three (i, j, k), each at least 3.")
+    return tuple(numbers)
+
+
 def stepTitle(step):
     """Shown name of a step: 'Rigid + scale + skew' for ScaleSkewVersor3D, else the step itself."""
     return STEP_TITLES.get(step, step)

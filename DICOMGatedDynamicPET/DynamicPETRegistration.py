@@ -299,17 +299,15 @@ class DynamicPETRegistrationLogic(ScriptedLoadableModuleLogic):
             "maskProcessingMode": "NOMASK",
         }
         if transformType == "BSpline":
-            grid = int(settings["bsplineGrid"])
             parameters["bsplineTransform"] = output.GetID()
-            parameters["splineGridSize"] = f"{grid},{grid},{grid}"
-            if settings.get("bsplineConvergenceFactor"):
-                # L-BFGS-B stopping factor: BRAINSFit's default 2e13 stops early ("1e+12 for low accuracy; 1e+7
-                # for moderate", its doc; "1e+9 seems to work well")
-                parameters["costFunctionConvergenceFactor"] = float(settings["bsplineConvergenceFactor"])
+            parameters["splineGridSize"] = ",".join(str(v) for v in reg.parseGrid(settings["bsplineGrid"]))
         else:
             parameters["linearTransform"] = output.GetID()
-        extra = "".join(f", {k} {parameters[k]}" for k in ("splineGridSize", "costFunctionConvergenceFactor")
-                        if k in parameters)
+        # optional BRAINSFit options (e.g. the L-BFGS-B stopping factor of the B-spline: BRAINSFit's default 2e13
+        # stops early, "1e+12 for low accuracy; 1e+7 for moderate" in its doc, "1e+9 seems to work well")
+        options = reg.brainsfitOptions(settings, transformType)
+        parameters.update(options)
+        extra = "".join(f", {k} {parameters[k]}" for k in ["splineGridSize"] + list(options) if k in parameters)
         logging.info(f"BRAINSFit {transformType}: fixed '{fixed.GetName()}' {_gridText(fixed)}, moving "
                      f"'{moving.GetName()}' {_gridText(moving)}, sampling {parameters['samplingPercentage']:g}"
                      + extra)
