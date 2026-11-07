@@ -1104,7 +1104,7 @@ class DynamicPETRegistrationWidget(ScriptedLoadableModuleWidget, VTKObservationM
             if index > 0:
                 combo.addItem("(none)", "")
             for name in reg.STEP_TYPES:
-                combo.addItem(name, name)
+                combo.addItem(reg.stepTitle(name), name)
             combo.setCurrentIndex(combo.findData(default))
             combo.toolTip = ("Steps run one after the other, each from where the previous ended. Rigid: shifts and "
                              "angles. Affine: adds scaling and shear. BSpline: local deformation (last step only).")

@@ -16,13 +16,16 @@ import numpy as np
 
 from . import motioncorrection as mc
 
-STEP_TYPES = ("Rigid", "Affine", "BSpline")
+SCALE_SKEW = "ScaleSkewVersor3D"       # BRAINSFit: rigid + scaling + skew (9 parameters, no reflection)
+STEP_TYPES = ("Rigid", SCALE_SKEW, "Affine", "BSpline")
+STEP_TITLES = {SCALE_SKEW: "Rigid + scale + skew"}      # shown names (the others as they are)
+LINEAR_STEPS = ("Rigid", SCALE_SKEW, "Affine")
 # the PET to the same patient's CT/MR: rigid only by default (step 2 "(none)"); affine/B-spline can be added
 DEFAULT_STEPS = ("Rigid",)
 MAX_STEPS = 2
 # whether a step registers to the CT/MR resampled to the PET voxel size (workingSpacing), by default: every step (a
 # sub-millimetre MR at full resolution takes tens of GB of memory; the PET resolution limits the match anyway)
-RESAMPLE_BY_DEFAULT = {"Rigid": True, "Affine": True, "BSpline": True}
+RESAMPLE_BY_DEFAULT = {"Rigid": True, SCALE_SKEW: True, "Affine": True, "BSpline": True}
 DEFAULT_SAMPLING = 0.05
 DEFAULT_BSPLINE_GRID = 5
 DEFAULT_INITIALIZATION = mc.DEFAULT_INITIALIZATION      # geometric centres, as in Motion Correction
@@ -83,8 +86,8 @@ def validateSteps(steps):
     if "BSpline" in steps[:-1]:
         raise ValueError("A B-spline step can only be the last step.")
     for previous, step in zip(steps, steps[1:]):
-        if previous == "Affine" and step == "Rigid":
-            raise ValueError("A rigid step cannot follow an affine step.")
+        if previous in (SCALE_SKEW, "Affine") and step == "Rigid":
+            raise ValueError(f"A rigid step cannot follow a {stepTitle(previous)} step.")
     return steps
 
 
@@ -96,13 +99,18 @@ def resampleFlags(steps, flags=None):
             for i, step in enumerate(steps)]
 
 
+def stepTitle(step):
+    """Shown name of a step: 'Rigid + scale + skew' for ScaleSkewVersor3D, else the step itself."""
+    return STEP_TITLES.get(step, step)
+
+
 def stepsText(steps):
     """'Rigid, then Affine, then BSpline'."""
-    return ", then ".join(steps)
+    return ", then ".join(stepTitle(s) for s in steps)
 
 
 def isLinearStep(step):
-    return step in ("Rigid", "Affine")
+    return step in LINEAR_STEPS
 
 
 def iterativeSteps(linear=DEFAULT_ITERATIVE_LINEAR, deformable=DEFAULT_ITERATIVE_DEFORMABLE):
