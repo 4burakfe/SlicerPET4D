@@ -13,6 +13,8 @@
     motionplot      Motion Correction plot of the rigid shift / angles over time (Qt)
     registration    Dynamic PET to CT/MR Registration helpers: steps, transform summary, checkerboard, Harden grid,
                 layout (numpy only)
+    sitkreg     iterative multi-resolution registration (rigid / affine, then B-spline passes), from EasyReg
+                (numpy + scipy + SimpleITK)
     resampling  voxels resampled onto another grid through a (B-spline) transform (VTK + numpy)
     kinetics    Dynamic PET Modeling: kinetic models (1TC, 2TC, Patlak, Logan, SRTM, SUVR), fits, metrics, t*,
                 voxel-wise maps, CSV (numpy only; usable as a library by other modules)

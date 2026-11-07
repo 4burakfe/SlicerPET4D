@@ -64,6 +64,10 @@ METHOD_PET, METHOD_ANATOMY = "pet", "anatomy"
 METHODS = ((METHOD_PET, "Register the PET to the template (default)"),
            (METHOD_ANATOMY, "Normalize the CT/MR, apply the same transform to the PET"))
 NORMALIZATION_STEPS = ("Affine", "BSpline")
+NORMALIZATION_ITERATIVE_GRID_MM = 30.0     # iterative engine: last control-point spacing (brain to template)
+# The PET is registered to the skull-stripped template by default (the scalp of the T1 has no PET counterpart);
+# the CT/MR is registered to the whole template.
+NORMALIZATION_BRAIN_MASK = {METHOD_PET: True, METHOD_ANATOMY: False}
 NORMALIZATION_INITIALIZATION = {METHOD_PET: "useMomentsAlign", METHOD_ANATOMY: "useGeometryAlign"}
 # Harden: the template's field of view with the PET voxel size (default), the template grid (1 mm), or custom
 NORMALIZATION_GRIDS = (("Keep the PET voxel size (over the template field of view)", reg.OUTPUT_PET_SPACING),
@@ -248,6 +252,7 @@ class DynamicNeuroPETLogic(ScriptedLoadableModuleLogic):
             if anatomy is None:
                 raise ValueError("Pick the CT/MR in step 1 to normalize it.")
             moving = anatomy
+            settings["movingFunctional"] = False
         else:
             moving = self.referenceImage(sequence)
         if moving.GetParentTransformNode() is not None:
@@ -889,11 +894,27 @@ class DynamicNeuroPETWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.templateNote.wordWrap = True
         form.addRow(self.templateNote)
         self.maskCheck = qt.QCheckBox("Skull-stripped template (brain mask)")
-        self.maskCheck.checked = False
+        self.maskCheck.checked = NORMALIZATION_BRAIN_MASK[METHOD_PET]
         self.maskCheck.toolTip = ("Register to the template with the voxels outside its brain mask "
                                   "(mni_icbm152_t1_tal_nlin_sym_09c_mask) set to 0, so the scalp and the neck do not "
-                                  "pull the fit. Off by default.")
+                                  "pull the fit. On by default when the PET is registered, off for the CT/MR method.")
         form.addRow(self.maskCheck)
+        from DynamicPETRegistration import iterativeOptions
+        self.normEngineCombo = qt.QComboBox()
+        for title, key in reg.ENGINES:
+            self.normEngineCombo.addItem(title, key)
+        self.normEngineCombo.setCurrentIndex(self.normEngineCombo.findData(reg.DEFAULT_ENGINE))
+        self.normEngineCombo.toolTip = ("BRAINSFit: the steps below. Iterative multi-resolution (as in EasyReg): a "
+                                        "rigid (or affine) stage, then B-spline passes coarse to fine on a working "
+                                        "grid of a few mm (little memory).")
+        form.addRow("Registration:", self.normEngineCombo)
+        self.normBrainsBox = qt.QWidget()
+        brainsForm = qt.QFormLayout(self.normBrainsBox)
+        brainsForm.setContentsMargins(0, 0, 0, 0)
+        self.normIterativeBox = qt.QWidget()
+        iterativeForm = qt.QFormLayout(self.normIterativeBox)
+        iterativeForm.setContentsMargins(0, 0, 0, 0)
+        self.normIterative = iterativeOptions(iterativeForm, gridMm=NORMALIZATION_ITERATIVE_GRID_MM)
         self.normStepCombos = []
         for index, default in enumerate(NORMALIZATION_STEPS):
             combo = qt.QComboBox()
@@ -904,7 +925,9 @@ class DynamicNeuroPETWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             combo.setCurrentIndex(combo.findData(default))
             combo.toolTip = "Affine then B-spline by default (a B-spline only as the last step)"
             self.normStepCombos.append(combo)
-            form.addRow(f"Step {index + 1}:", combo)
+            brainsForm.addRow(f"Step {index + 1}:", combo)
+        form.addRow(self.normBrainsBox)
+        form.addRow(self.normIterativeBox)
         self.normInitCombo = qt.QComboBox()
         for title, mode in reg.INITIALIZATIONS:
             self.normInitCombo.addItem(title, mode)
@@ -952,6 +975,7 @@ class DynamicNeuroPETWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.methodCombo.connect("currentIndexChanged(int)", self.onMethodChanged)
         self.templateCombo.connect("currentIndexChanged(int)", lambda i: self._clearNormalization())
         self.normalizeButton.connect("clicked()", self.onNormalize)
+        self.normEngineCombo.connect("currentIndexChanged(int)", self.onNormEngineChanged)
         self.normManualButton.connect("toggled(bool)", lambda on: self.normSession and
                                       self.normSession.setManualHandles(on))
         self.normRevertButton.connect("clicked()", self.onNormRevert)
@@ -961,6 +985,7 @@ class DynamicNeuroPETWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.normCheckerCheck.connect("toggled(bool)", lambda on: self.normSession and
                                       self.normSession.setShowCheckerboard(on))
         self.onMethodChanged()
+        self.onNormEngineChanged()
         return page
 
     def onAtlasFolderChanged(self, folder, save=True):
@@ -999,6 +1024,7 @@ class DynamicNeuroPETWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
     def onMethodChanged(self, *args):
         method = self.method()
         self.normInitCombo.setCurrentIndex(self.normInitCombo.findData(NORMALIZATION_INITIALIZATION[method]))
+        self.maskCheck.checked = NORMALIZATION_BRAIN_MASK[method]
         self._updateTemplateChoice()
         self._clearNormalization()
 
@@ -1023,12 +1049,26 @@ class DynamicNeuroPETWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             self.templateCombo.blockSignals(False)
         self.templateNote.text = note
 
+    def normEngine(self):
+        return self.normEngineCombo.currentData or reg.DEFAULT_ENGINE
+
+    def onNormEngineChanged(self, *args):
+        iterative = self.normEngine() == reg.ENGINE_ITERATIVE
+        self.normBrainsBox.visible = not iterative
+        self.normIterativeBox.visible = iterative
+        self._clearNormalization()
+
     def normSettings(self):
+        from DynamicPETRegistration import iterativeSettings
         settings = self.logic.defaultSettings(self.method())
+        settings["initialization"] = self.normInitCombo.currentData
+        if self.normEngine() == reg.ENGINE_ITERATIVE:
+            settings.update(iterativeSettings(self.normIterative), engine=reg.ENGINE_ITERATIVE)
+            settings["steps"] = reg.iterativeSteps(settings["iterativeLinear"], settings["iterativeDeformable"])
+            return settings
         steps = [c.currentData for c in self.normStepCombos if c.currentData]
         settings["steps"] = reg.validateSteps(steps)
         settings["resample"] = reg.resampleFlags(settings["steps"])
-        settings["initialization"] = self.normInitCombo.currentData
         return settings
 
     def _template(self):
@@ -1089,14 +1129,24 @@ class DynamicNeuroPETWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         finally:
             qt.QApplication.restoreOverrideCursor()
             progressDialog.close()
+        if not self.normResult["steps"]:
+            bspline = self.normResult.get("bspline")
+            if bspline is not None and slicer.mrmlScene.IsNodePresent(bspline):
+                slicer.mrmlScene.RemoveNode(bspline)
+            self.normResult = None
+            self.normLabel.text = "Stopped before the first step."
+            self._updateNormButtons()
+            return
         self.normResult["template"] = template
         self.normResult["method"] = method
         self._openNormSession()
         lines = reg.summaryLines(self.normResult["steps"], self.normResult["linear"], self.normResult["center"],
                                  self.normResult["deformation"])
         moving = self.normResult["moving"]
+        notes = self.normResult.get("notes") or []
         self.normLabel.text = (f"'{moving.GetName()}' registered to '{template.GetName()}'"
                                + (" (stopped)" if self.normResult["stopped"] else "") + ":\n" + "\n".join(lines)
+                               + ("\n" + " ".join(notes) if notes else "")
                                + "\nCheck it in the views, correct it by hand if needed, then Harden.")
         self._updateNormButtons()
 

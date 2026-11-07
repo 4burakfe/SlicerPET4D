@@ -56,7 +56,7 @@ def test_summary_lines_deformation_and_manual():
     assert deformation["mean"] == pytest.approx(2.5)
     lines = reg.summaryLines(["Rigid", "BSpline"], np.eye(4), (0, 0, 0), deformation, manual)
     assert lines[0] == "Steps: Rigid, then BSpline"
-    assert any("B-spline deformation: mean 2.5 mm, max 5.0 mm" in line for line in lines)
+    assert any("Deformation: mean 2.5 mm, max 5.0 mm" in line for line in lines)
     assert any(line.startswith("Manual: shift 0.0, 5.0, 0.0 mm") for line in lines)
     assert not any(line.startswith("Manual") for line in reg.summaryLines(["Rigid"], np.eye(4), (0, 0, 0),
                                                                            manual=np.eye(4)))
@@ -147,3 +147,39 @@ def test_resample_flags():
     assert reg.resampleFlags(["Rigid", "BSpline"]) == [False, True]
     assert reg.resampleFlags(["Rigid", "BSpline"], [True, False]) == [True, False]
     assert reg.resampleFlags(["Affine", "BSpline"], [True]) == [True, True]
+
+
+def test_iterative_helpers():
+    assert reg.iterativeSteps() == ["Rigid (iterative)", "Deformable (iterative)"]
+    assert reg.iterativeSteps("Affine", False) == ["Affine (iterative)"]
+    with pytest.raises(ValueError):
+        reg.iterativeSteps("BSpline")
+    assert reg.iterativeInitialization("Off") == "current"
+    assert reg.iterativeInitialization("useGeometryAlign") == "centres"
+    assert reg.iterativeInitialization("useMomentsAlign") == "centres"
+
+
+def test_residual_field():
+    """A total field that is only the linear part leaves no deformation; a local bump stays as it is."""
+    grid = np.diag([4.0, 4.0, 4.0, 1.0])
+    grid[:3, 3] = (-20.0, -10.0, 5.0)
+    shape = (5, 6, 7)
+    k, j, i = np.meshgrid(np.arange(5), np.arange(6), np.arange(7), indexing="ij")
+    world = np.stack([i, j, k, np.ones_like(i)], axis=-1).astype(float) @ grid.T
+    m = np.eye(4)
+    m[:3, :3] = mc.rotationMatrix(3.0, -2.0, 5.0)
+    m[:3, 3] = (4.0, -6.0, 2.0)
+    inverse = np.linalg.inv(m)
+    pet = world @ inverse.T                       # the PET point of each world point, linear only
+    total = pet[..., :3] - world[..., :3]
+    residual = reg.residualField(total, grid, m)
+    assert residual.shape == shape + (3,)
+    np.testing.assert_allclose(residual, 0.0, atol=1e-9)
+    bump = np.zeros(shape + (3,))
+    bump[2, 3, 3] = (1.5, 0.0, 0.0)               # a local move in the PET space before the linear part
+    total2 = pet[..., :3] + (bump @ inverse[:3, :3].T) - world[..., :3]
+    residual2 = reg.residualField(total2, grid, m)
+    np.testing.assert_allclose(residual2[2, 3, 3], (1.5, 0.0, 0.0), atol=1e-9)
+    stats = reg.fieldStats(residual2)
+    assert stats["max"] == pytest.approx(1.5) and stats["mean"] == pytest.approx(1.5)
+    assert reg.fieldStats(np.zeros((2, 2, 2, 3)))["mean"] == 0.0

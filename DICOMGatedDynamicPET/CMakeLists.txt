@@ -17,6 +17,7 @@ set(MODULE_PYTHON_SCRIPTS
   ${MODULE_NAME}Lib/colortables.py
   ${MODULE_NAME}Lib/colormaps.py
   ${MODULE_NAME}Lib/registration.py
+  ${MODULE_NAME}Lib/sitkreg.py
   ${MODULE_NAME}Lib/resampling.py
   ${MODULE_NAME}Lib/hardendialog.py
   ${MODULE_NAME}Lib/kinetics.py
