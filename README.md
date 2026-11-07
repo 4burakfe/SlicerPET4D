@@ -431,7 +431,8 @@ The **Dynamic PET Modeling** module (Nuclear Medicine > PET4D) fits kinetic mode
   segments** on the left third and the **frames** (as in Review/Edit) on the right. The lower half is a dock with the
   **TACs** on the left (target and reference thick and opaque, the other segments faint; fitted models dashed; the
   t\* line or the SUVR window marked; for Patlak / Logan the linear plot of the target can be shown) and the
-  **results table** on the right (click a row to make that segment the target).
+  **results table** on the right (click a row to make that segment the target). **Show all fitted segments** shows
+  every segment with a result (after *Fit all segments*) on the summed image, not only the target and the reference.
 
 The models are in `DICOMGatedDynamicPETLib/kinetics.py` (numpy only) and the module's logic works without the panel,
 so other modules and scripts can use them:
@@ -445,6 +446,46 @@ results[striatumId]["values"]["BPnd"], results[striatumId]["metrics"]["R2"]
 logic.exportCsv("/tmp/srtm.csv", analysis, results, "SRTM")
 maps = logic.parametricMaps(analysis, "SRTM", referenceId=cerebellumId)   # {"BPnd": volume node, ...}
 ```
+
+## Dynamic Neuro Receptor PET (workflow)
+
+The **Dynamic Neuro Receptor PET** module (Nuclear Medicine > PET4D) is a step-by-step workflow for **dynamic
+receptor PET of the brain**. A step bar on top of the panel shows each step's state (done, ready, waiting); steps can
+be skipped. Steps 2, 3 and 6 are the panels of the modules above, shown inside the workflow; the series a step makes
+(e.g. a motion corrected series saved separately) is the series of the next step.
+
+1. **Data:** the patient's **dynamic PET** series and the **CT / MR**. The MR contrast is read from the DICOM tags
+   (series description, protocol and sequence name, else TR / TE / TI): T1 (MPRAGE, SPGR, BRAVO, TFE, ...), T2
+   (also FLAIR), PD, or CT; it can be set by hand.
+2. **Motion correction** (Dynamic PET Motion Correction).
+3. **CT/MR registration** (Dynamic PET to CT/MR Registration).
+4. **Normalization** to the **MNI ICBM 152 nonlinear symmetric 2009c** template with BRAINSFit, **affine then
+   B-spline** by default:
+   - **Register the PET to the template** (default): the summed image (else the frame of the highest activity) to the
+     **T1** template, skull-stripped with the template's brain mask, centres of mass as the start.
+   - **Normalize the CT/MR, apply the same transform to the PET:** the CT/MR is registered to the template of its
+     contrast (T1, T2 or PD; CT to the T1) and the same transform moves the PET, which must already lie on the CT/MR
+     (step 3, or PET/MR). The CT/MR is normalized too.
+
+   The result is shown in the registration layout (PET, fusion, template, checkerboard) with manual correction;
+   **Harden** resamples every frame and the summed image onto the template's field of view (PET voxel size by
+   default) into a new series *"&lt;series&gt; MNI"* (or overwrites it). **Revert** undoes it.
+5. **Regions:** the **CerebrA** atlas as a segmentation with the structure names. The **region atlas** is CerebrA
+   with left and right separate (*Putamen R*, *Putamen L*, 102 regions, default) or **bilateral** (*Putamen*, 51
+   regions); the **reference region** is taken from either atlas (default: the bilateral **Cerebellum Gray Matter**,
+   added as *"Cerebellum Gray Matter (reference)"*). The bilateral atlas is made from CerebrA **on first use and
+   saved next to it** (*mni_icbm152_CerebrA_bilateral_tal_nlin_sym_09c.nii*, *CerebrA_bilateral_LabelDetails.csv*;
+   in Slicer's temporary folder when that folder is read-only).
+6. **Modeling** (Dynamic PET Modeling), ready with the normalized series, the regions, **SRTM**, the reference region
+   and the putamen as the target.
+
+**Atlas files.** The atlases are not shipped with the extension. Download the *ICBM 2009c Nonlinear Symmetric*
+NIfTI files from the [MNI](https://nist.mni.mcgill.ca/icbm-152-nonlinear-atlases-2009/) and
+[CerebrA](https://nist.mni.mcgill.ca/cerebra/), and pick their folder in step 4 (searched with its subfolders, kept in
+the application settings). Files used: *mni_icbm152_t1_tal_nlin_sym_09c.nii* (required), the t2 / pd / gm / wm / csf
+templates, *mni_icbm152_t1_tal_nlin_sym_09c_mask.nii*, *mni_icbm152_CerebrA_tal_nlin_sym_09c.nii* and
+*CerebrA_LabelDetails.csv*. Please cite Fonov et al., NeuroImage 2011;54:313-327 and NeuroImage 2009;47:S102 (ICBM
+2009c), and Manera et al., Scientific Data 2020;7:237 (CerebrA).
 
 ## What is stored on the volumes
 

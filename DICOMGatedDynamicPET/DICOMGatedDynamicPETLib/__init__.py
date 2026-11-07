@@ -17,6 +17,8 @@
     kinetics    Dynamic PET Modeling: kinetic models (1TC, 2TC, Patlak, Logan, SRTM, SUVR), fits, metrics, t*,
                 voxel-wise maps, CSV (numpy only; usable as a library by other modules)
     tacplot     Dynamic PET Modeling plot of the time-activity curves and the Patlak / Logan plot (Qt)
+    neuro       Dynamic Neuro Receptor PET helpers: MNI ICBM 152 2009c atlas files, MR contrast (T1 / T2 / PD),
+                CerebrA labels (left / right and bilateral) (numpy only)
     hardendialog    Harden dialog (grid, voxel size, resample method, overwrite / save separately) (Qt)
     colortables     color tables shared with the Tarvos (MPI) extension (numpy only)
     colormaps       Review/Edit color maps as Slicer color nodes ("MPI <label>", shared with Tarvos)
