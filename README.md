@@ -429,6 +429,8 @@ The **Dynamic PET Modeling** module (Nuclear Medicine > PET4D) fits kinetic mode
   **frame means** of the model, which is computed on a fine time grid. The **parameter table** sets the initial
   values and bounds; untick a parameter to keep it fixed (the **blood delay** is fixed at 0 unless ticked).
   **Weighting:** frame duration (default), uniform, or duration / activity.
+  **BPnd is kept between 0 and 100** in every model, region fits and maps (SRTM's BPnd bounds are 0 and 100; a
+  BPnd from a ratio or a slope outside that range is set to the limit, with a note in the *Warnings* column).
 - **t\*** (Patlak, Logan): **20 min** by default, or **automatic**: the earliest t\* from which the line fits
   every later point within a maximum relative error (10 %). The frames whose middle is at or after t\* are used.
 - **Fit metrics:** R², RMSE, NRMSE (RMSE / mean of the data) and AIC (n ln(WSS/n) + 2p); for Patlak / Logan those of
@@ -452,9 +454,11 @@ The **Dynamic PET Modeling** module (Nuclear Medicine > PET4D) fits kinetic mode
   **TACs** on the left (target and reference thick and opaque, the other segments faint; fitted models dashed; the
   t\* line or the SUVR window marked; for Patlak / Logan the linear plot of the target can be shown) and the
   **results table** on the right (click a row to make that segment the target; the views also go to the slice of
-  that segment, its voxel nearest its centre of mass, and a yellow cross marks it for 5 seconds; click a column
+  that segment, its voxel nearest its centre of mass, and Slicer's small crosshair (thin, open in the middle)
+  marks it for 5 seconds; click a column
   header to sort the rows by it, e.g. by name or BPnd, again for the reverse order). **Show all fitted segments** shows every segment with a
-  result (after *Fit all segments*) on the summed image, not only the target and the reference. **Show all segments
+  result (after *Fit all segments*) on the summed image, not only the target and the reference. The segments are
+  drawn as **outlines only** on the summed image (fill opacity 0; restored when the layout closes). **Show all segments
   in the curves** (on by default) draws the other segments' TACs faintly; off, only the target and the reference.
 
 The models are in `DICOMGatedDynamicPETLib/kinetics.py` (numpy only) and the module's logic works without the panel,

@@ -74,6 +74,18 @@ class Parameter:
                 "unit": self.unit, "fitted": self.fitted}
 
 
+# BPnd is reported within this range (region fits and maps): a negative BPnd is not physical (noise next to the
+# reference), and [18F]fallypride in the striatum rarely exceeds 20-40
+BPND_RANGE = (0.0, 100.0)
+
+
+def limitBPnd(value):
+    """BPnd within BPND_RANGE (None stays None)."""
+    if value is None:
+        return None
+    return min(max(float(value), BPND_RANGE[0]), BPND_RANGE[1])
+
+
 def _p(name, initial, lower, upper, unit, description, fitted=True):
     return Parameter(name, initial, lower, upper, unit, fitted, description)
 
@@ -125,7 +137,7 @@ MODELS = {
     "SRTM": Model("SRTM", "SRTM (simplified reference tissue)", "reference", "srtm",
                   [_p("R1", 1.0, 0.0, 5.0, "", "K1 / K1' (relative delivery)"),
                    _p("k2", 0.1, 0.001, 3.0, "1/min", "efflux of the target region"),
-                   _p("BPnd", 1.0, -0.9, 20.0, "", "non-displaceable binding potential")],
+                   _p("BPnd", 1.0, BPND_RANGE[0], BPND_RANGE[1], "", "non-displaceable binding potential")],
                   ("R1", "k2", "k2'", "BPnd"),
                   "Simplified reference tissue model; k2' = k2 / R1. The voxel-wise maps use basis functions.",
                   voxelwise=True),
@@ -538,6 +550,10 @@ def fit(key, frames, tissue, inputFunction=None, reference=None, blood=None, opt
     result["weights"] = weights
     result.setdefault("warnings", [])
     result["values"] = {name: _finite(result["values"].get(name)) for name in spec.reports}
+    bp = result["values"].get("BPnd")
+    if bp is not None and limitBPnd(bp) != bp:
+        result["warnings"].append(f"BPnd {bp:.3g} set to {limitBPnd(bp):g}")
+        result["values"]["BPnd"] = limitBPnd(bp)
     return result
 
 
@@ -865,7 +881,8 @@ def parametricMaps(key, frames, data, inputFunction=None, reference=None, blood=
     """Voxel-wise values of a model for data (frames x voxels): {name: array of voxels} (VOXEL_MAPS[key]). The
     compartment models with more than one tissue compartment have no voxel-wise version. The graphical methods
     use options["tStar"] (fixed, minutes), the same for every voxel. With options["clipNegative"] (default) negative
-    values (noise in voxels with little uptake, not physical for these parameters) are set to 0."""
+    values (noise in voxels with little uptake, not physical for these parameters) are set to 0; BPnd is always
+    kept within BPND_RANGE."""
     spec = model(key)
     if key not in VOXEL_MAPS:
         raise ValueError(f"{spec.title} has no voxel-wise version (use the region fit)")
@@ -915,6 +932,8 @@ def parametricMaps(key, frames, data, inputFunction=None, reference=None, blood=
         array = np.where(np.isfinite(array), array, 0.0)
         if opts.get("clipNegative"):
             array = np.maximum(array, 0.0)
+        if name == "BPnd":
+            array = np.clip(array, BPND_RANGE[0], BPND_RANGE[1])
         out[name] = array.astype(np.float32)
     return out
 

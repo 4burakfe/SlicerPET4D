@@ -65,7 +65,7 @@ FRAME_COLORMAP = "PET-DICOM"
 SUMMED_COLORMAP = "Inverted grey"
 MAP_COLORMAP = "PET-Rainbow2"
 MARKER_SECONDS = 5            # the marker shown where a segment picked in the table is
-MARKER_COLOR = (1.0, 0.85, 0.1)
+SEGMENT_FILL_OPACITY = 0.0    # segments in the large view: outline only (the uptake under them stays visible)
 AUTO_PERCENTILE = 99.9
 TIME_FIRST_FRAME, TIME_INJECTION, TIME_MANUAL = "first", "injection", "manual"
 TIME_ZEROS = ((TIME_FIRST_FRAME, "Start of the first frame"), (TIME_INJECTION, "Injection time (from the PET)"),
@@ -532,9 +532,10 @@ class ModelingSession:
         self.tacRadio = None
         self.onRowClicked = None
         self.segmentation = None
-        self.segmentState = None        # (display node, view IDs, {segment ID: visible}) to restore
+        self.segmentState = None        # (display node, view IDs, {segment ID: visible}, fill opacity) to restore
         self.uppers = []
-        self.marker = None              # markups point at the segment picked in the table (removed after a while)
+        self.marker = None              # (crosshair node, its mode, its thickness) while the marker is shown
+        self._markerClick = 0
 
     # --- open / close ----------------------------------------------------------------------------
     def open(self):
@@ -756,13 +757,14 @@ class ModelingSession:
         """Show the segments shownIds (target, reference) of the segmentation in the large view only; the
         segmentation's own view and segment visibility are restored on close or when another one is picked."""
         if self.segmentState is not None:
-            display, viewIDs, visible = self.segmentState
+            display, viewIDs, visible, fill = self.segmentState
             if slicer.mrmlScene.IsNodePresent(display):
                 display.RemoveAllViewNodeIDs()
                 for viewID in viewIDs:
                     display.AddViewNodeID(viewID)
                 for segmentId, shown in visible.items():
                     display.SetSegmentVisibility(segmentId, shown)
+                display.SetOpacity2DFill(fill)
             self.segmentState = None
         self.segmentation = segmentation
         if segmentation is None:
@@ -773,7 +775,10 @@ class ModelingSession:
             return
         viewIDs = [display.GetNthViewNodeID(i) for i in range(display.GetNumberOfViewNodeIDs())]
         ids = DynamicPETModelingLogic.segmentIds(segmentation)
-        self.segmentState = (display, viewIDs, {s: bool(display.GetSegmentVisibility(s)) for s in ids})
+        self.segmentState = (display, viewIDs, {s: bool(display.GetSegmentVisibility(s)) for s in ids},
+                             display.GetOpacity2DFill())
+        display.SetOpacity2DFill(SEGMENT_FILL_OPACITY)
+        display.SetVisibility2DOutline(True)
         mainID = self.mainSliceNodeID()
         display.RemoveAllViewNodeIDs()
         if mainID:
@@ -810,33 +815,29 @@ class ModelingSession:
         self._showMarker(ras)
 
     def _showMarker(self, ras):
-        self._removeMarker()
-        marker = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLMarkupsFiducialNode", "Segment position")
-        marker.SetSaveWithScene(False)
-        marker.SetHideFromEditors(True)
-        marker.SetAttribute(HELPER_ATTRIBUTE, "1")
-        marker.AddControlPoint(vtk.vtkVector3d(*ras), "")
-        marker.SetLocked(True)
-        display = marker.GetDisplayNode()
-        if display is not None:
-            for widget in self._allWidgets():
-                display.AddViewNodeID(widget.mrmlSliceNode().GetID())
-            display.SetGlyphTypeFromString("ThickCross2D")
-            display.SetGlyphScale(6.0)
-            display.SetPointLabelsVisibility(False)
-            display.SetSelectedColor(*MARKER_COLOR)
-            display.SetColor(*MARKER_COLOR)
-        self.marker = marker
-        qt.QTimer.singleShot(int(MARKER_SECONDS * 1000), lambda node=marker: self._removeMarker(node))
-
-    def _removeMarker(self, node=None):
-        """Remove the marker (only that node when given: a later click has its own marker)."""
-        marker = self.marker
-        if marker is None or (node is not None and node is not marker):
+        """Slicer's small crosshair (open in the middle, thin) at ras for MARKER_SECONDS, then the crosshair as it
+        was."""
+        crosshair = slicer.mrmlScene.GetFirstNodeByClass("vtkMRMLCrosshairNode")
+        if crosshair is None:
             return
+        if self.marker is None:
+            self.marker = (crosshair, crosshair.GetCrosshairMode(), crosshair.GetCrosshairThickness())
+        crosshair.SetCrosshairThickness(slicer.vtkMRMLCrosshairNode.Fine)
+        crosshair.SetCrosshairMode(slicer.vtkMRMLCrosshairNode.ShowSmallBasic)
+        crosshair.SetCrosshairRAS(*ras)
+        self._markerClick += 1
+        click = self._markerClick
+        qt.QTimer.singleShot(int(MARKER_SECONDS * 1000), lambda: self._removeMarker(click))
+
+    def _removeMarker(self, click=None):
+        """Put the crosshair back (only for the last click when given: a later click has its own MARKER_SECONDS)."""
+        if self.marker is None or (click is not None and click != self._markerClick):
+            return
+        crosshair, mode, thickness = self.marker
         self.marker = None
-        if slicer.mrmlScene.IsNodePresent(marker):
-            slicer.mrmlScene.RemoveNode(marker)
+        if slicer.mrmlScene.IsNodePresent(crosshair):
+            crosshair.SetCrosshairMode(mode)
+            crosshair.SetCrosshairThickness(thickness)
 
     # --- dock -------------------------------------------------------------------------------------
     def _makeDock(self):
