@@ -240,6 +240,8 @@ class DynamicNeuroPETLogic(ScriptedLoadableModuleLogic):
         settings["steps"] = list(NORMALIZATION_STEPS)
         settings["resample"] = reg.resampleFlags(NORMALIZATION_STEPS)
         settings["initialization"] = NORMALIZATION_INITIALIZATION[method]
+        settings["iterativeDeformable"] = True          # to the template: linear, then deformable
+        settings["iterativeGridMm"] = NORMALIZATION_ITERATIVE_GRID_MM
         return settings
 
     def normalize(self, sequence, template, method=METHOD_PET, anatomy=None, settings=None, mask=None,
@@ -253,6 +255,8 @@ class DynamicNeuroPETLogic(ScriptedLoadableModuleLogic):
                 raise ValueError("Pick the CT/MR in step 1 to normalize it.")
             moving = anatomy
             settings["movingFunctional"] = False
+            # the template is the target grid: kept as it is; the CT/MR is resampled to its voxel size instead
+            settings["resample"] = [False] * len(settings.get("steps") or [])
         else:
             moving = self.referenceImage(sequence)
         if moving.GetParentTransformNode() is not None:
@@ -914,7 +918,7 @@ class DynamicNeuroPETWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.normIterativeBox = qt.QWidget()
         iterativeForm = qt.QFormLayout(self.normIterativeBox)
         iterativeForm.setContentsMargins(0, 0, 0, 0)
-        self.normIterative = iterativeOptions(iterativeForm, gridMm=NORMALIZATION_ITERATIVE_GRID_MM)
+        self.normIterative = iterativeOptions(iterativeForm, gridMm=NORMALIZATION_ITERATIVE_GRID_MM, deformable=True)
         self.normStepCombos = []
         for index, default in enumerate(NORMALIZATION_STEPS):
             combo = qt.QComboBox()

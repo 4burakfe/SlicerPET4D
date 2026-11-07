@@ -345,21 +345,24 @@ summed image** of the series.
 - **Dynamic sequence** (the most recent one is picked), **Reference frame** (the series' summed image when it has one,
   else the frame with the highest activity; any frame can be picked) and **CT / MR** (a CT or MR loaded from DICOM is
   picked for you).
-- **Method:** **BRAINSFit (steps)** (default, below) or **Iterative multi-resolution (rigid, then deformable)**, the
+- **Method:** **Iterative multi-resolution** (default) or **BRAINSFit (steps)** (below). The iterative one is the
   SimpleITK engine of EasyReg (Radioembolization Dosimetry): a rigid (or affine) Mattes mutual information fit over a
-  coarse-to-fine pyramid, then B-spline passes from coarse to fine (grid 50 mm by default); each pass is kept only
-  when it improves the match and does not fold. It works on a 2 mm grid (*Final resolution*), so it needs a fraction
-  of the memory of BRAINSFit on a sub-millimetre MR. The deformation is stored as a grid transform under the linear
+  coarse-to-fine pyramid, **rigid only by default** (the PET and the CT/MR are the same patient); *Then deformable*
+  adds B-spline passes from coarse to fine (grid 50 mm by default); each pass is kept only
+  when it improves the match and does not fold. It works on a 2 mm grid (*Final resolution*); both images are averaged
+  down to about that voxel size before anything else, so a sub-millimetre MR needs a fraction of the memory. The deformation is stored as a grid transform under the linear
   one, so the views, manual correction and Harden work the same way.
 - **Steps:** up to two BRAINSFit steps run one after the other, the second starting where the first ended:
-  **Rigid, then Affine** by default. BSpline can be picked (as the last step); step 2 can be *(none)*. A
+  **Rigid only** by default (step 2 *(none)*: the PET and the CT/MR are the same patient). Affine or BSpline can
+  be picked as step 2 (BSpline only as the last step). A
   B-spline can only be the last step and a rigid step cannot follow an affine one. The first step starts from the
   **geometric centres** (as Motion Correction; *Initialization* also offers the centres of mass or none, e.g. for a
   PET/CT of the same scanner). Mattes mutual information; sampling 0.05 and B-spline grid 5 under *Advanced*.
   Each step has a **Resample CT/MR to PET** check: that step registers to a copy of the CT/MR **smoothed and
   resampled to the PET voxel size** (*Register CT/MR at* under *Advanced*; a CT/MR that is not finer is used as it
-  is). It is **off for Rigid and Affine** and **on for BSpline** by default (a sub-millimetre MR at full resolution
-  makes the B-spline step take tens of GB of memory). The views and Harden use the CT/MR as it is.
+  is). It is **on** by default for every step (a sub-millimetre MR at full resolution takes tens of GB of memory).
+  An image registered that is finer than the grid it registers to is resampled to that grid's voxel size first.
+  The views and Harden use the CT/MR as it is.
 - **Layout:** two rows, **axial on top and coronal below**, and three columns: **PET alone** (left, inverted grey),
   **PET over the CT/MR** (fusion, middle, PET-DICOM at 0.5 opacity; PET voxels below the window or 3 % of it are
   transparent) and **CT/MR alone** (right, grey). The views of a row are linked (slice, zoom, pan). After a
@@ -470,9 +473,10 @@ without, the result is kept, or stay).
    (also FLAIR), PD, or CT; it can be set by hand.
 2. **Motion correction** (Dynamic PET Motion Correction).
 3. **CT/MR registration** (Dynamic PET to CT/MR Registration).
-4. **Normalization** to the **MNI ICBM 152 nonlinear symmetric 2009c** template with BRAINSFit, **affine then
-   B-spline** by default. *Registration* can be switched to the **iterative multi-resolution** engine (rigid, then
-   deformable, B-spline grid 30 mm; affine can be picked), which uses far less memory:
+4. **Normalization** to the **MNI ICBM 152 nonlinear symmetric 2009c** template with the **iterative
+   multi-resolution** engine by default (rigid, then deformable, B-spline grid 30 mm; affine can be picked), which
+   uses little memory; *Registration* can be switched to BRAINSFit (affine then B-spline). With the CT/MR method the
+   CT/MR is resampled to the template's voxel size before it is registered:
    - **Register the PET to the template** (default): the summed image (else the frame of the highest activity) to the
      **T1** template, centres of mass as the start (skull-stripped with the template's brain mask, on by default; off
      for the CT/MR method).
