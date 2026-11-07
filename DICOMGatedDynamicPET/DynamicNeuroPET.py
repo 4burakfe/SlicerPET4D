@@ -826,11 +826,10 @@ class DynamicNeuroPETWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.templateNote.wordWrap = True
         form.addRow(self.templateNote)
         self.maskCheck = qt.QCheckBox("Skull-stripped template (brain mask)")
-        self.maskCheck.checked = True
+        self.maskCheck.checked = False
         self.maskCheck.toolTip = ("Register to the template with the voxels outside its brain mask "
                                   "(mni_icbm152_t1_tal_nlin_sym_09c_mask) set to 0, so the scalp and the neck do not "
-                                  "pull the fit. On by default for the PET (little scalp uptake), off for the CT/MR "
-                                  "(which has the scalp too).")
+                                  "pull the fit. Off by default.")
         form.addRow(self.maskCheck)
         self.normStepCombos = []
         for index, default in enumerate(NORMALIZATION_STEPS):
@@ -937,7 +936,6 @@ class DynamicNeuroPETWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
     def onMethodChanged(self, *args):
         method = self.method()
         self.normInitCombo.setCurrentIndex(self.normInitCombo.findData(NORMALIZATION_INITIALIZATION[method]))
-        self.maskCheck.checked = method == METHOD_PET
         self._updateTemplateChoice()
         self._clearNormalization()
 
