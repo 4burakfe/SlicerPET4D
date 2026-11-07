@@ -140,3 +140,25 @@ def test_bilateral_files(tmp_path):
     assert found[neuro.BILATERAL_CSV].endswith("CerebrA_bilateral_LabelDetails.csv")
     assert found[neuro.CEREBRA_CSV].endswith("CerebrA_LabelDetails.csv")
     assert neuro.bilateralPaths({}) == (None, None)
+
+
+def test_cerebra_semicolon_csv_and_pons(tmp_path):
+    text = ("Mindboggle ID;Label Name;RH Label;LH Labels;Notes;Dice Kappa\n"
+            "16;Brainstem;11;62;Completed filling, removed labelled voxels;0,65\n"
+            "444;Pons;103;104;;0\n")
+    structures = neuro.readCerebraLabels(text)
+    assert [s["name"] for s in structures] == ["Brainstem", "Pons"]
+    assert structures[0]["notes"] == "Completed filling, removed labelled voxels"
+    assert neuro.structureValues(structures, "pons") == (103, 104)
+    folder = tmp_path / "mni_icbm152_nlin_sym_09c"
+    folder.mkdir()
+    (folder / "mni_icbm152_CerebrA_tal_nlin_sym_09c.nii").write_bytes(b"")
+    (folder / "mni_icbm152_CerebrA_tal_nlin_sym_09c_wpons.seg.nrrd").write_bytes(b"")
+    (folder / "mni_icbm152_CerebrA_tal_nlin_sym_09c_wpons.csv").write_text(text)
+    found = neuro.findAtlasFiles(str(tmp_path))
+    assert found[neuro.PONS_LABELS].endswith("_wpons.seg.nrrd")
+    assert found[neuro.PONS_CSV].endswith("_wpons.csv")
+    assert found[neuro.CEREBRA_LABELS].endswith("CerebrA_tal_nlin_sym_09c.nii")
+    assert not any("wpons" in name for name in neuro.missingFiles({}))
+    assert neuro.segmentNamesOfLabels((103, 104), "Pons") == {"segment_103", "segment_104", "pons", "pons r",
+                                                              "pons l"}

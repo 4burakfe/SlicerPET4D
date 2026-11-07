@@ -55,14 +55,16 @@ MAP_TYPES_BY_MODALITY = {PET: (MAP_SUVR, MAP_SUV), SPECT: (MAP_RATIO, MAP_COUNTS
 MAP_TYPES = (MAP_SUVR, MAP_SUV, MAP_RATIO, MAP_COUNTS)
 
 # Reference regions of the static normalization: key, title, CerebrA structures (None: not from CerebrA)
-REF_GLOBAL, REF_CEREBELLUM, REF_CEREBELLUM_GM, REF_BRAINSTEM, REF_CUSTOM = (
-    "global", "cerebellum", "cerebellumGM", "brainstem", "custom")
+REF_GLOBAL, REF_CEREBELLUM, REF_CEREBELLUM_GM, REF_PONS, REF_BRAINSTEM, REF_CUSTOM = (
+    "global", "cerebellum", "cerebellumGM", "pons", "brainstem", "custom")
 REFERENCE_REGIONS = (
     (REF_GLOBAL, "Global (whole brain)", None),
     (REF_CEREBELLUM, "Whole cerebellum (grey + white matter)", ("Cerebellum Gray Matter", "Cerebellum White Matter")),
     (REF_CEREBELLUM_GM, "Cerebellar grey matter", ("Cerebellum Gray Matter",)),
-    # CerebrA has no pons; its brainstem reaches a little further down (a pons mask is to come)
-    (REF_BRAINSTEM, "Brainstem (CerebrA; pons to come)", ("Brainstem",)),
+    # the pons of the CerebrA with pons (..._wpons.seg.nrrd in the atlas folder); CerebrA itself has only the
+    # brainstem, which reaches a little further down
+    (REF_PONS, "Pons", ("Pons",)),
+    (REF_BRAINSTEM, "Brainstem (CerebrA)", ("Brainstem",)),
     (REF_CUSTOM, "Custom mask file", None),
 )
 DEFAULT_REFERENCE = REF_CEREBELLUM_GM

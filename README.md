@@ -550,8 +550,11 @@ database:
   Picking a nuclide lists only its tracers; the first entry is the nuclide itself (tracer not given), and any
   other nuclide or tracer can be typed.
 - **Create new database...**: an empty *user defined* database. Reference region: global (MNI brain mask),
-  whole cerebellum, cerebellar grey matter, brainstem (CerebrA; a pons mask is to come) or a custom mask file;
-  the mask is copied into the database from the Neuro atlas folder. Optional age groups (the master mean / SD of
+  whole cerebellum, cerebellar grey matter, pons, brainstem (CerebrA) or a custom mask file;
+  the mask is copied into the database from the Neuro atlas folder. The pons comes from a CerebrA with pons in
+  that folder: `mni_icbm152_CerebrA_tal_nlin_sym_09c_wpons.seg.nrrd` (segments named `Segment_<label value>`) and
+  `mni_icbm152_CerebrA_tal_nlin_sym_09c_wpons.csv` (the CerebrA label table with a *Pons* row; `,` or `;`
+  separated). Optional age groups (the master mean / SD of
   all subjects is always made) and smoothing (FWHM). Subjects will be added from the Neuro workflows.
 - **Add predefined database...**: a *predefined* database has no subject images, only mean and SD maps: either a
   package (.zip) or the maps picked one by one (master and each age group, with the number of subjects and whether

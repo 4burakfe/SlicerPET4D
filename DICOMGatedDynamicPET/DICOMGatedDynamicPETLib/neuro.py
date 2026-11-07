@@ -6,6 +6,9 @@ Atlases (not shipped with the extension; the user points to a folder that holds 
     MNI ICBM 152 nonlinear symmetric 2009c (Fonov et al. 2009, 2011):
         mni_icbm152_<t1|t2|pd|gm|wm|csf>_tal_nlin_sym_09c.nii, mni_icbm152_t1_tal_nlin_sym_09c_mask.nii (brain)
     CerebrA (Manera et al. 2020):   mni_icbm152_CerebrA_tal_nlin_sym_09c.nii and CerebrA_LabelDetails.csv
+    CerebrA with pons (optional, made by the user in Slicer): mni_icbm152_CerebrA_tal_nlin_sym_09c_wpons.seg.nrrd, a
+        segmentation whose segments are named Segment_<label value> (the pons in a second layer, inside the
+        brainstem), and mni_icbm152_CerebrA_tal_nlin_sym_09c_wpons.csv (CerebrA_LabelDetails with a Pons row)
     CerebrA bilateral (made by the workflow on first use, next to the CerebrA files): left and right merged,
         mni_icbm152_CerebrA_bilateral_tal_nlin_sym_09c.nii and CerebrA_bilateral_LabelDetails.csv
 """
@@ -37,15 +40,22 @@ CEREBRA_CSV = "cerebraCsv"
 BILATERAL_LABELS = "cerebraBilateral"
 BILATERAL_CSV = "cerebraBilateralCsv"
 BILATERAL_STEM = "mni_icbm152_CerebrA_bilateral" + TEMPLATE_SUFFIX
+PONS_LABELS = "cerebraPons"
+PONS_CSV = "cerebraPonsCsv"
+PONS_STEM = "mni_icbm152_CerebrA" + TEMPLATE_SUFFIX + "_wpons"
+PONS_CSV_NAME = PONS_STEM + ".csv"
+PONS = "Pons"
 EXTRA_FILES = (
     (BRAIN_MASK, "mni_icbm152_t1" + TEMPLATE_SUFFIX + "_mask"),
     (CEREBRA_LABELS, "mni_icbm152_CerebrA" + TEMPLATE_SUFFIX),
     (BILATERAL_LABELS, BILATERAL_STEM),
+    (PONS_LABELS, PONS_STEM),
 )
 CSV_NAME = "CerebrA_LabelDetails.csv"
 BILATERAL_CSV_NAME = "CerebrA_bilateral_LabelDetails.csv"
 GENERATED = (BILATERAL_LABELS, BILATERAL_CSV)     # made by the workflow, never reported missing
-IMAGE_EXTENSIONS = (".nii", ".nii.gz", ".nrrd", ".mnc")
+OPTIONAL = (PONS_LABELS, PONS_CSV)                # the CerebrA with pons, never reported missing
+IMAGE_EXTENSIONS = (".seg.nrrd", ".nii", ".nii.gz", ".nrrd", ".mnc")
 MAX_SEARCH_DEPTH = 4
 REQUIRED = (DEFAULT_TEMPLATE,)       # without these the normalization cannot run
 
@@ -75,8 +85,10 @@ def findAtlasFiles(folder, maxDepth=MAX_SEARCH_DEPTH):
             subdirs[:] = []
         subdirs.sort()
         for fileName in sorted(files):
-            if fileName.lower() in (CSV_NAME.lower(), BILATERAL_CSV_NAME.lower()):
-                key = CEREBRA_CSV if fileName.lower() == CSV_NAME.lower() else BILATERAL_CSV
+            csvKeys = {CSV_NAME.lower(): CEREBRA_CSV, BILATERAL_CSV_NAME.lower(): BILATERAL_CSV,
+                       PONS_CSV_NAME.lower(): PONS_CSV}
+            if fileName.lower() in csvKeys:
+                key = csvKeys[fileName.lower()]
                 found.setdefault(key, os.path.join(directory, fileName))
                 continue
             stem = _stem(fileName)
@@ -91,7 +103,7 @@ def missingFiles(found):
     names = {key: stem + ".nii" for key, _, stem in TEMPLATES}
     names.update({key: stem + ".nii" for key, stem in EXTRA_FILES})
     names[CEREBRA_CSV] = CSV_NAME
-    return [names[k] for k in names if k not in found and k not in GENERATED]
+    return [names[k] for k in names if k not in found and k not in GENERATED and k not in OPTIONAL]
 
 
 def bilateralPaths(found):
@@ -188,7 +200,10 @@ def readCerebraLabels(source):
     else:
         with open(source, newline="", encoding="utf-8-sig") as f:
             text = f.read()
-    reader = csv.reader(io.StringIO(text.lstrip("﻿")))
+    text = text.lstrip("﻿")
+    firstLine = text.split("\n", 1)[0]
+    delimiter = ";" if firstLine.count(";") > firstLine.count(",") else ","     # Excel saves with ';' in some locales
+    reader = csv.reader(io.StringIO(text), delimiter=delimiter)
     rows = [r for r in reader if any(c.strip() for c in r)]
     if not rows:
         raise ValueError("The CerebrA label file is empty")
@@ -312,3 +327,13 @@ def structureValues(structures, name):
         if s["name"].strip().lower() == name.strip().lower():
             return tuple(v for v in (s["right"], s["left"]) if v is not None)
     return ()
+
+
+def segmentNamesOfLabels(values, name=None):
+    """Segment names (lower case) that stand for these CerebrA label values in a segmentation file: 'Segment_<value>'
+    (Slicer's names of a label map imported as segments), and name / 'name R' / 'name L' when given."""
+    names = {f"segment_{int(v)}" for v in values}
+    if name:
+        base = name.strip().lower()
+        names.update({base, f"{base} r", f"{base} l"})
+    return names

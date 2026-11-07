@@ -26,6 +26,7 @@ import ctk
 import numpy as np
 import qt
 import slicer
+import vtk
 from slicer.ScriptedLoadableModule import (ScriptedLoadableModule, ScriptedLoadableModuleWidget,
                                            ScriptedLoadableModuleLogic, ScriptedLoadableModuleTest)
 
@@ -112,6 +113,11 @@ class NeuroPETDatabaseManagerLogic(ScriptedLoadableModuleLogic):
         if regionKey == normaldb.REF_GLOBAL:
             return None if neuro.BRAIN_MASK in atlas else "The atlas folder has no MNI brain mask " \
                 "(mni_icbm152_t1_tal_nlin_sym_09c_mask)"
+        if regionKey == normaldb.REF_PONS:
+            if neuro.PONS_LABELS not in atlas or neuro.PONS_CSV not in atlas:
+                return (f"The atlas folder has no CerebrA with pons ({neuro.PONS_STEM}.seg.nrrd and "
+                        f"{neuro.PONS_CSV_NAME})")
+            return None
         if neuro.CEREBRA_LABELS not in atlas or neuro.CEREBRA_CSV not in atlas:
             return "The atlas folder has no CerebrA labels (mni_icbm152_CerebrA_tal_nlin_sym_09c and its CSV)"
         return None
@@ -133,6 +139,8 @@ class NeuroPETDatabaseManagerLogic(ScriptedLoadableModuleLogic):
         if problem:
             raise ValueError(problem)
         atlas = neuro.findAtlasFiles(atlasFolder)
+        if key == normaldb.REF_PONS:
+            return self._writeSegmentationMask(folder, header, atlas)
         if key == normaldb.REF_GLOBAL:
             source = slicer.util.loadLabelVolume(atlas[neuro.BRAIN_MASK], {"show": False})
             values = None
@@ -161,6 +169,46 @@ class NeuroPETDatabaseManagerLogic(ScriptedLoadableModuleLogic):
             slicer.mrmlScene.RemoveNode(source)
             if target is not None:
                 slicer.mrmlScene.RemoveNode(target)
+        header["referenceMask"] = relative
+        return relative
+
+    def _writeSegmentationMask(self, folder, header, atlas):
+        """Pons mask from the CerebrA with pons (a segmentation file): the segments of the Pons labels of its CSV,
+        on the grid of the CerebrA labels (else of the T1 template, else the segmentation's own)."""
+        structures = neuro.readCerebraLabels(atlas[neuro.PONS_CSV])
+        values = neuro.structureValues(structures, neuro.PONS)
+        if not values:
+            raise ValueError(f"{neuro.PONS_CSV_NAME} has no '{neuro.PONS}' row")
+        wanted = neuro.segmentNamesOfLabels(values, neuro.PONS)
+        segmentationNode = slicer.util.loadSegmentation(atlas[neuro.PONS_LABELS], {"show": False})
+        referencePath = atlas.get(neuro.CEREBRA_LABELS) or atlas.get(neuro.DEFAULT_TEMPLATE)
+        reference = (slicer.util.loadVolume(referencePath, {"show": False, "labelmap": True})
+                     if referencePath else None)
+        labelNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLLabelMapVolumeNode", "pons mask")
+        try:
+            segmentation = segmentationNode.GetSegmentation()
+            ids = vtk.vtkStringArray()
+            for index in range(segmentation.GetNumberOfSegments()):
+                segmentId = segmentation.GetNthSegmentID(index)
+                if segmentation.GetSegment(segmentId).GetName().strip().lower() in wanted:
+                    ids.InsertNextValue(segmentId)
+            if ids.GetNumberOfValues() == 0:
+                raise ValueError(f"No pons segment in {os.path.basename(atlas[neuro.PONS_LABELS])} (segments named "
+                                 + ", ".join(f"Segment_{v}" for v in values) + " expected)")
+            if not slicer.modules.segmentations.logic().ExportSegmentsToLabelmapNode(
+                    segmentationNode, ids, labelNode, reference):
+                raise ValueError("The pons segments could not be exported")
+            array = slicer.util.arrayFromVolume(labelNode)
+            if not array.any():
+                raise ValueError("The pons mask is empty")
+            slicer.util.updateVolumeFromArray(labelNode, (array > 0).astype(np.uint8))
+            relative = normaldb.REFERENCE_MASK_NAME
+            if not slicer.util.saveNode(labelNode, os.path.join(folder, relative)):
+                raise ValueError("The reference mask could not be saved")
+        finally:
+            for node in (segmentationNode, reference, labelNode):
+                if node is not None:
+                    slicer.mrmlScene.RemoveNode(node)
         header["referenceMask"] = relative
         return relative
 
@@ -817,4 +865,27 @@ class NeuroPETDatabaseManagerTest(ScriptedLoadableModuleTest):
         self.assertEqual(int(np.count_nonzero(slicer.util.arrayFromVolume(mask))), 16)
         normaldb.deleteDatabase(folder, root)
         self.assertFalse(os.path.exists(folder))
+        # pons from the CerebrA with pons (a segmentation whose segments are named Segment_<label value>)
+        with open(os.path.join(atlasFolder, neuro.PONS_CSV_NAME), "w") as f:
+            f.write("Mindboggle ID;Label Name;RH Label;LH Labels;Notes;Dice Kappa\n"
+                    "16;Brainstem;11;62;;0,65\n444;Pons;103;104;;0\n")
+        ponsArray = np.zeros((10, 10, 10), dtype=np.int16)
+        ponsArray[4:6, 4:6, 4:6] = 103
+        ponsArray[4:6, 4:6, 6:8] = 104
+        ponsArray[0, 0, 0] = 46
+        labels = slicer.util.addVolumeFromArray(ponsArray, name="pons", nodeClassName="vtkMRMLLabelMapVolumeNode")
+        segmentationNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLSegmentationNode")
+        slicer.modules.segmentations.logic().ImportLabelmapToSegmentationNode(labels, segmentationNode)
+        segmentation = segmentationNode.GetSegmentation()
+        values = (46, 103, 104)      # imported in the order of the label values
+        for index in range(segmentation.GetNumberOfSegments()):
+            segmentation.GetNthSegment(index).SetName(f"Segment_{values[index]}")
+        slicer.util.saveNode(segmentationNode, os.path.join(atlasFolder, neuro.PONS_STEM + ".seg.nrrd"))
+        slicer.mrmlScene.RemoveNode(segmentationNode)
+        slicer.mrmlScene.RemoveNode(labels)
+        header = normaldb.newHeader("pons", nuclide="F-18", tracer="FDG", referenceRegion=normaldb.REF_PONS)
+        self.assertIsNone(logic.maskSourceProblem(normaldb.REF_PONS, atlasFolder))
+        folder = logic.createUserDefined(root, header, atlasFolder)
+        mask = slicer.util.loadLabelVolume(os.path.join(folder, normaldb.REFERENCE_MASK_NAME), {"show": False})
+        self.assertEqual(int(np.count_nonzero(slicer.util.arrayFromVolume(mask))), 16)
         self.delayDisplay("Reference mask test passed")
