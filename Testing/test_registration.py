@@ -218,3 +218,18 @@ def test_scale_skew_step():
         reg.validateSteps([reg.SCALE_SKEW, "Rigid"])
     assert reg.stepsText([reg.SCALE_SKEW, "BSpline"]) == "Rigid + scale + skew, then BSpline"
     assert reg.resampleFlags([reg.SCALE_SKEW]) == [True]
+
+
+def test_brainsfit_options_and_grid():
+    settings = {"numberOfIterations": 1000, "bsplineConvergenceFactor": 1e9, "histogramBins": None}
+    assert reg.brainsfitOptions(settings, "BSpline") == {"numberOfIterations": 1000,
+                                                         "costFunctionConvergenceFactor": 1e9}
+    assert reg.brainsfitOptions(settings, "Rigid") == {"numberOfIterations": 1000}
+    assert reg.parseGrid(12) == (12, 12, 12)
+    assert reg.parseGrid("14,10,12") == (14, 10, 12)
+    assert reg.parseGrid("14 10 12") == (14, 10, 12)
+    assert reg.parseGrid((5, 6, 7)) == (5, 6, 7)
+    with pytest.raises(ValueError):
+        reg.parseGrid("2")
+    with pytest.raises(ValueError):
+        reg.parseGrid("4,5")

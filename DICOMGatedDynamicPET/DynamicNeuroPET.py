@@ -71,7 +71,14 @@ NORMALIZATION_WORKING_MM = 2.0
 # BRAINSFit B-spline to the template: 12 subdivisions per axis (control points about 16 mm apart over the template;
 # BRAINSFit's own default is 14,10,12) and a stricter stopping factor than BRAINSFit's 2e13 (see registerStep)
 NORMALIZATION_BSPLINE_GRID = 12
+NORMALIZATION_SAMPLING = 0.005      # BRAINSFit samplingPercentage (its default 0.002; the registration module 0.05)
 NORMALIZATION_CONVERGENCE_FACTOR = 1e9
+# the other BRAINSFit options of the normalization (reg.BRAINSFIT_OPTIONS keys): BRAINSFit's defaults but the B-spline
+# stopping factor (see NORMALIZATION_CONVERGENCE_FACTOR); numberOfThreads -1: all cores
+NORMALIZATION_BRAINSFIT = {"numberOfIterations": 1500, "histogramBins": 50,
+                           "bsplineConvergenceFactor": NORMALIZATION_CONVERGENCE_FACTOR,
+                           "projectedGradientTolerance": 1e-5, "maximumNumberOfEvaluations": 900,
+                           "maximumNumberOfCorrections": 25, "maxBSplineDisplacement": 0.0, "numberOfThreads": -1}
 NORMALIZATION_ITERATIVE_GRID_MM = 30.0     # iterative engine: last control-point spacing (brain to template)
 # The PET is registered to the skull-stripped template by default (the scalp of the T1 has no PET counterpart);
 # the CT/MR is registered to the whole template.
@@ -249,7 +256,8 @@ class DynamicNeuroPETLogic(ScriptedLoadableModuleLogic):
         settings["resample"] = [True] * len(NORMALIZATION_STEPS)
         settings["workingVoxelMm"] = NORMALIZATION_WORKING_MM
         settings["bsplineGrid"] = NORMALIZATION_BSPLINE_GRID
-        settings["bsplineConvergenceFactor"] = NORMALIZATION_CONVERGENCE_FACTOR
+        settings["samplingPercentage"] = NORMALIZATION_SAMPLING
+        settings.update(NORMALIZATION_BRAINSFIT)
         settings["initialization"] = NORMALIZATION_INITIALIZATION[method]
         settings["iterativeDeformable"] = True          # to the template: linear, then deformable
         settings["iterativeGridMm"] = NORMALIZATION_ITERATIVE_GRID_MM
@@ -940,26 +948,81 @@ class DynamicNeuroPETWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             combo.toolTip = ("Rigid + scale + skew then B-spline by default (a B-spline only as the last step)")
             self.normStepCombos.append(combo)
             brainsForm.addRow(f"Step {index + 1}:", combo)
+        advanced = ctk.ctkCollapsibleButton()
+        advanced.text = "Advanced (BRAINSFit)"
+        advanced.collapsed = True
+        advancedForm = qt.QFormLayout(advanced)
         self.normWorkingSpin = qt.QDoubleSpinBox()
         self.normWorkingSpin.setRange(0.0, 8.0)
         self.normWorkingSpin.setDecimals(1)
         self.normWorkingSpin.setSingleStep(0.5)
         self.normWorkingSpin.suffix = " mm"
         self.normWorkingSpin.specialValueText = "Full resolution"
-        self.normWorkingSpin.value = NORMALIZATION_WORKING_MM
         self.normWorkingSpin.toolTip = (
             "BRAINSFit registers copies of the template and of the CT/MR (or PET) smoothed and resampled to this voxel "
             "size (never finer than the image itself); the transform applies to the originals. 2 mm (as the 2 mm "
             "MNI template of FSL) keeps the memory low: a 0.5 mm MR against the 1 mm template otherwise takes tens "
             "of GB. 0: the template and the images as they are.")
-        brainsForm.addRow("Register at:", self.normWorkingSpin)
-        self.normGridSpin = qt.QSpinBox()
-        self.normGridSpin.setRange(3, 40)
-        self.normGridSpin.value = NORMALIZATION_BSPLINE_GRID
-        self.normGridSpin.toolTip = (
-            "B-spline control grid: subdivisions along each axis of the template (12: control points about 16 mm "
-            "apart). More subdivisions deform more locally (and take longer). BRAINSFit's own default is 14,10,12.")
-        brainsForm.addRow("B-spline grid:", self.normGridSpin)
+        advancedForm.addRow("Register at:", self.normWorkingSpin)
+        self.normGridEdit = qt.QLineEdit()
+        self.normGridEdit.toolTip = (
+            "B-spline control grid: subdivisions along each axis of the template, one number or three (i, j, k), "
+            "e.g. 12 (control points about 16 mm apart) or 14,10,12 (BRAINSFit's default). More subdivisions deform "
+            "more locally, take longer and more memory.")
+        advancedForm.addRow("B-spline grid:", self.normGridEdit)
+        self.normSamplingSpin = qt.QDoubleSpinBox()
+        self.normSamplingSpin.setRange(0.0001, 1.0)
+        self.normSamplingSpin.setDecimals(4)
+        self.normSamplingSpin.setSingleStep(0.001)
+        self.normSamplingSpin.toolTip = ("Fraction of the template voxels sampled for the mutual information "
+                                         "(samplingPercentage; BRAINSFit's default 0.002). Lower is faster and "
+                                         "lighter.")
+        advancedForm.addRow("Sampling:", self.normSamplingSpin)
+
+        def intSpin(low, high, tip, special=None):
+            spin = qt.QSpinBox()
+            spin.setRange(low, high)
+            spin.toolTip = tip
+            if special:
+                spin.specialValueText = special
+            return spin
+
+        self.normIterationsSpin = intSpin(1, 100000, "numberOfIterations: most optimizer iterations per step "
+                                          "(BRAINSFit's default 1500)")
+        advancedForm.addRow("Iterations:", self.normIterationsSpin)
+        self.normBinsSpin = intSpin(8, 256, "numberOfHistogramBins of the mutual information (default 50); fewer "
+                                    "bins need less memory per thread for the B-spline")
+        advancedForm.addRow("Histogram bins:", self.normBinsSpin)
+        self.normFactorEdit = qt.QLineEdit()
+        self.normFactorEdit.toolTip = ("costFunctionConvergenceFactor of the B-spline (L-BFGS-B): when it stops. "
+                                       "1e+12 low accuracy, 1e+7 moderate, 1e+1 very high (BRAINSFit's doc); "
+                                       "BRAINSFit's default 2e+13 stops early; 1e+9 by default here.")
+        advancedForm.addRow("Convergence factor:", self.normFactorEdit)
+        self.normToleranceEdit = qt.QLineEdit()
+        self.normToleranceEdit.toolTip = ("projectedGradientTolerance of the B-spline (L-BFGS-B), default 1e-5 "
+                                          "(BRAINSFit's doc: 1e-4 seems to work well)")
+        advancedForm.addRow("Gradient tolerance:", self.normToleranceEdit)
+        self.normEvaluationsSpin = intSpin(1, 100000, "maximumNumberOfEvaluations of the B-spline line search "
+                                           "(default 900)")
+        advancedForm.addRow("Max evaluations:", self.normEvaluationsSpin)
+        self.normCorrectionsSpin = intSpin(1, 1000, "maximumNumberOfCorrections of L-BFGS-B (default 25)")
+        advancedForm.addRow("Max corrections:", self.normCorrectionsSpin)
+        self.normDisplacementSpin = qt.QDoubleSpinBox()
+        self.normDisplacementSpin.setRange(0.0, 200.0)
+        self.normDisplacementSpin.setDecimals(1)
+        self.normDisplacementSpin.suffix = " mm"
+        self.normDisplacementSpin.specialValueText = "Unbounded"
+        self.normDisplacementSpin.toolTip = "maxBSplineDisplacement: largest control point shift (0: unbounded)"
+        advancedForm.addRow("Max B-spline shift:", self.normDisplacementSpin)
+        self.normThreadsSpin = intSpin(-1, 256, "numberOfThreads of BRAINSFit (Auto: all cores). Memory of the "
+                                       "B-spline metric grows with the threads, so fewer threads use less memory.",
+                                       special="Auto")
+        advancedForm.addRow("Threads:", self.normThreadsSpin)
+        resetButton = qt.QPushButton("Reset to defaults")
+        resetButton.connect("clicked()", self._resetNormAdvanced)
+        advancedForm.addRow(resetButton)
+        brainsForm.addRow(advanced)
+        self._resetNormAdvanced()
         form.addRow(self.normBrainsBox)
         form.addRow(self.normIterativeBox)
         self.normInitCombo = qt.QComboBox()
@@ -1104,11 +1167,38 @@ class DynamicNeuroPETWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         steps = [c.currentData for c in self.normStepCombos if c.currentData]
         settings["engine"] = reg.ENGINE_BRAINSFIT
         settings["steps"] = reg.validateSteps(steps)
-        settings["bsplineGrid"] = int(self.normGridSpin.value)
+        settings["bsplineGrid"] = reg.parseGrid(self.normGridEdit.text)
+        settings["samplingPercentage"] = float(self.normSamplingSpin.value)
+        try:
+            factor, tolerance = float(self.normFactorEdit.text), float(self.normToleranceEdit.text)
+        except ValueError:
+            raise ValueError("The convergence factor and the gradient tolerance are numbers (e.g. 1e9, 1e-5).")
+        settings.update(numberOfIterations=int(self.normIterationsSpin.value),
+                        histogramBins=int(self.normBinsSpin.value),
+                        bsplineConvergenceFactor=factor, projectedGradientTolerance=tolerance,
+                        maximumNumberOfEvaluations=int(self.normEvaluationsSpin.value),
+                        maximumNumberOfCorrections=int(self.normCorrectionsSpin.value),
+                        maxBSplineDisplacement=float(self.normDisplacementSpin.value),
+                        numberOfThreads=int(self.normThreadsSpin.value))
         working = float(self.normWorkingSpin.value)
         settings["resample"] = [working > 0] * len(settings["steps"])
         settings["workingVoxelMm"] = working
         return settings
+
+    def _resetNormAdvanced(self):
+        """The BRAINSFit options of the normalization back to their defaults."""
+        options = NORMALIZATION_BRAINSFIT
+        self.normWorkingSpin.value = NORMALIZATION_WORKING_MM
+        self.normGridEdit.text = str(NORMALIZATION_BSPLINE_GRID)
+        self.normSamplingSpin.value = NORMALIZATION_SAMPLING
+        self.normIterationsSpin.value = options["numberOfIterations"]
+        self.normBinsSpin.value = options["histogramBins"]
+        self.normFactorEdit.text = f"{options['bsplineConvergenceFactor']:g}"
+        self.normToleranceEdit.text = f"{options['projectedGradientTolerance']:g}"
+        self.normEvaluationsSpin.value = options["maximumNumberOfEvaluations"]
+        self.normCorrectionsSpin.value = options["maximumNumberOfCorrections"]
+        self.normDisplacementSpin.value = options["maxBSplineDisplacement"]
+        self.normThreadsSpin.value = options["numberOfThreads"]
 
     def _template(self):
         key = self.templateCombo.currentData
