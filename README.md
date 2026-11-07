@@ -381,6 +381,70 @@ summed image** of the series.
 - **Revert changes** drops a registration that is not hardened yet; after *Overwrite* it puts the series back, after
   *Save separately* it removes the new series (until another series is picked or the scene is closed).
 
+## Dynamic PET Modeling
+
+The **Dynamic PET Modeling** module (Nuclear Medicine > PET4D) fits kinetic models to the **time-activity curves
+(TACs) of the segments** of a segmentation, and makes voxel-wise parametric maps.
+
+- **Inputs:** the **dynamic series** and a **segmentation** (any grid; every segment is resampled onto the PET grid).
+  Pick the **target segment** (shown and fitted by *Preview*, e.g. a region rich in receptors) and the **reference
+  segment**: the **blood pool** (left ventricle, aorta, a sinus) for the plasma input models, or a **region without
+  specific binding** (e.g. the cerebellum) for the reference methods. A segment named like one is picked for you.
+- **Input function** (plasma input models): the mean of the **blood pool segment** (image-derived whole blood, no
+  plasma correction), or a **plasma curve from a file** (CSV / TSV, two columns: time, activity in the units of the
+  images; a header is skipped; times in s or min from time zero). With a file, the blood pool segment is the whole
+  blood of vB.
+- **Time zero** (t = 0 of every curve): the **start of the first frame** (default), the **injection time** in the
+  PET tags, or an injection time entered in **seconds from the first frame** (negative: before the image).
+- **Methods:**
+
+  | Method | Input | Results |
+  |---|---|---|
+  | 2TC reversible | plasma | K1, k2, k3, k4, vB, (delay), VT = K1/k2 (1 + k3/k4), VND = K1/k2, BPnd = k3/k4 |
+  | 2TC irreversible (k4 = 0) | plasma | K1, k2, k3, vB, (delay), Ki = K1 k3 / (k2 + k3) |
+  | 1TC | plasma | K1, k2, vB, (delay), VT = K1/k2 |
+  | Patlak plot | plasma | Ki (slope), V0 (intercept), t* |
+  | Logan plot | plasma | VT (slope), intercept, t* |
+  | SRTM | reference | R1, k2, k2' = k2/R1, BPnd |
+  | Logan plot (reference) | reference | DVR (slope), BPnd = DVR - 1, t*; optional reference k2' |
+  | SUVR | reference | SUVR over a time window (default the last 30 min), BPnd = SUVR - 1 |
+
+  Rate constants are per minute. The compartment models and SRTM are fitted by **weighted least squares**
+  (Levenberg-Marquardt with bounds, a few starting points; SRTM starts from its basis function solution) to the
+  **frame means** of the model, which is computed on a fine time grid. The **parameter table** sets the initial
+  values and bounds; untick a parameter to keep it fixed (the **blood delay** is fixed at 0 unless ticked).
+  **Weighting:** frame duration (default), uniform, or duration / activity.
+- **t\*** (Patlak, Logan): **20 min** by default, or **automatic**: the earliest t\* from which the line fits
+  every later point within a maximum relative error (10 %). The frames whose middle is at or after t\* are used.
+- **Fit metrics:** R², RMSE, NRMSE (RMSE / mean of the data) and AIC (n ln(WSS/n) + 2p); for Patlak / Logan those of
+  the straight line.
+- **Preview (target)** fits the target only; **Fit all segments** fits every segment but the reference into the
+  results table, and also makes a **table node** *"&lt;series&gt; &lt;method&gt; results"* in the scene.
+  **Export CSV** saves the results and, next to them, *&lt;name&gt;_TACs.csv* with every curve and fit.
+- **Voxel-wise calculation:** parametric maps for **1TC** (K1, k2, vB, VT, basis functions), **Patlak** (Ki, V0),
+  **Logan** (VT), **Logan reference** (DVR, BPnd), **SRTM** (BPnd, R1, k2, basis functions, Gunn 1997) and **SUVR**,
+  as new volumes on the PET grid. Voxels below a percentage (5 %) of the 99.9th percentile of the mean activity, or
+  outside the segments when asked, are 0. The graphical methods use the target's t\*. The first map is shown over
+  the summed image.
+- **Layout:** the upper half has the **summed image** (or the middle frame) with the **target and reference
+  segments** on the left third and the **frames** (as in Review/Edit) on the right. The lower half is a dock with the
+  **TACs** on the left (target and reference thick and opaque, the other segments faint; fitted models dashed; the
+  t\* line or the SUVR window marked; for Patlak / Logan the linear plot of the target can be shown) and the
+  **results table** on the right (click a row to make that segment the target).
+
+The models are in `DICOMGatedDynamicPETLib/kinetics.py` (numpy only) and the module's logic works without the panel,
+so other modules and scripts can use them:
+
+```python
+import DynamicPETModeling
+logic = DynamicPETModeling.DynamicPETModelingLogic()
+analysis = logic.prepare(sequenceNode, segmentationNode)             # TACs of every segment
+results = logic.fitSegments(analysis, "SRTM", referenceId=cerebellumId)
+results[striatumId]["values"]["BPnd"], results[striatumId]["metrics"]["R2"]
+logic.exportCsv("/tmp/srtm.csv", analysis, results, "SRTM")
+maps = logic.parametricMaps(analysis, "SRTM", referenceId=cerebellumId)   # {"BPnd": volume node, ...}
+```
+
 ## What is stored on the volumes
 
 Node attributes, with the prefix `StaticPET.`, `GatedPET.` or `DynamicPET.`. Every volume also carries
@@ -434,6 +498,8 @@ DICOMGatedDynamicPET/
   DynamicPETEditor.py              Dynamic PET Review/Edit module (visible, Nuclear Medicine.PET4D)
   DynamicPETMotionCorrection.py    Dynamic PET Motion Correction module (visible, Nuclear Medicine.PET4D), Slicer self-test
   DynamicPETRegistration.py        Dynamic PET to CT/MR Registration module (visible, Nuclear Medicine.PET4D), Slicer self-test
+  DynamicPETModeling.py            Dynamic PET Modeling module (visible, Nuclear Medicine.PET4D), logic usable from scripts,
+                                   Slicer self-test
   DICOMGatedDynamicPETLib/
     settings.py                    the settings, kept in the Slicer application settings
     dynamicviews.py, timeline.py   Review/Edit layout helpers and the timeline widget
@@ -445,6 +511,8 @@ DICOMGatedDynamicPET/
     registration.py                Registration: steps, transform summary, checkerboard, Harden grid, layout (numpy)
     resampling.py                  voxels resampled onto another grid through a (B-spline) transform (VTK + numpy)
     hardendialog.py                Harden dialog of Registration and Motion Correction (Qt)
+    kinetics.py                    kinetic models, fits, metrics, t*, voxel-wise maps, CSV (numpy, no Slicer imports)
+    tacplot.py                     Modeling plot: TACs, fits, Patlak / Logan plot (Qt)
     petseries.py                   PET DICOM: kind, frame ordering, geometry, SUV, tracer, decay, frame timing,
                                    ECG gating, synthetic test series (pydicom + numpy, no Slicer imports)
 Testing/                          tests without Slicer (petseries, Review/Edit helpers): python -m pytest Testing
@@ -455,7 +523,9 @@ In Slicer, the self-test runs from the Python console:
 self-test (a synthetic series with a frame moved 8 mm and a low activity frame) with
 `import DynamicPETMotionCorrection; DynamicPETMotionCorrection.DynamicPETMotionCorrectionTest().runTest()`; the
 registration self-test (a synthetic CT and a PET moved 8 mm) with
-`import DynamicPETRegistration; DynamicPETRegistration.DynamicPETRegistrationTest().runTest()`.
+`import DynamicPETRegistration; DynamicPETRegistration.DynamicPETRegistrationTest().runTest()`; the modelling
+self-test (a synthetic series with a target, a reference and a blood pool) with
+`import DynamicPETModeling; DynamicPETModeling.DynamicPETModelingTest().runTest()`.
 
 The Dynamic PET Review/Edit module keeps its internal name `DynamicPETEditor` (file, classes, layout id), so scenes and
 scripts that use it keep working; only the title shown to users changed.
