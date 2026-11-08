@@ -29,7 +29,6 @@ DEFAULT_SOURCE = SOURCE_MINOSHIMA
 MAP_SCORE, MAP_PATIENT = "score", "patient"
 MAPS = ((MAP_SCORE, "Score (z / t)"), (MAP_PATIENT, "Patient (projected values)"))
 SSP_FILE = "stats/ssp.npz"
-SURFACE_GREY = (0.62, 0.62, 0.62)
 
 # camera of each view: (direction from the brain centre to the camera, view up), RAS
 CAMERAS = {
@@ -88,13 +87,13 @@ def project(array, ijkToRas, points, outwardNormals, mode="max", depthMm=DEPTH_M
 
 
 def scores(patient, mean, sd, n=None, kind=nr.SCORE_Z, floorFraction=nr.SD_FLOOR_FRACTION):
-    """Vertex z (or t) of the patient's projection against the normals' (positive: below the normals); the SD with
+    """Vertex z (or t) of the patient's projection against the normals' (negative: below the normals); the SD with
     the floor of the voxel scores (a fraction of its median)."""
     patient = np.asarray(patient, dtype=np.float32)
     mean = np.asarray(mean, dtype=np.float32)
     sd = nr.sdFloor(sd, np.ones(np.shape(sd), dtype=bool), floorFraction)
     factor = nr.tFactor(n) if kind == nr.SCORE_T else 1.0
-    return ((mean - patient) / (sd * np.float32(factor))).astype(np.float32)
+    return ((patient - mean) / (sd * np.float32(factor))).astype(np.float32)
 
 
 def signature(points, normals, depthMm, stepMm, extra=()):
@@ -165,14 +164,4 @@ def surfaceColors(table, low, high, count=256):
     index = np.clip(np.rint(np.linspace(0, len(table) - 1, count)).astype(int), 0, len(table) - 1)
     rgba = np.ones((count, 4))
     rgba[:, :3] = table[index]
-    return rgba
-
-
-def scoreSurfaceColors(hypoTable, hyperTable, threshold, maximum, hypoOnly=False, count=256, grey=SURFACE_GREY):
-    """count x 4 RGBA of a score surface over [-maximum, maximum]: the score colours above the threshold, the grey
-    surface between (opaque everywhere, so the brain is seen)."""
-    rgba = nr.scoreColors(hypoTable, hyperTable, threshold, maximum, hypoOnly, count)
-    hidden = rgba[:, 3] == 0
-    rgba[hidden, :3] = grey
-    rgba[:, 3] = 1.0
     return rgba
