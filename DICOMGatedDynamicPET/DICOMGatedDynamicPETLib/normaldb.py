@@ -511,6 +511,37 @@ def addSubject(folder, subject, normalization=None, replace=False):
     return header
 
 
+def removeSubjects(folder, subjectIds):
+    """Remove subjects (rows of subjects.csv and their files in subjects/) from a user defined database; computed
+    statistics become out of date. Returns the IDs removed."""
+    header = readHeader(folder)
+    if header.get("kind") != USER_DEFINED:
+        raise ValueError("Subjects can be removed from user defined databases only.")
+    wanted = {str(i).strip().lower() for i in subjectIds}
+    subjects = readSubjects(folder)
+    keep, removed = [], []
+    for subject in subjects:
+        if str(subject.get("id", "")).strip().lower() in wanted:
+            removed.append(subject)
+        else:
+            keep.append(subject)
+    if not removed:
+        return []
+    subjectsRoot = os.path.realpath(os.path.join(folder, SUBJECTS_DIR))
+    for subject in removed:
+        for key in ("suvFile", "suvrFile"):
+            relative = subject.get(key)
+            path = os.path.realpath(os.path.join(folder, relative)) if relative else ""
+            if path and path.startswith(subjectsRoot + os.sep) and os.path.isfile(path):
+                os.remove(path)
+    writeSubjects(folder, keep)
+    stats = header.setdefault("statistics", {"computed": None, "stale": False, "groups": {}})
+    if stats.get("computed"):
+        stats["stale"] = True
+    writeHeader(folder, header)
+    return [s.get("id") for s in removed]
+
+
 def subjectCount(folder, header):
     """Subjects of a database: the rows of subjects.csv (user defined), the number given for the master maps
     (predefined)."""

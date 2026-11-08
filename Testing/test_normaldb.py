@@ -260,3 +260,22 @@ def test_add_subject(tmp_path):
     predefined = normaldb.createPredefined(str(tmp_path), header(name="pre"), _maps(tmp_path, [normaldb.MASTER]))
     with pytest.raises(ValueError, match="user defined"):
         normaldb.addSubject(predefined, {"id": "S1"})
+
+
+def test_remove_subjects(tmp_path):
+    folder = normaldb.createDatabase(str(tmp_path), header(name="db"))
+    os.makedirs(os.path.join(folder, normaldb.SUBJECTS_DIR), exist_ok=True)
+    for subjectId in ("S1", "S2"):
+        suv, suvr = normaldb.subjectFileNames(subjectId)
+        for relative in (suv, suvr):
+            open(os.path.join(folder, relative), "wb").close()
+        normaldb.addSubject(folder, {"id": subjectId, "suvFile": suv, "suvrFile": suvr})
+    h = normaldb.readHeader(folder)
+    h["statistics"]["computed"] = "2026-11-08T10:00:00"
+    normaldb.writeHeader(folder, h)
+    assert normaldb.removeSubjects(folder, ["s1", "nope"]) == ["S1"]
+    assert [r["id"] for r in normaldb.readSubjects(folder)] == ["S2"]
+    assert not os.path.exists(os.path.join(folder, "subjects", "S1_SUV.nii.gz"))
+    assert os.path.exists(os.path.join(folder, "subjects", "S2_SUVR.nii.gz"))
+    assert normaldb.readHeader(folder)["statistics"]["stale"] is True
+    assert normaldb.removeSubjects(folder, ["S1"]) == []

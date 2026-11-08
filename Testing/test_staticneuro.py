@@ -3,6 +3,8 @@ import json
 import os
 import sys
 
+import pytest
+
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "DICOMGatedDynamicPET"))
 from DICOMGatedDynamicPETLib import normaldb, staticneuro as sn  # noqa: E402
 
@@ -129,3 +131,46 @@ def test_subject_maps():
         sn.ratioMap(values, np.zeros_like(mask))
     with pytest.raises(ValueError, match="mean"):
         sn.ratioMap(np.zeros_like(values), mask)
+
+
+def test_batch_helpers(tmp_path):
+    for rel in ("sub-01/ses-SUV/pet/sub-01_ses-SUV_pet.nii.gz", "sub-01/ses-NORM/pet/sub-01_ses-NORM_pet.nii",
+                "sub-02/pet/sub-02_pet.nii.gz", "sub-02/pet/sub-02_pet.json", "sub-03/anat/sub-03_T1w.nii.gz",
+                ".hidden/sub-09_pet.nii.gz"):
+        path = tmp_path / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"x")
+    files = sn.findPetFiles(str(tmp_path))
+    assert [os.path.basename(f) for f in files] == ["sub-01_ses-NORM_pet.nii", "sub-01_ses-SUV_pet.nii.gz",
+                                                     "sub-02_pet.nii.gz"]
+    assert [sn.bidsSession(f) for f in files] == ["NORM", "SUV", ""]
+    assert sn.bidsSubjectId(files[0]) == "sub-01" and sn.bidsSubjectId("x.nii") == ""
+    defaults = {"iterative": ("Affine", False), "brainsfit": ("ScaleSkewVersor3D", True)}
+    plan = sn.batchNormalization(None, "T1", "iterative", defaults)
+    assert plan == {"method": "pet", "template": "T1", "engine": "iterative", "linear": "Affine",
+                    "deformable": False, "brainMask": True}
+    plan = sn.batchNormalization({"template": "GM", "engine": "brainsfit", "brainMask": False}, "T1", "iterative",
+                                 defaults)
+    assert plan["template"] == "GM" and plan["linear"] == "ScaleSkewVersor3D" and plan["deformable"] is True
+    assert plan["brainMask"] is False
+    with pytest.raises(ValueError, match="MR template"):
+        sn.batchNormalization({"method": "anatomy"}, "T1", "iterative", defaults)
+
+
+def test_qc_montage():
+    import numpy as np
+    array = np.zeros((6, 8, 10), dtype=np.float32)       # (k, j, i)
+    array[1, 2, 3] = 5.0
+    flipped = np.diag([-1.0, 1.0, 1.0, 1.0])               # i runs to the left
+    ras = sn.rasArray(array, flipped)
+    assert ras.shape == (10, 8, 6) and ras[10 - 1 - 3, 2, 1] == 5.0
+    assert sn.rasArray(array, np.eye(4))[3, 2, 1] == 5.0
+    anatomy = np.random.default_rng(0).random((10, 8, 6)).astype(np.float32)
+    pet = np.zeros_like(anatomy)
+    pet[4:7, 3:6, 2:4] = 3.0
+    picture = sn.qcMontage(anatomy, pet, scale=2)
+    assert picture.dtype == np.uint8 and picture.shape[2] == 3
+    assert picture.shape[0] == 2 * 8                       # tallest panel: y (axial) or z (coronal / sagittal)
+    assert picture.shape[1] == 2 * (10 + 10 + 8) + 3 * 8
+    with pytest.raises(ValueError):
+        sn.qcMontage(anatomy, pet[:-1])

@@ -38,6 +38,7 @@ from DICOMGatedDynamicPETLib import dynamicviews, neuro, normaldb  # noqa: E402
 
 SETTINGS_ROOT = "DICOMGatedDynamicPET/NeuroDatabase/RootFolder"
 SETTINGS_ATLAS_FOLDER = "DICOMGatedDynamicPET/Neuro/AtlasFolder"     # shared with Dynamic Neuro Receptor PET
+SETTINGS_BATCH_FOLDER = "DICOMGatedDynamicPET/NeuroDatabase/BatchFolder"
 COLUMNS = (("name", "Name"), ("kind", "Type"), ("modality", "Modality"), ("nuclide", "Nuclide"), ("tracer", "Tracer"),
            ("subjects", "Subjects"), ("reference", "Reference region"), ("ageGroups", "Age groups"),
            ("statistics", "Mean / SD"), ("version", "Version"), ("created", "Created"))
@@ -666,20 +667,30 @@ class NeuroPETDatabaseManagerWidget(ScriptedLoadableModuleWidget):
         self.exportButton.toolTip = "The selected user defined database as a .zip without its subject images."
         self.deleteButton = _button("Delete database", "revert")
         self.deleteButton.toolTip = "Remove the selected database folder from disk (asks first)."
+        self.batchButton = _button("Batch add subjects...")
+        self.batchButton.toolTip = ("Add many normal subjects (BIDS PET files) to the selected user defined database: "
+                                    "each normalized with the database's settings, with a QC picture.")
         self.openButton = qt.QPushButton("Open folder")
         self.refreshButton = qt.QPushButton("Refresh")
         grid.addWidget(self.createButton, 0, 0)
         grid.addWidget(self.predefinedButton, 0, 1)
-        grid.addWidget(self.exportButton, 1, 0)
-        grid.addWidget(self.deleteButton, 1, 1)
-        grid.addWidget(self.openButton, 2, 0)
-        grid.addWidget(self.refreshButton, 2, 1)
+        self.removeSubjectsButton = qt.QPushButton("Remove subjects...")
+        self.removeSubjectsButton.toolTip = ("Remove subjects (e.g. badly normalized ones, after the QC pictures) "
+                                             "from the selected user defined database, with their maps.")
+        grid.addWidget(self.batchButton, 1, 0)
+        grid.addWidget(self.removeSubjectsButton, 1, 1)
+        grid.addWidget(self.exportButton, 2, 0)
+        grid.addWidget(self.deleteButton, 2, 1)
+        grid.addWidget(self.openButton, 3, 0)
+        grid.addWidget(self.refreshButton, 3, 1)
         layout.addLayout(grid)
 
         self.table.connect("itemSelectionChanged()", self._updateSelection)
         self.createButton.connect("clicked()", self.onCreate)
         self.predefinedButton.connect("clicked()", self.onAddPredefined)
         self.exportButton.connect("clicked()", self.onExport)
+        self.batchButton.connect("clicked()", self.onBatchAdd)
+        self.removeSubjectsButton.connect("clicked()", self.onRemoveSubjects)
         self.deleteButton.connect("clicked()", self.onDelete)
         self.openButton.connect("clicked()", self.onOpenFolder)
         self.refreshButton.connect("clicked()", self.refresh)
@@ -739,6 +750,8 @@ class NeuroPETDatabaseManagerWidget(ScriptedLoadableModuleWidget):
         self.deleteButton.enabled = folder is not None
         self.openButton.enabled = rootOk
         self.exportButton.enabled = folder is not None and header.get("kind") == normaldb.USER_DEFINED
+        self.batchButton.enabled = self.exportButton.enabled
+        self.removeSubjectsButton.enabled = self.exportButton.enabled
         self.details.setHtml(self._detailsHtml(folder, header) if folder else "")
 
     @staticmethod
@@ -903,6 +916,197 @@ class NeuroPETDatabaseManagerWidget(ScriptedLoadableModuleWidget):
         except Exception:
             return
         slicer.util.infoDisplay(f"Saved {path}", windowTitle="Neuro PET Database Manager")
+
+    def onBatchAdd(self):
+        from StaticNeuroPET import StaticNeuroPETLogic
+        from DICOMGatedDynamicPETLib import staticneuro as sn
+        folder, header = self.selected()
+        if not folder or header.get("kind") != normaldb.USER_DEFINED:
+            return
+        logic = StaticNeuroPETLogic()
+        try:
+            plan, _ = logic.batchPlan(header)
+        except ValueError as error:
+            _error(slicer.util.mainWindow(), str(error))
+            return
+        dialog, layout, buttons = _scrollDialog(f"Batch add subjects to '{header.get('name')}'",
+                                                slicer.util.mainWindow())
+        dialog.resize(720, 520)
+        info = qt.QLabel(
+            "Adds normal subjects from a BIDS folder (sub-<id>[_ses-<session>]_pet.nii[.gz] with their .json and "
+            "the participants.tsv for age and sex). Each image is normalized to the MNI template with the "
+            "database's normalization settings (no manual check), resampled onto the template grid and saved with its "
+            "SUVR map (the database's reference mask). Subject IDs already in the database are skipped, so a stopped "
+            "batch can be run again; a subject that fails is logged and the batch goes on.")
+        info.wordWrap = True
+        info.textFormat = qt.Qt.PlainText
+        layout.addWidget(info)
+        form = qt.QFormLayout()
+        layout.addLayout(form)
+        folderEdit = _pathEdit(dirs=True)
+        folderEdit.currentPath = str(qt.QSettings().value(SETTINGS_BATCH_FOLDER) or "")
+        form.addRow("BIDS folder:", folderEdit)
+        sessionCombo = qt.QComboBox()
+        sessionCombo.toolTip = "Session of the images to add (BIDS ses-), e.g. SUV"
+        form.addRow("Session:", sessionCombo)
+        atlasEdit = _pathEdit(dirs=True)
+        atlasEdit.currentPath = self.logic.atlasFolder()
+        atlasEdit.toolTip = "Neuro atlas folder (MNI 2009c templates, brain mask)"
+        form.addRow("Atlas folder:", atlasEdit)
+        qcCheck = qt.QCheckBox("Save a QC picture of each subject (PET over the MNI T1, 3 slices) in qc/")
+        qcCheck.checked = True
+        form.addRow(qcCheck)
+        found = qt.QLabel()
+        found.wordWrap = True
+        form.addRow(found)
+        normLabel = qt.QLabel("Normalization: " + normaldb.normalizationText(plan)
+                              + ("" if normaldb.isSpecified(header.get("normalization")) else
+                                 " (the module defaults: the database has none; they are stored with the first "
+                                 "subject)"))
+        normLabel.wordWrap = True
+        form.addRow(normLabel)
+        layout.addStretch(1)
+        run = buttons.addButton("Run", qt.QDialogButtonBox.AcceptRole)
+        buttons.addButton(qt.QDialogButtonBox.Cancel)
+        buttons.connect("rejected()", dialog.reject)
+        state = {"files": []}
+
+        def scan(*args):
+            root = folderEdit.currentPath
+            files = sn.findPetFiles(root) if root and os.path.isdir(root) else []
+            current = sessionCombo.currentData
+            sessions = sorted({sn.bidsSession(f) for f in files})
+            sessionCombo.blockSignals(True)
+            sessionCombo.clear()
+            if len(sessions) > 1:
+                sessionCombo.addItem(f"All sessions ({len(files)})", None)
+            for session in sessions:
+                count = sum(1 for f in files if sn.bidsSession(f) == session)
+                sessionCombo.addItem(f"{session or '(none)'} ({count})", session)
+            index = sessionCombo.findData(current) if current is not None else -1
+            if index < 0:
+                index = max(0, sessionCombo.findData("SUV"))
+            sessionCombo.setCurrentIndex(index)
+            sessionCombo.blockSignals(False)
+            state["all"] = files
+            pick()
+
+        def pick(*args):
+            session = sessionCombo.currentData
+            files = [f for f in state.get("all", []) if session is None or sn.bidsSession(f) == session]
+            state["files"] = files
+            existing = sum(1 for f in files if normaldb.hasSubject(folder, sn.bidsSubjectId(f)))
+            ids = [sn.bidsSubjectId(f) for f in files]
+            duplicates = len(ids) - len(set(ids))
+            found.text = (f"{len(files)} PET image(s)" + (f", {existing} already in the database (skipped)"
+                                                           if existing else "")
+                          + (f"; {duplicates} subject(s) appear twice: pick one session" if duplicates else "") + ".")
+            run.enabled = len(files) > existing
+
+        folderEdit.connect("currentPathChanged(QString)", scan)
+        sessionCombo.connect("currentIndexChanged(int)", pick)
+        scan()
+        result = {}
+
+        def accept():
+            atlas = neuro.findAtlasFiles(atlasEdit.currentPath) if atlasEdit.currentPath else {}
+            if not atlas:
+                _error(dialog, "Pick the Neuro atlas folder (MNI 2009c templates).")
+                return
+            result.update(files=list(state["files"]), atlas=atlas, qc=bool(qcCheck.checked))
+            qt.QSettings().setValue(SETTINGS_BATCH_FOLDER, folderEdit.currentPath)
+            self.logic.setAtlasFolder(atlasEdit.currentPath)
+            dialog.accept()
+
+        run.connect("clicked()", accept)
+        if not dialog.exec_() or not result.get("files"):
+            return
+        files = result["files"]
+        progressDialog = slicer.util.createProgressDialog(windowTitle="Batch add subjects",
+                                                          labelText="Starting...", maximum=len(files))
+
+        def progress(index, total, text):
+            progressDialog.setValue(index)
+            progressDialog.setLabelText(text)
+            slicer.app.processEvents()
+            return not progressDialog.wasCanceled
+
+        try:
+            rows, logPath, stopped = logic.batchAdd(folder, files, result["atlas"], result["qc"], progress)
+        except Exception as error:
+            logging.exception("Batch add failed")
+            _error(slicer.util.mainWindow(), f"The batch could not start:\n{error}")
+            return
+        finally:
+            progressDialog.close()
+            self.refresh(select=folder)
+        counts = {status: sum(1 for r in rows if r["status"] == status)
+                  for status in ("added", "skipped", "failed", "stopped")}
+        text = (f"Added {counts['added']}, skipped {counts['skipped']} (already in), failed {counts['failed']}"
+                + (" - stopped" if stopped else "") + f".\n\nLog: {logPath}"
+                + ("\nQC pictures: " + os.path.join(folder, "qc") if result["qc"] else "")
+                + "\n\nCheck the QC pictures, remove the badly normalized subjects, then compute the mean / SD maps.")
+        failed = [r for r in rows if r["status"] == "failed"]
+        if failed:
+            text += "\n\nFailed:\n" + "\n".join(f"{r['id']}: {r['message']}" for r in failed[:10])
+            if len(failed) > 10:
+                text += f"\n... ({len(failed) - 10} more in the log)"
+        slicer.util.infoDisplay(text, windowTitle="Batch add subjects")
+
+    def onRemoveSubjects(self):
+        folder, header = self.selected()
+        if not folder or header.get("kind") != normaldb.USER_DEFINED:
+            return
+        subjects = normaldb.readSubjects(folder)
+        if not subjects:
+            slicer.util.infoDisplay("The database has no subjects.", windowTitle="Remove subjects")
+            return
+        dialog, layout, buttons = _scrollDialog(f"Remove subjects from '{header.get('name')}'",
+                                                slicer.util.mainWindow())
+        dialog.resize(520, 600)
+        label = qt.QLabel("Select the subjects to remove (Ctrl / Shift for several). Their rows and SUV / SUVR maps "
+                          "are deleted; the mean / SD maps become out of date.")
+        label.wordWrap = True
+        layout.addWidget(label)
+        filterEdit = qt.QLineEdit()
+        filterEdit.placeholderText = "Filter by ID"
+        layout.addWidget(filterEdit)
+        listWidget = qt.QListWidget()
+        listWidget.setSelectionMode(qt.QAbstractItemView.ExtendedSelection)
+        for subject in subjects:
+            text = (f"{subject.get('id')}  (age {subject.get('age') or '?'}, {subject.get('sex') or '?'}, "
+                    f"reference mean {subject.get('referenceMean') or '?'})")
+            item = qt.QListWidgetItem(text)
+            item.setData(qt.Qt.UserRole, subject.get("id"))
+            listWidget.addItem(item)
+        layout.addWidget(listWidget, 1)
+        filterEdit.connect("textChanged(QString)", lambda text: [
+            listWidget.item(i).setHidden(text.strip().lower() not in listWidget.item(i).text().lower())
+            for i in range(listWidget.count)])
+        remove = buttons.addButton("Remove", qt.QDialogButtonBox.AcceptRole)
+        buttons.addButton(qt.QDialogButtonBox.Cancel)
+        buttons.connect("rejected()", dialog.reject)
+        chosen = []
+
+        def accept():
+            ids = [item.data(qt.Qt.UserRole) for item in listWidget.selectedItems()]
+            if not ids:
+                return
+            if not slicer.util.confirmYesNoDisplay(f"Remove {len(ids)} subject(s) and their maps from disk?\n\n"
+                                                   + ", ".join(ids[:20]) + (" ..." if len(ids) > 20 else ""),
+                                                   windowTitle="Remove subjects", parent=dialog):
+                return
+            chosen.extend(ids)
+            dialog.accept()
+
+        remove.connect("clicked()", accept)
+        if not dialog.exec_() or not chosen:
+            return
+        try:
+            with slicer.util.tryWithErrorDisplay("Could not remove the subjects", waitCursor=True):
+                normaldb.removeSubjects(folder, chosen)
+        finally:
+            self.refresh(select=folder)
 
     def onDelete(self):
         folder, header = self.selected()

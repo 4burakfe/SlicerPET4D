@@ -22,11 +22,13 @@ import json
 import logging
 import os
 import sys
+import time
 
 import ctk
 import numpy as np
 import qt
 import slicer
+import vtk
 from slicer.ScriptedLoadableModule import ScriptedLoadableModule, ScriptedLoadableModuleTest
 
 _MODULE_DIR = os.path.dirname(os.path.abspath(globals().get("__file__", "") or "."))
@@ -41,7 +43,9 @@ from DICOMGatedDynamicPETLib.hardendialog import hardenDialog  # noqa: E402
 from DynamicNeuroPET import (DynamicNeuroPETLogic, DynamicNeuroPETWidget, _button, _ijkToRas, _percentiles,  # noqa
                              _vtkMatrix, ATLAS_BILATERAL, ATLAS_FILE_ATTRIBUTE, METHOD_ANATOMY, METHOD_PET,
                              METHOD_PET_TEMPLATE, NEURO_PREFIX, NORMALIZED_SUFFIX, REFERENCE_SUFFIX, REG_PREFIX,
-                             STATE_DONE, STATE_READY, STATE_WAITING, STEP_DATA, STEP_NORM, STEP_REG, STEP_REGIONS)
+                             STATE_DONE, STATE_READY, STATE_WAITING, STEP_DATA, STEP_NORM, STEP_REG, STEP_REGIONS,
+                             NORMALIZATION_ENGINE, NORMALIZATION_ITERATIVE_DEFORMABLE, NORMALIZATION_ITERATIVE_LINEAR,
+                             NORMALIZATION_STEPS, NORMALIZATION_WORKING_MM)
 
 STEP_REVIEW = "review"
 STEPS = (
@@ -352,6 +356,162 @@ class StaticNeuroPETLogic(DynamicNeuroPETLogic):
         normaldb.addSubject(folder, row, normalization, replace)
         logging.info(f"Static Neuro: '{subjectId}' added to {folder} (reference mean {mean:.4g})")
         return row
+
+    # --- batch: many normal subjects into a database ----------------------------------------------
+    BATCH_COLUMNS = ("file", "id", "status", "message", "referenceMean", "seconds")
+
+    def batchPlan(self, header):
+        """(plan, registration settings) of a batch into the database: its normalization settings
+        (staticneuro.batchNormalization) and the registration settings they give."""
+        plan = sn.batchNormalization(header.get("normalization"), neuro.DEFAULT_TEMPLATE, NORMALIZATION_ENGINE,
+                                     {reg.ENGINE_ITERATIVE: (NORMALIZATION_ITERATIVE_LINEAR,
+                                                             NORMALIZATION_ITERATIVE_DEFORMABLE),
+                                      reg.ENGINE_BRAINSFIT: (NORMALIZATION_STEPS[0], "BSpline" in NORMALIZATION_STEPS)})
+        settings = self.defaultSettings(METHOD_PET)
+        if plan["engine"] == reg.ENGINE_ITERATIVE:
+            settings.update(engine=reg.ENGINE_ITERATIVE, iterativeLinear=plan["linear"],
+                            iterativeDeformable=plan["deformable"],
+                            steps=reg.iterativeSteps(plan["linear"], plan["deformable"]))
+        else:
+            steps = reg.validateSteps([plan["linear"]] + (["BSpline"] if plan["deformable"] else []))
+            settings.update(engine=reg.ENGINE_BRAINSFIT, steps=steps,
+                            resample=[NORMALIZATION_WORKING_MM > 0] * len(steps))
+        return plan, settings
+
+    def batchAdd(self, folder, files, atlas, qc=True, progress=None):
+        """Add BIDS PET files (staticneuro.findPetFiles) of normal subjects to a user defined database, one after the
+        other: each loaded, normalized to the MNI template with the database's normalization settings (no manual
+        check), resampled onto the template grid and added (logic.addSubject, the database's reference mask). IDs
+        already in the database are skipped; a subject that fails is logged and the batch goes on. qc: a PNG of the
+        normalized PET over the MNI T1 (3 slices) in <database>/qc/. progress(index, total, text) returns False to
+        stop. The log is <database>/qc/batch_<time>.csv. Returns (rows, log path, stopped)."""
+        header = normaldb.readHeader(folder)
+        if header.get("kind") != normaldb.USER_DEFINED:
+            raise ValueError("Subjects can be added to user defined databases only.")
+        gridPath = sn.referenceMaskPath(folder, header)
+        if not gridPath:
+            raise ValueError(f"'{header['name']}' has no reference mask (reference_mask in its folder).")
+        plan, settings = self.batchPlan(header)
+        key = plan["template"]
+        templatePath = atlas.get(key)
+        if not templatePath and key == neuro.PSEUDO_PET and neuro.canMakeTemplate(atlas, key):
+            templatePath = self.ensurePseudoPet(atlas)
+        if not templatePath:
+            raise ValueError(f"The template '{key}' of the database's normalization is not in the atlas folder.")
+        template = self.loadAtlasVolume(templatePath, name=f"MNI ICBM152 2009c {key}")
+        mask = None
+        if plan["brainMask"] and neuro.BRAIN_MASK in atlas:
+            mask = self.loadAtlasVolume(atlas[neuro.BRAIN_MASK], name="MNI ICBM152 2009c brain mask")
+        anatomy = None
+        if qc and "T1" in atlas:
+            t1 = self.loadAtlasVolume(atlas["T1"], name="MNI ICBM152 2009c T1")
+            anatomy = (sn.rasArray(slicer.util.arrayFromVolume(t1), _ijkToRas(t1)), tuple(_ijkToRas(t1).ravel()))
+        qcFolder = os.path.join(folder, "qc")
+        os.makedirs(qcFolder, exist_ok=True)
+        logPath = os.path.join(qcFolder, "batch_" + time.strftime("%Y%m%d_%H%M%S") + ".csv")
+        rows, stopped, total = [], False, len(files)
+        for index, path in enumerate(files):
+            subjectId = sn.bidsSubjectId(path) or normaldb.safeName(sn.splitImageName(path)[0]) or f"subject{index}"
+            if progress is not None and not progress(index, total, f"{subjectId} ({index + 1} / {total})"):
+                stopped = True
+                break
+            row = {"file": path, "id": subjectId, "status": "", "message": "", "referenceMean": "", "seconds": ""}
+            start = time.time()
+            if normaldb.hasSubject(folder, subjectId):
+                row.update(status="skipped", message="already in the database")
+            else:
+                def stepProgress(step, steps, text, index=index, subjectId=subjectId):
+                    return progress is None or progress(index, total, f"{subjectId} ({index + 1} / {total}): {text}")
+                try:
+                    added = self._batchSubject(folder, header, path, subjectId, template, mask, settings, plan,
+                                               gridPath, anatomy, qcFolder, stepProgress)
+                    if added is None:
+                        row.update(status="stopped", message="stopped during the registration")
+                        stopped = True
+                    else:
+                        row.update(status="added", referenceMean=added["referenceMean"],
+                                   message=added.get("notes", ""))
+                except Exception as error:
+                    logging.exception(f"Static Neuro batch: {path} failed")
+                    row.update(status="failed", message=str(error).replace("\n", " "))
+                header = normaldb.readHeader(folder)
+            row["seconds"] = f"{time.time() - start:.0f}"
+            rows.append(row)
+            self._writeBatchLog(logPath, rows)
+            if stopped:
+                break
+        if not rows:
+            self._writeBatchLog(logPath, rows)
+        return rows, logPath, stopped
+
+    def _batchSubject(self, folder, header, path, subjectId, template, mask, settings, plan, gridPath, anatomy,
+                      qcFolder, progress):
+        """One subject of batchAdd(): the row added (with "notes"), None when the registration was stopped."""
+        from DynamicPETRegistration import DynamicPETRegistrationLogic
+        scene = slicer.mrmlScene
+        nodes = []
+        try:
+            volume = self.loadFromFile(path)
+            nodes.append(volume)
+            notes = sn.unitWarnings(self.imageInfo(volume), header)
+            result = self.normalize(volume, template, METHOD_PET, None, settings, mask, progress)
+            nodes.append(result.get("bspline"))
+            if result.get("stopped") or not result.get("steps"):
+                return None
+            chain = DynamicPETRegistrationLogic.transformNode("vtkMRMLLinearTransformNode", "Batch normalization")
+            nodes.append(chain)
+            chain.SetMatrixTransformToParent(_vtkMatrix(result["linear"]))
+            if result.get("bspline") is not None:
+                chain.SetAndObserveTransformNodeID(result["bspline"].GetID())
+            description = f"Normalized to {template.GetName()} ({reg.stepsText(result['steps'])}, batch)"
+            _, normalized, _, _ = self.harden(volume, template, chain, reg.SAVE_SEPARATELY, reg.OUTPUT_FIXED_GRID,
+                                              None, "Linear", description, METHOD_PET)
+            nodes.append(normalized)
+            normalized.SetAttribute(NORMALIZATION_ATTRIBUTE, json.dumps(plan))
+            age, sex = self.ageAndSex(normalized)
+            if age is None:
+                notes.append("age not known")
+            row = self.addSubject(folder, header, normalized, subjectId, gridPath, age, sex, plan, False)
+            if anatomy is not None:
+                try:
+                    self.writeQcPicture(os.path.join(qcFolder, normaldb.safeName(subjectId) + "_qc.png"), normalized,
+                                        anatomy)
+                except Exception as error:
+                    logging.exception(f"Static Neuro batch: no QC picture of {subjectId}")
+                    notes.append(f"no QC picture ({error})")
+            row["notes"] = "; ".join(notes)
+            return row
+        finally:
+            for node in nodes:
+                if node is not None and scene.IsNodePresent(node):
+                    scene.RemoveNode(node)
+
+    @staticmethod
+    def writeQcPicture(path, volume, anatomy):
+        """PNG of the volume over the anatomy ((rasArray, ijkToRas values) on the same grid): 3 slices."""
+        from vtk.util import numpy_support
+        anatomyArray, anatomyMatrix = anatomy
+        if not np.allclose(np.asarray(anatomyMatrix).reshape(4, 4), _ijkToRas(volume), atol=1e-3):
+            raise ValueError("the image is not on the T1 template grid")
+        picture = sn.qcMontage(anatomyArray, sn.rasArray(slicer.util.arrayFromVolume(volume), _ijkToRas(volume)))
+        height, width, _ = picture.shape
+        image = vtk.vtkImageData()
+        image.SetDimensions(width, height, 1)
+        scalars = numpy_support.numpy_to_vtk(np.ascontiguousarray(picture[::-1]).reshape(-1, 3), deep=True,
+                                             array_type=vtk.VTK_UNSIGNED_CHAR)
+        scalars.SetNumberOfComponents(3)
+        image.GetPointData().SetScalars(scalars)
+        writer = vtk.vtkPNGWriter()
+        writer.SetFileName(path)
+        writer.SetInputData(image)
+        writer.Write()
+
+    def _writeBatchLog(self, path, rows):
+        import csv
+        with open(path, "w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=self.BATCH_COLUMNS, extrasaction="ignore")
+            writer.writeheader()
+            writer.writerows(rows)
 
     # --- normal databases ------------------------------------------------------------------------
     @staticmethod
@@ -1570,5 +1730,14 @@ class StaticNeuroPETTest(ScriptedLoadableModuleTest):
         settings = widget.normalizationSettings()
         self.assertIn(settings["method"], [m for m, _ in METHODS])
         self.assertTrue(_sameRegion("Cerebellum Gray Matter" + REFERENCE_SUFFIX, "cerebellum gray matter"))
+        # batch: the normalization plan of a database without settings, the QC picture
+        plan, settings = StaticNeuroPETLogic().batchPlan(normaldb.newHeader("batch", nuclide="F-18", tracer="FDG"))
+        self.assertEqual(plan["method"], METHOD_PET)
+        self.assertTrue(settings["steps"])
+        import tempfile
+        picture = os.path.join(tempfile.mkdtemp(), "qc.png")
+        anatomy = sn.rasArray(slicer.util.arrayFromVolume(node), _ijkToRas(node))
+        StaticNeuroPETLogic.writeQcPicture(picture, node, (anatomy, tuple(_ijkToRas(node).ravel())))
+        self.assertTrue(os.path.getsize(picture) > 0)
         widget.showStep(STEP_DATA)
         self.delayDisplay("Widget passed")
