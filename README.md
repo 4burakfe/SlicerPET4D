@@ -586,6 +586,10 @@ database:
 - Every database also stores how its regions are drawn: the **region atlas** (CerebrA left / right, bilateral, or
   the broad regions), **grow regions** (mm, optionally into the white matter) and the reference erosion. The Neuro
   workflows use the same settings when a patient is compared with the database.
+- **Spatial normalization (to MNI)**: how the subjects were normalized (method, template, engine, linear and
+  deformable stages, brain mask), each item optional ("Not specified"). The Static Neuro workflow takes them as its
+  defaults when the database is picked and warns, without blocking, when a patient is normalized otherwise. A
+  database without them takes those of its first added subject.
 
 ## Static Neuro PET/SPECT (workflow)
 
@@ -601,16 +605,25 @@ steps, on the toolbar like the Dynamic Neuro Receptor PET:
 2. **CT/MR registration** (optional): the image registered to the CT / MR (BRAINSFit rigid by default, or the
    iterative engine), checked in the registration layout, corrected by hand, then hardened (saved separately or
    overwritten; Revert).
-3. **Normalization** to the MNI ICBM 152 2009c space, three ways: the PET/SPECT to an MR template (T1, grey matter
-   probability, or the **synthetic PET**: GM + 0.3 x WM smoothed 6 mm FWHM, made on first use next to the GM map),
-   the CT/MR to the MR template with the same transform applied to the image, or the PET/SPECT to a **PET template**: the master mean
-   map of a normal database (only databases with computed statistics are listed).
-4. **Regions/Template**: the **normal database** the patient is compared with, from the database folder of the
+3. **Normalization**: first the **normal database** the patient is compared with, from the database folder of the
    Database Manager. Databases of the image's modality, nuclide and tracer are listed first and the best one is
-   picked; the others are marked with `!` and warn when picked. A database sets the region settings (atlas, growth,
-   white matter, reference region from its own reference mask): they are locked; **Unlock** (with a warning) changes
-   them. Without a database the workflow goes on and the review gives the regional values only.
-5. **Review**: a placeholder for now (the comparison with the database comes next).
+   picked; the others are marked with `!` and warn when picked. The database's normalization settings become the
+   defaults of the page; other settings are allowed but warned about. Then the normalization to the MNI ICBM 152
+   2009c space, three ways: the PET/SPECT to an MR template (T1, grey matter probability, or the **synthetic PET**:
+   GM + 0.3 x WM smoothed 6 mm FWHM, made on first use next to the GM map), the CT/MR to the MR template with the
+   same transform applied to the image, or the PET/SPECT to a **PET template**: the master mean map of the picked
+   database (it needs computed statistics). The settings used are kept on the normalized image
+   (`DynamicPET.Neuro.Normalization`).
+4. **Regions**: the CerebrA regions. The database sets the region settings (atlas, growth, white matter, reference
+   region from its own reference mask): they are locked; **Unlock** (with a warning) changes them. Without a
+   database the workflow goes on and the review gives the regional values only.
+5. **Review**: the comparison with the database comes next. **Add this patient to a normal database** (user
+   defined databases) builds a database from normal subjects: the normalized image is resampled onto the database
+   grid (MNI 2009c, 1 mm) and saved as `subjects/<id>_SUV.nii.gz` and `subjects/<id>_SUVR.nii.gz`, divided by the
+   mean in the **reference region** picked there (a segment of the regions, their reference region by default, or
+   the database's reference mask; a region other than the database's is warned about). A row (ID, age, sex, scan
+   date, reference mean and region, normalization, source) is added to `subjects.csv`; the mean / SD maps are then
+   out of date. The checks before adding (modality, units, normalization, age, an ID already there) only warn.
 
 ## What is stored on the volumes
 

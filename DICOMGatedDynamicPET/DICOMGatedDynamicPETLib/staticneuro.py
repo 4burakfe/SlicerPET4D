@@ -228,7 +228,7 @@ REFERENCE_ATLAS_REGION = {normaldb.REF_CEREBELLUM_GM: "Cerebellum Gray Matter", 
 
 
 def regionSettings(folder, header):
-    """The region settings of a database, as the Regions/Template step applies them: {"regionAtlas", "growMm",
+    """The region settings of a database, as the Regions step applies them: {"regionAtlas", "growMm",
     "growIntoWhiteMatter", "erodeReferenceMm", "referenceRegion", "referenceTitle", "referenceMaskPath",
     "referenceAtlasRegion", "smoothingFwhmMm", "mapType"}."""
     reference = header.get("referenceRegion") or ""
@@ -432,3 +432,33 @@ def taggedAgeSex(attributes):
         if not sex:
             sex = parseSex(attributes.get(prefix + "PatientSex"))
     return age, sex or ""
+
+
+# ---------------------------------------------------------------------------
+# A patient added to a user defined database
+# ---------------------------------------------------------------------------
+def suggestedSubjectId(attributes, name=""):
+    """Subject ID offered when a patient is added to a database: the BIDS subject of an imported file, else the
+    volume's name (as a file name)."""
+    for prefix in (STATIC_PREFIX, SPECT_PREFIX):
+        subject = (attributes or {}).get(prefix + "SubjectID")
+        if subject:
+            return "sub-" + str(subject) if not str(subject).startswith("sub-") else str(subject)
+    return normaldb.safeName(name) or "subject"
+
+
+def ratioMap(values, mask):
+    """(values / mean of values in the mask, that mean) of a patient's map on the database grid; ValueError when the
+    mask misses the image or the mean is not positive."""
+    import numpy as np
+    values = np.asarray(values, dtype=np.float32)
+    mask = np.asarray(mask) > 0
+    if values.shape != mask.shape:
+        raise ValueError("The image and the reference mask are not on the same grid.")
+    inside = values[mask & np.isfinite(values)]
+    if inside.size == 0:
+        raise ValueError("The reference mask holds no image voxels.")
+    mean = float(inside.mean())
+    if not mean > 0:
+        raise ValueError(f"The mean in the reference region is {mean:g}: is the image normalized to the MNI space?")
+    return (values / mean).astype(np.float32), mean

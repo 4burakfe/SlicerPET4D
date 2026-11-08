@@ -364,6 +364,35 @@ class HeaderForm:
             refForm.addRow("Map type:", self.mapTypeCombo)
         outer.addWidget(refBox)
 
+        normBox = qt.QGroupBox("Spatial normalization (to MNI)")
+        normBox.toolTip = ("How the subjects are normalized to the MNI space. The Neuro workflows take it as the "
+                           "default when this database is picked and warn when a patient is normalized otherwise "
+                           "(never blocked). Left 'Not specified', the first subject added sets it.")
+        normForm = qt.QFormLayout(normBox)
+
+        def choiceCombo(items):
+            combo = qt.QComboBox()
+            for key, title in items:
+                combo.addItem(title, key)
+            return combo
+
+        self.normMethodCombo = choiceCombo(normaldb.NORM_METHODS)
+        normForm.addRow("Method:", self.normMethodCombo)
+        self.normTemplateCombo = choiceCombo(normaldb.NORM_TEMPLATES)
+        normForm.addRow("Template:", self.normTemplateCombo)
+        self.normEngineCombo = choiceCombo(normaldb.NORM_ENGINES)
+        normForm.addRow("Registration:", self.normEngineCombo)
+        self.normLinearCombo = choiceCombo(normaldb.NORM_LINEAR)
+        normForm.addRow("Linear stage:", self.normLinearCombo)
+        yesNo = (("", "Not specified"), ("yes", "Yes"), ("no", "No"))
+        self.normDeformableCombo = choiceCombo(yesNo)
+        normForm.addRow("Deformable stage:", self.normDeformableCombo)
+        self.normMaskCombo = choiceCombo(yesNo)
+        normForm.addRow("Skull-stripped template:", self.normMaskCombo)
+        self.normMethodCombo.connect("currentIndexChanged(int)", lambda i: self._updateNormTemplate())
+        self._updateNormTemplate()
+        outer.addWidget(normBox)
+
         ageBox = qt.QGroupBox("Age groups" if not predefined else "Mean / SD maps")
         ageLayout = qt.QVBoxLayout(ageBox)
         self.ageCheck = qt.QCheckBox("Stratify by age")
@@ -507,6 +536,24 @@ class HeaderForm:
                           "sd": self.ageTable.cellWidget(row, 5).currentPath}
         return maps
 
+    def _updateNormTemplate(self):
+        """The template counts for the PET/SPECT to MR template method (or a method not specified) only."""
+        method = self.normMethodCombo.itemData(self.normMethodCombo.currentIndex)
+        self.normTemplateCombo.enabled = method in ("", normaldb.NORM_PET)
+
+    def normalization(self):
+        def data(combo):
+            return combo.itemData(combo.currentIndex) or ""
+
+        def yesNo(combo):
+            value = data(combo)
+            return None if not value else value == "yes"
+
+        method = data(self.normMethodCombo)
+        return {"method": method, "template": data(self.normTemplateCombo) if method in ("", normaldb.NORM_PET) else "",
+                "engine": data(self.normEngineCombo), "linear": data(self.normLinearCombo),
+                "deformable": yesNo(self.normDeformableCombo), "brainMask": yesNo(self.normMaskCombo)}
+
     def header(self):
         stratified = bool(self.ageCheck.checked)
         fields = dict(
@@ -522,6 +569,7 @@ class HeaderForm:
             regionAtlas=self.regionAtlasCombo.itemData(self.regionAtlasCombo.currentIndex),
             regionGrowMm=float(self.growSpin.value),
             growIntoWhiteMatter=bool(self.growWhiteMatterCheck.checked) and self.growSpin.value > 0,
+            normalization=self.normalization(),
             ageStratified=stratified,
             ageGroups=self.ageGroups() if stratified else [],
             scanner=self.scannerEdit.text.strip(),
@@ -706,6 +754,7 @@ class NeuroPETDatabaseManagerWidget(ScriptedLoadableModuleWidget):
             ("Regions", f"{normaldb.regionAtlasTitle(header.get('regionAtlas'))}, grown "
                         f"{header.get('regionGrowMm') or 0:g} mm"
                         + (" (into the white matter too)" if header.get("growIntoWhiteMatter") else "")),
+            ("Spatial normalization", normaldb.normalizationText(header.get("normalization"))),
             ("Maps", f"{header.get('mapType')}, smoothing {header.get('smoothingFwhmMm') or 0:g} mm FWHM"),
             ("Scanner", header.get("scanner")),
             ("Description", header.get("description")),

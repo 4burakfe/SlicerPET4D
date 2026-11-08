@@ -205,3 +205,50 @@ def test_region_settings_in_header():
     assert any("growth" in e for e in normaldb.validateHeader(header(regionGrowMm=-1)))
     assert any("region atlas" in e for e in normaldb.validateHeader(header(regionAtlas="nope")))
     assert header()["regionAtlas"] == normaldb.DEFAULT_REGION_ATLAS and header()["regionGrowMm"] == 0.0
+
+
+def test_normalization_settings(tmp_path):
+    assert normaldb.normalizationText(None) == "Not specified"
+    db = {"method": "pet", "template": "GM", "engine": "iterative", "linear": "Affine", "deformable": False,
+          "brainMask": True}
+    text = normaldb.normalizationText(db)
+    assert "Grey matter" in text and "Iterative" in text and "no deformable" in text and "skull-stripped" in text
+    assert normaldb.normalizationDifferences(db, db) == []
+    used = dict(db, template="T1", engine="brainsfit", deformable=True)
+    diffs = normaldb.normalizationDifferences(db, used)
+    assert len(diffs) == 3 and diffs[0].startswith("template T1 (database: Grey matter")
+    assert any("deformable stage on" in d for d in diffs)
+    assert normaldb.normalizationDifferences({"method": "anatomy", "template": "T1"},
+                                             {"method": "anatomy", "template": "T2"}) == []
+    assert normaldb.normalizationDifferences({}, used) == []
+    assert any("normalization" in e for e in normaldb.validateHeader(header(normalization={"method": "x"})))
+    folder = normaldb.createDatabase(str(tmp_path), header(name="old"))
+    data = json.load(open(normaldb.headerPath(folder)))
+    del data["normalization"]
+    json.dump(data, open(normaldb.headerPath(folder), "w"))
+    assert normaldb.readHeader(folder)["normalization"] == normaldb.emptyNormalization()
+
+
+def test_add_subject(tmp_path):
+    folder = normaldb.createDatabase(str(tmp_path), header(name="db"))
+    assert normaldb.subjectFileNames("sub/1") == ("subjects/sub_1_SUV.nii.gz", "subjects/sub_1_SUVR.nii.gz")
+    norm = {"method": "pet", "template": "GM"}
+    h = normaldb.addSubject(folder, {"id": "S1", "age": 52, "sex": "M", "referenceMean": "7.1",
+                                     "reference": "Cerebellum Gray Matter (reference)"}, norm)
+    assert h["normalization"]["template"] == "GM" and h["statistics"]["stale"] is False
+    assert normaldb.readSubjects(folder)[0]["reference"] == "Cerebellum Gray Matter (reference)"
+    with pytest.raises(ValueError, match="already"):
+        normaldb.addSubject(folder, {"id": "s1"})
+    assert normaldb.hasSubject(folder, "s1")
+    h["statistics"]["computed"] = "2026-11-08T10:00:00"
+    normaldb.writeHeader(folder, h)
+    h = normaldb.addSubject(folder, {"id": "S1", "age": 53}, {"method": "anatomy"}, replace=True)
+    assert h["statistics"]["stale"] is True and h["normalization"]["method"] == "pet"
+    normaldb.addSubject(folder, {"id": "S2", "age": 60})
+    rows = normaldb.readSubjects(folder)
+    assert [r["id"] for r in rows] == ["S1", "S2"] and rows[0]["age"] == "53" and rows[0]["added"]
+    with pytest.raises(ValueError, match="ID"):
+        normaldb.addSubject(folder, {"id": " "})
+    predefined = normaldb.createPredefined(str(tmp_path), header(name="pre"), _maps(tmp_path, [normaldb.MASTER]))
+    with pytest.raises(ValueError, match="user defined"):
+        normaldb.addSubject(predefined, {"id": "S1"})
