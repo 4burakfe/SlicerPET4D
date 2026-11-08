@@ -74,6 +74,10 @@ REVIEW_PET_COLORMAP = "PET-DICOM"
 REVIEW_SCORE_COLORMAP = nr.SCORE_COLORMAPS[0]     # diverging: below the normals cold, above hot
 SCORE_COLOR_NODE = "Neuro review score colors"
 REVIEW_FUSION_OPACITY = 0.6
+REVIEW_SCORE_OPACITY = 0.5              # the score map over the MR (fusion): semi-transparent
+REVIEW_OUTLINE_THICKNESS = 2            # px, the region outlines on the slices
+REVIEW_FLASH_MS = 5000                  # a region clicked in the table: shown alone for 5 s
+MONITOR2_PLACE_DELAY_MS = 300           # the Monitor 2 window placed once the layout manager made its views
 SSP_TARGET_POINTS = 60000               # vertices of the 3D-SSP surface
 SSP_MODEL_NAME = "Neuro 3D-SSP surface"
 SSP_COLOR_NODE = "Neuro 3D-SSP colors"
@@ -105,6 +109,75 @@ def _sameRegion(segmentName, title):
         suffix = REFERENCE_SUFFIX.strip().lower()
         return text[:-len(suffix)].strip() if text.endswith(suffix) else text
     return clean(segmentName) == clean(title)
+
+
+# ---------------------------------------------------------------------------
+# Screens and the Monitor 2 window (as in SlicerPETReviewCompare's dual monitor layouts)
+# ---------------------------------------------------------------------------
+def _screenCount():
+    try:
+        return len(list(qt.QGuiApplication.screens()))
+    except Exception:
+        return 1
+
+
+def _mainViewportAttributes():
+    """XML attributes of the main window viewport, copied from Slicer's own dual monitor layouts, so that the first
+    <layout> of <viewports> is shown in the main window."""
+    import xml.etree.ElementTree as ElementTree
+    try:
+        layoutNode = slicer.app.layoutManager().layoutLogic().GetLayoutNode()
+        for attributeName in dir(slicer.vtkMRMLLayoutNode):
+            if "DualMonitor" not in attributeName:
+                continue
+            layoutId = getattr(slicer.vtkMRMLLayoutNode, attributeName)
+            if not isinstance(layoutId, int) or not layoutNode.IsLayoutDescription(layoutId):
+                continue
+            root = ElementTree.fromstring(layoutNode.GetLayoutDescription(layoutId))
+            if root.tag != "viewports":
+                continue
+            for element in root.findall("layout"):
+                if (element.get("dockable") or "").lower() != "true":
+                    name = element.get("name")
+                    return f' name="{name}"' if name is not None else ""
+    except Exception as error:
+        logging.debug(f"Static Neuro: could not read Slicer's dual monitor layouts: {error}")
+    return ""
+
+
+def _secondaryScreen():
+    """A screen other than the one showing the main window; None with a single screen."""
+    mainWindow = slicer.util.mainWindow()
+    screens = list(qt.QGuiApplication.screens())
+    if mainWindow is None or len(screens) < 2:
+        return None
+    center = mainWindow.frameGeometry.center()
+    return next((screen for screen in screens if not screen.geometry.contains(center)), None)
+
+
+def _showOnSecondScreen(window):
+    """The floating Monitor 2 window as a normal window (minimize / maximize / close), maximized on the second
+    screen; changes only what is not so already (re-applying the flags hides and shows the window again)."""
+    wanted = (qt.Qt.Window | qt.Qt.CustomizeWindowHint | qt.Qt.WindowTitleHint | qt.Qt.WindowSystemMenuHint
+              | qt.Qt.WindowMinMaxButtonsHint | qt.Qt.WindowCloseButtonHint)
+    try:
+        hasFlags = (int(window.windowFlags()) & int(wanted)) == int(wanted)
+    except (TypeError, ValueError):
+        hasFlags = False
+    if not hasFlags:
+        window.setWindowFlags(wanted)
+    screen = _secondaryScreen()
+    if screen is None:
+        if not window.visible:
+            window.show()
+        window.raise_()
+        return
+    onSecond = screen.geometry.contains(window.frameGeometry.center())
+    if not onSecond:
+        window.setGeometry(screen.availableGeometry)
+    if not (onSecond and window.isMaximized() and window.visible):
+        window.showMaximized()
+    window.raise_()
 
 
 # ---------------------------------------------------------------------------
@@ -567,7 +640,7 @@ class StaticNeuroPETLogic(DynamicNeuroPETLogic):
         smoothed = normaldb.smoothMap(values, fwhm, spacing)
         result.update(smoothed=smoothed, union=nr.unionMask(masks, mean.shape))
         result["z"] = nr.scoreMap(smoothed, mean, sd, mask, nr.SCORE_Z)
-        result["mask"] = mask
+        result.update(mask=mask, mean=mean)     # mean: the normal uptake (the score map shown where it is high)
         # regional normal values
         reference = self.regionReference(folder, header, masks, groupKey, locked, progress)
         if reference is None:
@@ -1848,6 +1921,15 @@ class StaticNeuroPETWidget(DynamicNeuroPETWidget):
 
         viewBox = qt.QGroupBox("Display")
         view = qt.QFormLayout(viewBox)
+        self.layoutCombo = qt.QComboBox()
+        for key, title in nr.LAYOUTS:
+            self.layoutCombo.addItem(title, key)
+        self.layoutCombo.setCurrentIndex(max(0, self.layoutCombo.findData(nr.defaultLayout(_screenCount()))))
+        self.layoutCombo.toolTip = ("Single monitor: the slices, the 3D-SSP and the region table together. Dual "
+                                    "monitor (the default with two screens): the slices and the table here, the "
+                                    "3D-SSP views in a window on the second screen. Or the slices and the table, or "
+                                    "the 3D-SSP views, alone.")
+        view.addRow("Layout:", self.layoutCombo)
         self.petColorCombo = qt.QComboBox()
         self.scoreColorCombo = qt.QComboBox()
         for label in colormaps.LABELS:
@@ -1875,6 +1957,20 @@ class StaticNeuroPETWidget(DynamicNeuroPETWidget):
         self.hypoOnlyCheck.toolTip = ("Show only the scores below the normals (negative: hypometabolism / "
                                       "hypoperfusion); the positive ones grey (score slices and 3D-SSP)")
         view.addRow(self.hypoOnlyCheck)
+        self.uptakeSpin = qt.QSpinBox()
+        self.uptakeSpin.setRange(int(round(nr.MASK_FRACTION * 100)), 95)
+        self.uptakeSpin.singleStep = 5
+        self.uptakeSpin.value = int(round(nr.UPTAKE_FRACTION * 100))
+        self.uptakeSpin.suffix = " % of the normal maximum"
+        self.uptakeSpin.toolTip = ("The score slices show only where the normals' uptake is high: the database mean "
+                                   "above this fraction of its maximum (cortex, deep grey matter). White matter and "
+                                   "CSF, low in the normals anyway, are hidden (black, or the MR in fusion).")
+        view.addRow("Scores where normal uptake >", self.uptakeSpin)
+        self.outlineCheck = qt.QCheckBox("Show the region outlines")
+        self.outlineCheck.checked = True
+        self.outlineCheck.toolTip = (f"The regions as {REVIEW_OUTLINE_THICKNESS} px outlines on the PET and the score "
+                                     "slices. Click a region in the table to show it alone for a few seconds.")
+        view.addRow(self.outlineCheck)
         layout.addWidget(viewBox)
         self._buildSspBox(layout)
 
@@ -1890,8 +1986,14 @@ class StaticNeuroPETWidget(DynamicNeuroPETWidget):
         self.fusionOpacity.minimum, self.fusionOpacity.maximum = 0.0, 1.0
         self.fusionOpacity.singleStep, self.fusionOpacity.decimals = 0.05, 2
         self.fusionOpacity.value = REVIEW_FUSION_OPACITY
-        self.fusionOpacity.toolTip = "Opacity of the PET over the MR (the scores stay opaque)"
+        self.fusionOpacity.toolTip = "Opacity of the PET over the MR"
         fusion.addRow("PET opacity:", self.fusionOpacity)
+        self.scoreOpacity = ctk.ctkSliderWidget()
+        self.scoreOpacity.minimum, self.scoreOpacity.maximum = 0.0, 1.0
+        self.scoreOpacity.singleStep, self.scoreOpacity.decimals = 0.05, 2
+        self.scoreOpacity.value = REVIEW_SCORE_OPACITY
+        self.scoreOpacity.toolTip = "Opacity of the z / t scores over the MR"
+        fusion.addRow("Score opacity:", self.scoreOpacity)
         self.anatomyWindowRange = ctk.ctkRangeWidget()
         self.anatomyWindowRange.decimals = 1
         self.anatomyWindowRange.toolTip = "Display range of the MR / CT (grey)"
@@ -1910,6 +2012,10 @@ class StaticNeuroPETWidget(DynamicNeuroPETWidget):
         self.fusionCheck.connect("toggled(bool)", lambda on: self._onFusionChanged())
         self.fusionSourceCombo.connect("currentIndexChanged(int)", lambda i: self._onFusionChanged())
         self.fusionOpacity.connect("valueChanged(double)", lambda v: self._assignReviewViews())
+        self.scoreOpacity.connect("valueChanged(double)", lambda v: self._assignReviewViews())
+        self.layoutCombo.connect("activated(int)", lambda i: self._onLayoutPicked())
+        self.uptakeSpin.connect("valueChanged(int)", lambda v: self._showScoreMap())
+        self.outlineCheck.connect("toggled(bool)", lambda on: self._assignReviewViews())
         self.anatomyWindowRange.connect("valuesChanged(double,double)", lambda a, b: self._applyAnatomyDisplay())
         self.reviewResult = None
         self.sspModel = None
@@ -1917,6 +2023,10 @@ class StaticNeuroPETWidget(DynamicNeuroPETWidget):
         self.reviewTable = None
         self._reviewPreviousLayout = None
         self._segmentationDisplay = None
+        self.regionTable = None             # QTableWidget in the layout's table view
+        self._regionTableHost = None
+        self._flash = None                  # (token, {segment ID: visible}) while a region is shown alone
+        self._autoCompared = None
 
     def _updateReviewInfo(self, volume, segmentation, header, age, sex):
         lines = [f"Image: {volume.GetName() if volume else 'none'}"
@@ -2047,7 +2157,7 @@ class StaticNeuroPETWidget(DynamicNeuroPETWidget):
         if result is None:
             self.compareLabel.text = "Stopped."
             return
-        result.update(volume=volume, header=header, groupKey=groupKey)
+        result.update(volume=volume, header=header, groupKey=groupKey, segmentation=segmentation)
         self.reviewResult = result
         self._makeScoreNode()
         self._initPetWindow()
@@ -2067,6 +2177,25 @@ class StaticNeuroPETWidget(DynamicNeuroPETWidget):
         lines.extend(result["notes"])
         self.compareLabel.text = " ".join(lines)
         self.refresh()
+
+    def _autoCompare(self):
+        """Compare on entering the review when there is no comparison of this image, regions and database yet (once
+        per image, regions and database: not again after a failure or a stop)."""
+        if getattr(self, "current", None) != STEP_REVIEW or not self.compareButton.enabled:
+            return
+        volume, segmentation = self.volume(), self.node("Segmentation")
+        folder = self._database()
+        header = self._header(folder)
+        result = self.reviewResult
+        if (result is not None and result.get("volume") is volume and result.get("header") == header
+                and result.get("segmentation") is segmentation):
+            return
+        key = (volume.GetID() if volume else "", segmentation.GetID() if segmentation else "", folder,
+               json.dumps(header, sort_keys=True, default=str))
+        if self._autoCompared == key:
+            return
+        self._autoCompared = key
+        self.onCompare()
 
     def _makeScoreNode(self):
         result = self.reviewResult
@@ -2092,13 +2221,23 @@ class StaticNeuroPETWidget(DynamicNeuroPETWidget):
         if result is None:
             return
         kind = self._scoreKind()
-        if self.scoreNode is not None and result.get("z") is not None:
-            factor = nr.tFactor(result.get("n")) if kind == nr.SCORE_T else 1.0
-            slicer.util.updateVolumeFromArray(self.scoreNode, nr.maskedScores(result["z"], result["mask"], factor))
-            self.scoreNode.SetName(f"{result['volume'].GetName()} {kind} map")
-            self._applyScoreDisplay()
+        self._showScoreMap()
         self._updateReviewTable(kind)
         self._showSsp()
+
+    def _showScoreMap(self):
+        """The score map shown where the normals' uptake is high (the threshold of the Display box)."""
+        result = self.reviewResult
+        if result is None or self.scoreNode is None or result.get("z") is None:
+            return
+        kind = self._scoreKind()
+        factor = nr.tFactor(result.get("n")) if kind == nr.SCORE_T else 1.0
+        mask = result["mask"]
+        if result.get("mean") is not None:
+            mask = nr.uptakeMask(result["mean"], mask, self.uptakeSpin.value / 100.0)
+        slicer.util.updateVolumeFromArray(self.scoreNode, nr.maskedScores(result["z"], mask, factor))
+        self.scoreNode.SetName(f"{result['volume'].GetName()} {kind} map")
+        self._applyScoreDisplay()
 
     def _updateReviewTable(self, kind):
         result = self.reviewResult
@@ -2125,26 +2264,209 @@ class StaticNeuroPETWidget(DynamicNeuroPETWidget):
                 return ""
             return f"{value:.{digits}g}" if isinstance(value, float) else str(value)
 
+        def rounded(value, digits=3):     # the number shown, kept a number (numeric sorting)
+            if value is None or (isinstance(value, float) and not np.isfinite(value)):
+                return None
+            return float(f"{value:.{digits}g}") if isinstance(value, float) else value
+
+        cellRows = []
         for name, suv, value, mean, sd, count, score in rows:
             cells = [name, text(suv)] + ([text(value)] if compared else [])
+            numbers = [name, rounded(suv)] + ([rounded(value)] if compared else [])
             if result.get("header") is not None:
                 cells += [text(mean), text(sd), text(count), "" if score is None else f"{score:.2f}"]
+                numbers += [rounded(mean), rounded(sd), count, None if score is None else round(float(score), 2)]
             for array, cell in zip(arrays, cells):
                 array.InsertNextValue(cell)
+            cellRows.append(numbers)
         if self.reviewTable is None or not scene.IsNodePresent(self.reviewTable):
             self.reviewTable = scene.AddNewNodeByClass("vtkMRMLTableNode", scene.GenerateUniqueName("Neuro review"))
         self.reviewTable.SetAndObserveTable(table)
         if hasattr(self.reviewTable, "SetUseColumnNameAsColumnHeader"):
             self.reviewTable.SetUseColumnNameAsColumnHeader(True)
         self.reviewTable.SetName(f"{result['volume'].GetName()} regions")
+        self._regionTableData = (columns, cellRows)
         self._showTable()
 
     def _showTable(self):
+        """The region table in the layout's table view: a sortable table with the region colors (clicking a region
+        shows it alone for a few seconds); Slicer's own table view of the table node when it cannot be embedded."""
         if self.reviewTable is None:
+            return
+        if self._fillRegionTable():
             return
         selection = slicer.app.applicationLogic().GetSelectionNode()
         selection.SetActiveTableID(self.reviewTable.GetID())
         slicer.app.applicationLogic().PropagateTableSelection()
+
+    @staticmethod
+    def _tableViewWidget():
+        """The qMRMLTableWidget of the review layout's table view, None when the layout has none."""
+        layoutManager = slicer.app.layoutManager()
+        if layoutManager is None or not hasattr(layoutManager, "tableWidget"):
+            return None
+        for index in range(getattr(layoutManager, "tableViewCount", 0)):
+            widget = layoutManager.tableWidget(index)
+            viewNode = widget.mrmlTableViewNode() if widget is not None else None
+            if viewNode is not None and viewNode.GetSingletonTag() == nr.TABLE_VIEW:
+                return widget
+        return None
+
+    def _regionTableWidget(self):
+        """The QTableWidget inside the table view (made there the first time); None when it cannot be embedded."""
+        host = self._tableViewWidget()
+        if host is None:
+            return None
+        table = self.regionTable
+        try:
+            alive = table is not None and table.parent() is host
+        except Exception:       # the C++ widget deleted with its view
+            alive = False
+        if alive:
+            return table
+        hostLayout = host.layout()
+        if hostLayout is None:
+            return None
+        views = [host.tableView()] if hasattr(host, "tableView") else slicer.util.findChildren(
+            host, className="qMRMLTableView")
+        for child in views:
+            child.setVisible(False)
+        controller = host.tableController() if hasattr(host, "tableController") else None
+        if controller is not None:
+            controller.setVisible(False)
+        table = qt.QTableWidget(host)
+        table.setEditTriggers(qt.QAbstractItemView.NoEditTriggers)
+        table.setSelectionBehavior(qt.QAbstractItemView.SelectRows)
+        table.setSelectionMode(qt.QAbstractItemView.SingleSelection)
+        table.verticalHeader().setVisible(False)
+        table.setAlternatingRowColors(True)
+        table.toolTip = ("Click a column header to sort by it; click a region to show it alone on the slices for "
+                         f"{REVIEW_FLASH_MS // 1000} s.")
+        hostLayout.addWidget(table)
+        table.connect("cellClicked(int,int)", self._onRegionClicked)
+        self.regionTable = table
+        self._regionTableHost = host
+        return table
+
+    def _fillRegionTable(self):
+        data = getattr(self, "_regionTableData", None)
+        table = self._regionTableWidget() if data is not None else None
+        if table is None:
+            return False
+        columns, rows = data
+        colors, ids = self._segmentColors()
+        sortColumn = table.horizontalHeader().sortIndicatorSection() if table.sortingEnabled else -1
+        sortOrder = table.horizontalHeader().sortIndicatorOrder()
+        table.setSortingEnabled(False)
+        table.clear()
+        table.setColumnCount(len(columns) + 1)
+        table.setRowCount(len(rows))
+        table.setHorizontalHeaderLabels([""] + list(columns))
+        for r, cells in enumerate(rows):
+            name = cells[0]
+            swatch = qt.QTableWidgetItem()
+            color = colors.get(name)
+            if color is not None:
+                swatch.setBackground(qt.QBrush(qt.QColor(*(int(round(255 * c)) for c in color))))
+            swatch.setData(qt.Qt.UserRole, ids.get(name, ""))
+            table.setItem(r, 0, swatch)
+            for c, value in enumerate(cells):
+                item = qt.QTableWidgetItem()
+                if value is None:
+                    item.setText("")
+                elif isinstance(value, str):
+                    item.setText(value)
+                else:
+                    item.setData(qt.Qt.DisplayRole, value)      # a number: sorted by size
+                if c > 0:
+                    item.setTextAlignment(qt.Qt.AlignRight | qt.Qt.AlignVCenter)
+                item.setData(qt.Qt.UserRole, ids.get(name, ""))
+                table.setItem(r, c + 1, item)
+        table.setSortingEnabled(True)
+        if sortColumn >= 0:
+            table.sortItems(sortColumn, sortOrder)
+        table.resizeColumnsToContents()
+        table.setColumnWidth(0, 14)
+        qt.QTimer.singleShot(100, self._fitTableWidth)
+        return True
+
+    def _segmentColors(self):
+        """({segment name: (r, g, b)}, {segment name: segment ID}) of the regions."""
+        segmentation = self.node("Segmentation")
+        colors, ids = {}, {}
+        if segmentation is None:
+            return colors, ids
+        seg = segmentation.GetSegmentation()
+        for segmentId in self.logic.segmentIds(segmentation):
+            segment = seg.GetSegment(segmentId)
+            colors[segment.GetName()] = tuple(segment.GetColor())
+            ids[segment.GetName()] = segmentId
+        return colors, ids
+
+    def _fitTableWidth(self):
+        """The table view as wide as the table (the slices take the rest)."""
+        table = self.regionTable
+        try:
+            if table is None or not table.visible:
+                return
+            width = sum(table.columnWidth(c) for c in range(table.columnCount))
+            width += 2 * table.frameWidth + table.verticalScrollBar().sizeHint.width() + 8
+            child = self._regionTableHost
+            splitter = child.parent() if child is not None else None
+            while splitter is not None and not splitter.inherits("QSplitter"):
+                child, splitter = splitter, splitter.parent()
+            if splitter is None:
+                return
+            index = splitter.indexOf(child)
+            sizes = list(splitter.sizes())
+            if index < 0 or len(sizes) < 2:
+                return
+            total = sum(sizes)
+            width = min(width, int(total * 0.6))
+            others = [i for i in range(len(sizes)) if i != index]
+            rest = total - width
+            spread = sum(sizes[i] for i in others) or 1
+            for i in others:
+                sizes[i] = int(rest * sizes[i] / spread)
+            sizes[index] = width
+            splitter.setSizes(sizes)
+        except Exception:
+            logging.debug("Static Neuro: could not resize the region table", exc_info=True)
+
+    def _onRegionClicked(self, row, column):
+        """The region of the row alone on the slices for REVIEW_FLASH_MS, then the regions shown as before."""
+        item = self.regionTable.item(row, 0) if self.regionTable is not None else None
+        segmentId = item.data(qt.Qt.UserRole) if item is not None else ""
+        segmentation = self.node("Segmentation")
+        display = segmentation.GetDisplayNode() if segmentation is not None else None
+        if not segmentId or display is None:
+            return
+        self._endFlash()
+        ids = self.logic.segmentIds(segmentation)
+        saved = {i: bool(display.GetSegmentVisibility(i)) for i in ids}
+        token = object()
+        self._flash = (token, display, saved)
+        wasModifying = display.StartModify()
+        for i in ids:
+            display.SetSegmentVisibility(i, i == segmentId)
+        display.SetVisibility2DOutline(True)        # also with the outlines hidden
+        display.EndModify(wasModifying)
+        qt.QTimer.singleShot(REVIEW_FLASH_MS, lambda: self._endFlash(token))
+
+    def _endFlash(self, token=None):
+        flash = self._flash
+        if flash is None or (token is not None and flash[0] is not token):
+            return
+        self._flash = None
+        _, display, saved = flash
+        if not slicer.mrmlScene.IsNodePresent(display):
+            return
+        wasModifying = display.StartModify()
+        for segmentId, visible in saved.items():
+            display.SetSegmentVisibility(segmentId, visible)
+        if self._segmentationDisplay is not None and self._segmentationDisplay[0] is display:
+            display.SetVisibility2DOutline(bool(self.outlineCheck.checked))
+        display.EndModify(wasModifying)
 
     # display
     @staticmethod
@@ -2293,6 +2615,10 @@ class StaticNeuroPETWidget(DynamicNeuroPETWidget):
         self.sspWindowRange.decimals = 2
         self.sspWindowRange.toolTip = "Display range of the patient's projected values"
         form.addRow("Patient window:", self.sspWindowRange)
+        self.restoreViewsButton = _button("Restore 3D views")
+        self.restoreViewsButton.toolTip = "The 3D-SSP views back to their default direction, zoom and position"
+        form.addRow(self.restoreViewsButton)
+        self.restoreViewsButton.connect("clicked()", lambda: self._setupSspViews(fit=True))
         layout.addWidget(box)
         for combo in (self.sspMapCombo, self.sspSourceCombo, self.sspColorCombo, self.sspPatientColorCombo):
             combo.connect("currentIndexChanged(int)", lambda i: self._showSsp())
@@ -2300,10 +2626,22 @@ class StaticNeuroPETWidget(DynamicNeuroPETWidget):
         self.sspWindowRange.connect("valuesChanged(double,double)", lambda a, b: self._showSsp())
         self.hypoOnlyCheck.connect("toggled(bool)", lambda on: self._showSsp())
 
+    def _patientUnits(self):
+        """Units of the patient's map compared (and projected): the database's map type, SUVR to the reference
+        region without a database, else SUV."""
+        result = self.reviewResult or {}
+        if not result.get("ratio"):
+            return "SUV"
+        header = result.get("header")
+        return (header or {}).get("mapType") or "SUVR"
+
     def _initSspWindow(self):
         data = (self.reviewResult or {}).get("ssp")
         if not data:
             return
+        index = self.sspMapCombo.findData(ssp.MAP_PATIENT)
+        if index >= 0:
+            self.sspMapCombo.setItemText(index, f"Patient ({self._patientUnits()}, projected, smoothed)")
         values = np.asarray(data["patient"], dtype=np.float32)
         low, high = (float(v) for v in np.percentile(values, (1.0, 99.5))) if values.size else (0.0, 1.0)
         high = high if high > low else low + 1.0
@@ -2406,8 +2744,9 @@ class StaticNeuroPETWidget(DynamicNeuroPETWidget):
             viewNode.SetBackgroundColor(0.0, 0.0, 0.0)
             viewNode.SetBackgroundColor2(0.0, 0.0, 0.0)
             viewNode.SetRenderMode(slicer.vtkMRMLViewNode.Orthographic)
-            if hasattr(viewNode, "SetOrientationMarkerType"):
-                viewNode.SetOrientationMarkerType(slicer.vtkMRMLAbstractViewNode.OrientationMarkerTypeNone)
+            if hasattr(viewNode, "SetOrientationMarkerType"):      # a small box with the sides' letters
+                viewNode.SetOrientationMarkerType(slicer.vtkMRMLAbstractViewNode.OrientationMarkerTypeCube)
+                viewNode.SetOrientationMarkerSize(slicer.vtkMRMLAbstractViewNode.OrientationMarkerSizeSmall)
             if not data or not fit:
                 continue
             direction, up = ssp.CAMERAS[key]
@@ -2424,31 +2763,73 @@ class StaticNeuroPETWidget(DynamicNeuroPETWidget):
             widget.threeDView().forceRender()
 
     # layout and views
+    def _reviewLayout(self):
+        return self.layoutCombo.currentData if hasattr(self, "layoutCombo") else nr.LAYOUT_SINGLE
+
+    def _onLayoutPicked(self):
+        if getattr(self, "current", None) == STEP_REVIEW and self.node("Segmentation") is not None:
+            self._enterReviewViews()
+
+    def _registerReviewLayouts(self, layoutManager):
+        """The review layouts in Slicer (a description updated only when that layout is not on screen)."""
+        layoutNode = layoutManager.layoutLogic().GetLayoutNode()
+        attributes = _mainViewportAttributes()
+        for layoutId in nr.LAYOUT_IDS:
+            description = nr.layoutXml(layoutId, attributes)
+            if not layoutNode.IsLayoutDescription(layoutId):
+                layoutNode.AddLayoutDescription(layoutId, description)
+            elif layoutManager.layout != layoutId and layoutNode.GetLayoutDescription(layoutId) != description:
+                layoutNode.SetLayoutDescription(layoutId, description)
+
     def _enterReviewViews(self):
         if self.volume() is None:
             return
         layoutManager = slicer.app.layoutManager()
         if layoutManager is None:
             return
-        layoutNode = layoutManager.layoutLogic().GetLayoutNode()
-        if layoutNode.IsLayoutDescription(nr.LAYOUT_ID):
-            if layoutManager.layout != nr.LAYOUT_ID:
-                layoutNode.SetLayoutDescription(nr.LAYOUT_ID, nr.layoutXml())
-        else:
-            layoutNode.AddLayoutDescription(nr.LAYOUT_ID, nr.layoutXml())
-        if layoutManager.layout != nr.LAYOUT_ID:
-            self._reviewPreviousLayout = layoutManager.layout
-            layoutManager.setLayout(nr.LAYOUT_ID)
+        self._registerReviewLayouts(layoutManager)
+        wanted = self._reviewLayout()
+        if layoutManager.layout != wanted:
+            if layoutManager.layout not in nr.LAYOUT_IDS:
+                self._reviewPreviousLayout = layoutManager.layout
+            layoutManager.setLayout(wanted)
             slicer.app.processEvents()
         if self.reviewResult is None:
             self._initPetWindow()
         self._assignReviewViews(fit=True)
         self._showTable()
+        if wanted == nr.LAYOUT_DUAL:
+            qt.QTimer.singleShot(MONITOR2_PLACE_DELAY_MS, self._placeMonitor2)
+
+    def _monitor2Window(self):
+        """The floating window of the 3D-SSP views (dual monitor layout); None when docked or not shown."""
+        candidates = [widget.window() for widget, _ in self._sspViewNodes().values()][:1]
+        candidates += [w for w in qt.QApplication.topLevelWidgets() if w.windowTitle == nr.MONITOR2_TITLE]
+        for window in candidates:
+            if window is None or window.inherits("QMainWindow"):
+                continue
+            if window.inherits("QDockWidget") and not getattr(window, "floating", True):
+                continue        # docked into the main window by the user: left there
+            return window
+        return None
+
+    def _placeMonitor2(self):
+        layoutManager = slicer.app.layoutManager()
+        if layoutManager is None or layoutManager.layout != nr.LAYOUT_DUAL:
+            return
+        try:
+            window = self._monitor2Window()
+            if window is not None:
+                _showOnSecondScreen(window)
+                qt.QTimer.singleShot(3 * MONITOR2_PLACE_DELAY_MS, lambda: self._setupSspViews(fit=True))
+        except Exception:
+            logging.exception("Static Neuro: could not place the 3D-SSP window; drag it to the second screen")
 
     def _exitReviewViews(self):
+        self._endFlash()
         self._restoreSegmentationDisplay()
         layoutManager = slicer.app.layoutManager()
-        if layoutManager is not None and layoutManager.layout == nr.LAYOUT_ID and self._reviewPreviousLayout is not None:
+        if layoutManager is not None and layoutManager.layout in nr.LAYOUT_IDS and self._reviewPreviousLayout is not None:
             layoutManager.setLayout(self._reviewPreviousLayout)
         self._reviewPreviousLayout = None
 
@@ -2464,20 +2845,20 @@ class StaticNeuroPETWidget(DynamicNeuroPETWidget):
 
     def _assignReviewViews(self, fit=False):
         layoutManager = slicer.app.layoutManager()
-        if layoutManager is None or layoutManager.layout != nr.LAYOUT_ID:
+        if layoutManager is None or layoutManager.layout not in nr.LAYOUT_IDS:
             return
         pet = self.volume()
         anatomy = self._fusionVolume()
         score = self.scoreNode if self.scoreNode is not None and slicer.mrmlScene.IsNodePresent(self.scoreNode) \
             else None
-        petViews = []
+        sliceViews = []
         for row, widget in self._reviewSliceWidgets():
             composite = widget.mrmlSliceCompositeNode()
             composite.SetLinkedControl(False)
             top = pet if row == nr.PET_ROW else score
             if anatomy is not None:
                 background, foreground = anatomy, top
-                opacity = float(self.fusionOpacity.value) if row == nr.PET_ROW else 1.0
+                opacity = float((self.fusionOpacity if row == nr.PET_ROW else self.scoreOpacity).value)
             else:
                 background, foreground, opacity = top, None, 0.0
             composite.SetBackgroundVolumeID(background.GetID() if background is not None else None)
@@ -2486,15 +2867,15 @@ class StaticNeuroPETWidget(DynamicNeuroPETWidget):
             composite.SetLabelVolumeID(None)
             composite.SetLinkedControl(True)        # all the review's slice views linked
             widget.sliceController().setVisible(False)
-            if row == nr.PET_ROW:
-                petViews.append(widget.mrmlSliceNode().GetID())
+            sliceViews.append(widget.mrmlSliceNode().GetID())
             if fit:
                 widget.sliceLogic().FitSliceToAll()
-        self._outlineSegmentation(petViews)
+        self._outlineSegmentation(sliceViews)
         self._setupSspViews(fit)
 
     def _outlineSegmentation(self, viewIds):
-        """The regions as outlines (no fill) in the PET row only; the earlier display restored on leaving."""
+        """The regions as outlines (no fill, REVIEW_OUTLINE_THICKNESS px) on the PET and the score slices, hidden with
+        the outline check box; the earlier display restored on leaving."""
         segmentation = self.node("Segmentation")
         display = segmentation.GetDisplayNode() if segmentation is not None else None
         if display is None or not viewIds:
@@ -2503,19 +2884,23 @@ class StaticNeuroPETWidget(DynamicNeuroPETWidget):
             self._restoreSegmentationDisplay()
             self._segmentationDisplay = (display, [display.GetNthViewNodeID(i) for i in
                                                    range(display.GetNumberOfViewNodeIDs())],
-                                         display.GetVisibility2DFill(), display.GetVisibility2DOutline())
+                                         display.GetVisibility2DFill(), display.GetVisibility2DOutline(),
+                                         display.GetSliceIntersectionThickness())
+        wasModifying = display.StartModify()
         display.SetVisibility(True)
         display.SetVisibility2DFill(False)
-        display.SetVisibility2DOutline(True)
+        display.SetVisibility2DOutline(bool(self.outlineCheck.checked) or self._flash is not None)
+        display.SetSliceIntersectionThickness(REVIEW_OUTLINE_THICKNESS)
         display.RemoveAllViewNodeIDs()
         for viewId in viewIds:
             display.AddViewNodeID(viewId)
+        display.EndModify(wasModifying)
 
     def _restoreSegmentationDisplay(self):
         saved, self._segmentationDisplay = self._segmentationDisplay, None
         if saved is None:
             return
-        display, viewIds, fill, outline = saved
+        display, viewIds, fill, outline, thickness = saved
         if not slicer.mrmlScene.IsNodePresent(display):
             return
         display.RemoveAllViewNodeIDs()
@@ -2523,6 +2908,7 @@ class StaticNeuroPETWidget(DynamicNeuroPETWidget):
             display.AddViewNodeID(viewId)
         display.SetVisibility2DFill(fill)
         display.SetVisibility2DOutline(outline)
+        display.SetSliceIntersectionThickness(thickness)
 
     def _fillAddDatabases(self):
         if not hasattr(self, "addDbCombo"):
@@ -2685,6 +3071,7 @@ class StaticNeuroPETWidget(DynamicNeuroPETWidget):
                 self._exitReviewViews()
             elif method == "enter" and self.node("Segmentation") is not None:
                 self._enterReviewViews()
+                qt.QTimer.singleShot(200, self._autoCompare)
             return
         DynamicNeuroPETWidget._callStep(self, key, method)
 
@@ -2733,6 +3120,13 @@ class StaticNeuroPETWidget(DynamicNeuroPETWidget):
         self.reviewResult = self.scoreNode = self.reviewTable = self.sspModel = None
         self._segmentationDisplay = None
         self._anatomyWindowFor = None
+        self._flash = self._autoCompared = None
+        self._regionTableData = None
+        if getattr(self, "regionTable", None) is not None:
+            try:
+                self.regionTable.setRowCount(0)
+            except Exception:
+                self.regionTable = None
         if hasattr(self, "compareLabel"):
             self.compareLabel.text = ""
         if hasattr(self, "regLabel"):
@@ -2797,6 +3191,7 @@ class StaticNeuroPETTest(ScriptedLoadableModuleTest):
         z = result["z"]
         self.assertAlmostEqual(float(z[5, 5, 2]), -2.0, places=3)       # (3 - 5) / 1
         self.assertAlmostEqual(float(z[5, 5, 7]), 0.0, places=3)
+        self.assertTrue(nr.uptakeMask(result["mean"], result["mask"])[5, 5, 2])     # uniform normals: all shown
         self.assertAlmostEqual(result["reference"]["A"][0], 5.0, places=4)
         self.assertTrue(any("approximated" in note for note in result["notes"]))
         rows = nr.tableRows(result["values"], result["suv"], result["reference"], nr.SCORE_Z)
