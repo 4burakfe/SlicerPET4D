@@ -642,6 +642,12 @@ class StaticNeuroPETLogic(DynamicNeuroPETLogic):
         smoothed = normaldb.smoothMap(values, fwhm, spacing)
         result.update(smoothed=smoothed, union=nr.unionMask(masks, mean.shape))
         result["z"] = nr.scoreMap(smoothed, mean, sd, mask, nr.SCORE_Z)
+        result["gm"] = None         # the MNI grey matter probability on the grid: the score slices' default mask
+        if atlas and "GM" in atlas:
+            try:
+                result["gm"] = self.resampledArray(self.loadAtlasVolume(atlas["GM"], name="MNI ICBM152 2009c GM"), grid)
+            except Exception as error:
+                notes.append(f"No grey matter map ({error}): the score slices show the high normal uptake.")
         result.update(mask=mask, mean=mean)     # mean: the normal uptake (the score map shown where it is high)
         # regional normal values
         reference = self.regionReference(folder, header, masks, groupKey, locked, progress)
@@ -809,7 +815,13 @@ class StaticNeuroPETLogic(DynamicNeuroPETLogic):
             notes.append("No surface projections of the normals for this database: the 3D-SSP shows the voxel score "
                          "map projected.")
         if result.get("z") is not None:
-            out["voxel"] = ssp.project(result["z"], ijkToRas, surface["points"], surface["normals"], mode="extreme")
+            # the voxel scores of the grey matter (else of the high normal uptake): not the CSF's or the white matter's
+            if result.get("gm") is not None:
+                shown = nr.greyMatterMask(result["gm"], result["mask"])
+            else:
+                shown = nr.uptakeMask(result["mean"], result["mask"])
+            out["voxel"] = ssp.project(np.where(shown, result["z"], 0.0), ijkToRas, surface["points"],
+                                       surface["normals"], mode="extreme")
         return out
 
     # --- batch: many normal subjects into a database ----------------------------------------------
@@ -1962,6 +1974,21 @@ class StaticNeuroPETWidget(DynamicNeuroPETWidget):
         self.hypoOnlyCheck.toolTip = ("Show only the scores below the normals (negative: hypometabolism / "
                                       "hypoperfusion); the positive ones grey (score slices and 3D-SSP)")
         view.addRow(self.hypoOnlyCheck)
+        self.scoreMaskCombo = qt.QComboBox()
+        for key, title in nr.SCORE_MASKS:
+            self.scoreMaskCombo.addItem(title, key)
+        self.scoreMaskCombo.toolTip = (
+            "Where the score slices show the scores. Grey matter (default): the MNI grey matter probability, the same "
+            "for every tracer (the cortex also with a striatal tracer). High normal uptake: the database mean above a "
+            "fraction of its maximum. Elsewhere the PET (grey) or the MR shows.")
+        view.addRow("Scores shown in:", self.scoreMaskCombo)
+        self.gmSpin = qt.QDoubleSpinBox()
+        self.gmSpin.setRange(0.05, 0.95)
+        self.gmSpin.decimals = 2
+        self.gmSpin.singleStep = 0.05
+        self.gmSpin.value = nr.GM_MINIMUM
+        self.gmSpin.toolTip = "Grey matter probability from which the scores are shown"
+        view.addRow("Grey matter >=", self.gmSpin)
         self.uptakeSpin = qt.QSpinBox()
         self.uptakeSpin.setRange(int(round(nr.MASK_FRACTION * 100)), 95)
         self.uptakeSpin.singleStep = 5
@@ -1970,7 +1997,21 @@ class StaticNeuroPETWidget(DynamicNeuroPETWidget):
         self.uptakeSpin.toolTip = ("The score slices show only where the normals' uptake is high: the database mean "
                                    "above this fraction of its maximum (cortex, deep grey matter). White matter and "
                                    "CSF, low in the normals anyway, are hidden (black, or the MR in fusion).")
-        view.addRow("Scores where normal uptake >", self.uptakeSpin)
+        view.addRow("Normal uptake >", self.uptakeSpin)
+        self.hideBelowSpin = qt.QDoubleSpinBox()
+        self.hideBelowSpin.setRange(0.0, 10.0)
+        self.hideBelowSpin.decimals = 1
+        self.hideBelowSpin.singleStep = 0.5
+        self.hideBelowSpin.value = nr.HIDE_BELOW
+        self.hideBelowSpin.toolTip = ("Scores closer to 0 than this are not colored (the PET or the MR under them "
+                                      "shows): only the clusters below / above the normals. 0: all colored.")
+        view.addRow("Hide |score| below:", self.hideBelowSpin)
+        self.scoreBackgroundCombo = qt.QComboBox()
+        self.scoreBackgroundCombo.addItem("PET (grey)", "pet")
+        self.scoreBackgroundCombo.addItem("Black", "black")
+        self.scoreBackgroundCombo.toolTip = ("Under the score slices (without the MR fusion): the PET in grey, or "
+                                             "black")
+        view.addRow("Score background:", self.scoreBackgroundCombo)
         self.outlineCheck = qt.QCheckBox("Show the region outlines")
         self.outlineCheck.checked = True
         self.outlineCheck.toolTip = (f"The regions as {REVIEW_OUTLINE_THICKNESS} px outlines on the PET and the score "
@@ -2024,6 +2065,10 @@ class StaticNeuroPETWidget(DynamicNeuroPETWidget):
         self.scoreOpacity.connect("valueChanged(double)", lambda v: self._assignReviewViews())
         self.layoutCombo.connect("activated(int)", lambda i: self._onLayoutPicked())
         self.uptakeSpin.connect("valueChanged(int)", lambda v: self._showScoreMap())
+        self.gmSpin.connect("valueChanged(double)", lambda v: self._showScoreMap())
+        self.hideBelowSpin.connect("valueChanged(double)", lambda v: self._showScoreMap())
+        self.scoreMaskCombo.connect("currentIndexChanged(int)", lambda i: self._showScoreMap())
+        self.scoreBackgroundCombo.connect("currentIndexChanged(int)", lambda i: self._assignReviewViews())
         self.outlineCheck.connect("toggled(bool)", lambda on: self._assignReviewViews())
         self.legendCheck.connect("toggled(bool)", lambda on: (self._updateLegends(), self._showSsp()))
         self.anatomyWindowRange.connect("valuesChanged(double,double)", lambda a, b: self._applyAnatomyDisplay())
@@ -2243,9 +2288,15 @@ class StaticNeuroPETWidget(DynamicNeuroPETWidget):
         kind = self._scoreKind()
         factor = nr.tFactor(result.get("n")) if kind == nr.SCORE_T else 1.0
         mask = result["mask"]
-        if result.get("mean") is not None:
+        greyMatter = self.scoreMaskCombo.currentData == nr.MASK_GM and result.get("gm") is not None
+        self.gmSpin.enabled = greyMatter
+        self.uptakeSpin.enabled = not greyMatter
+        if greyMatter:
+            mask = nr.greyMatterMask(result["gm"], mask, float(self.gmSpin.value))
+        elif result.get("mean") is not None:
             mask = nr.uptakeMask(result["mean"], mask, self.uptakeSpin.value / 100.0)
-        slicer.util.updateVolumeFromArray(self.scoreNode, nr.maskedScores(result["z"], mask, factor))
+        slicer.util.updateVolumeFromArray(self.scoreNode, nr.maskedScores(result["z"], mask, factor,
+                                                                          float(self.hideBelowSpin.value)))
         self.scoreNode.SetName(f"{result['volume'].GetName()} {kind} map")
         self._applyScoreDisplay()
         self._updateLegends()
@@ -2586,11 +2637,39 @@ class StaticNeuroPETWidget(DynamicNeuroPETWidget):
         display.SetAutoWindowLevel(False)
         low, high = self.petWindowRange.minimumValue, self.petWindowRange.maximumValue
         display.SetWindowLevelMinMax(low, max(high, low + 1e-6))
+        grey = getattr(self, "greyPetNode", None)
+        if grey is not None and slicer.mrmlScene.IsNodePresent(grey) and grey.GetDisplayNode() is not None:
+            grey.GetDisplayNode().SetWindowLevelMinMax(low, max(high, low + 1e-6))
         fused = self._fusionVolume() is not None
         display.SetApplyThreshold(fused)
         if fused:
             display.SetLowerThreshold(low + 0.02 * (high - low))
             display.SetUpperThreshold(float(self.petWindowRange.maximum) * 10.0 + 1.0)
+
+    def _greyPet(self):
+        """The PET in grey under the score slices: a second volume node sharing the PET's voxels (no copy), with the
+        PET window."""
+        pet = self.volume()
+        if pet is None:
+            return None
+        scene = slicer.mrmlScene
+        node = getattr(self, "greyPetNode", None)
+        if node is None or not scene.IsNodePresent(node):
+            node = scene.AddNewNodeByClass("vtkMRMLScalarVolumeNode", scene.GenerateUniqueName("Neuro review PET (grey)"))
+            node.SetHideFromEditors(True)
+            node.CreateDefaultDisplayNodes()
+            self.greyPetNode = node
+        if node.GetImageData() is not pet.GetImageData():
+            node.SetAndObserveImageData(pet.GetImageData())
+        matrix = vtk.vtkMatrix4x4()
+        pet.GetIJKToRASMatrix(matrix)
+        node.SetIJKToRASMatrix(matrix)
+        display = node.GetDisplayNode()
+        display.SetAndObserveColorNodeID("vtkMRMLColorTableNodeGrey")
+        display.SetAutoWindowLevel(False)
+        low, high = self.petWindowRange.minimumValue, self.petWindowRange.maximumValue
+        display.SetWindowLevelMinMax(low, max(high, low + 1e-6))
+        return node
 
     def _onFusionChanged(self):
         anatomy = self._fusionVolume()
@@ -3164,6 +3243,8 @@ class StaticNeuroPETWidget(DynamicNeuroPETWidget):
             if anatomy is not None:
                 background, foreground = anatomy, top
                 opacity = float((self.fusionOpacity if row == nr.PET_ROW else self.scoreOpacity).value)
+            elif row == nr.SCORE_ROW and self.scoreBackgroundCombo.currentData == "pet" and score is not None:
+                background, foreground, opacity = self._greyPet(), score, 1.0     # the scores over the PET in grey
             else:
                 background, foreground, opacity = top, None, 0.0
             composite.SetBackgroundVolumeID(background.GetID() if background is not None else None)
@@ -3424,7 +3505,7 @@ class StaticNeuroPETWidget(DynamicNeuroPETWidget):
         self.regResult = None
         self.regUndo = None
         self._databaseKey = None
-        self.reviewResult = self.scoreNode = self.reviewTable = self.sspModel = None
+        self.reviewResult = self.scoreNode = self.reviewTable = self.sspModel = self.greyPetNode = None
         self._cameraObservers = []
         self._segmentationDisplay = None
         self._anatomyWindowFor = None

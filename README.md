@@ -664,16 +664,19 @@ steps, on the toolbar like the Dynamic Neuro Receptor PET:
      sqrt(1 + 1/n) (default); negative means below the normals (hypometabolism / hypoperfusion).
    - Voxel scores: the patient on the database grid (SUVR to the database's reference mask for an SUVR database),
      smoothed with the database's FWHM like the normals, scored inside the MNI brain mask where the normal mean is
-     above 30 % of its maximum, with an SD floor of 20 % of the median SD there. Regional scores: the unsmoothed
+     above 5 % of its maximum, with an SD floor of 20 % of the median SD there. Regional scores: the unsmoothed
      patient against the normals' regional statistics: the database's own (`stats/regions.json`) when the regions
      are the database's (locked); for other regions of a user defined database computed from its subjects on the fly
      and cached in `<database>/cache/`; otherwise approximated from the mean / SD maps (the mean voxel SD is larger
      than the SD of a regional mean, so these scores are conservative). The optic chiasm is left out of the regions.
    - **Display**: PET colors and window; score colors (ColdToHotRainbow, DivergingBlueRed, Plasma or Viridis: below the
      normals cold, above them hot, 0 in the middle) over a window symmetric about 0 (default +/- 5); *Below the
-     normals only* greys the positive side. **Scores where normal uptake >** (default 50 % of the normal mean's
-     maximum): the score slices show only where the normals' uptake is high (cortex, deep grey matter); white matter
-     and CSF are black. **Show the region outlines** (1 px, on the PET and the score slices). The name of the
+     normals only* greys the positive side. **Scores shown in**: *Grey matter* (default; the MNI grey matter
+     probability >= 0.5, the same for every tracer, so the cortex stays with a striatal tracer such as fallypride) or
+     *High normal uptake* (the normal mean above a percentage of its maximum, default 50 %). **Hide |score| below**
+     (default 2): only the clusters below / above the normals are colored. **Score background**: the PET in grey
+     (default) or black; with the MR fusion the MR. The voxel score map projected on the 3D-SSP uses the same grey
+     matter (or uptake) mask. **Show the region outlines** (1 px, on the PET and the score slices). The name of the
      region under the mouse is shown on its left, also with the outlines hidden. **Show the color
      legends**: one on the left of each row.
    - **Region table**: the region color, SUVmean, the value of the database's map type (SUVR / ratio), the normals'
