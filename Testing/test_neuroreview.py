@@ -12,8 +12,8 @@ from DICOMGatedDynamicPETLib import neuroreview as nr, normaldb  # noqa: E402
 
 
 def test_score_mask_and_sd_floor():
-    mean = np.array([0.0, 1.0, 5.0, 10.0, np.nan], dtype=np.float32)
-    assert nr.scoreMask(mean).tolist() == [False, False, True, True, False]
+    mean = np.array([0.0, 0.4, 5.0, 10.0, np.nan], dtype=np.float32)
+    assert nr.scoreMask(mean).tolist() == [False, False, True, True, False]     # above 5 % of the maximum
     brain = np.array([1, 1, 0, 1, 1])
     assert nr.scoreMask(mean, brain).tolist() == [False, False, False, True, False]
     with pytest.raises(ValueError):
@@ -25,12 +25,26 @@ def test_score_mask_and_sd_floor():
 
 def test_uptake_mask():
     mean = np.array([[0.0, 2.0, 4.0, 6.0, 8.0, 10.0]], dtype=np.float32)
-    scored = nr.scoreMask(mean)                     # above 30 % of 10
+    scored = nr.scoreMask(mean, fraction=0.3)       # above 30 % of 10
     assert scored.tolist() == [[False, False, True, True, True, True]]
     shown = nr.uptakeMask(mean, scored)             # above 50 %: the white matter (low in the normals) hidden
     assert shown.tolist() == [[False, False, False, True, True, True]]
     assert nr.uptakeMask(mean, scored, 0.75).tolist() == [[False, False, False, False, True, True]]
     assert not nr.uptakeMask(mean, np.zeros_like(scored), 0.3).any()
+
+
+def test_grey_matter_mask_and_hidden_scores():
+    gm = np.array([0.0, 0.3, 0.5, 0.9, np.nan], dtype=np.float32)
+    scored = np.array([1, 1, 1, 0, 1], bool)
+    assert nr.greyMatterMask(gm, scored).tolist() == [False, False, True, False, False]
+    assert nr.greyMatterMask(gm, scored, 0.25).tolist() == [False, True, True, False, False]
+    scores = np.array([-3.0, -1.0, 0.5, 2.5, 4.0], dtype=np.float32)
+    mask = np.array([1, 1, 1, 1, 0], bool)
+    shown = nr.maskedScores(scores, mask, hideBelow=2.0)
+    assert shown.tolist() == [-3.0, nr.OUTSIDE, nr.OUTSIDE, 2.5, nr.OUTSIDE]
+    assert nr.maskedScores(scores, mask).tolist()[:4] == [-3.0, -1.0, 0.5, 2.5]
+    halved = nr.maskedScores(scores, mask, factor=2.0, hideBelow=1.0)     # hidden after the factor (t)
+    assert halved.tolist()[:4] == [-1.5, nr.OUTSIDE, nr.OUTSIDE, 1.25]
 
 
 def test_voxel_scores_sign_and_t():

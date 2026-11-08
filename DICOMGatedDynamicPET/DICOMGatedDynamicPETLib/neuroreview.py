@@ -27,9 +27,15 @@ from . import normaldb
 SCORE_Z, SCORE_T = "z", "t"
 SCORES = ((SCORE_T, "t (Crawford-Howell)"), (SCORE_Z, "z"))
 DEFAULT_SCORE = SCORE_T
-MASK_FRACTION = 0.3             # voxels scored: the database mean above 30 % of its maximum (and in the brain mask)
+MASK_FRACTION = 0.05            # voxels scored: the database mean above 5 % of its maximum (and in the brain mask);
+                                # the slices show a part of them (grey matter, or high normal uptake)
 UPTAKE_FRACTION = 0.5           # score map shown: the database mean above 50 % of its maximum (cortex, deep grey
                                 # matter; white matter and CSF, low in the normals, hidden); adjustable >= MASK_FRACTION
+GM_MINIMUM = 0.5                # score slices: where the MNI grey matter probability is at least this (tracer
+                                # independent: the cortex also with a striatal tracer such as fallypride)
+HIDE_BELOW = 2.0                # score slices: |score| below this transparent (the PET / MR under it)
+MASK_GM, MASK_UPTAKE = "gm", "uptake"
+SCORE_MASKS = ((MASK_GM, "Grey matter (MNI probability)"), (MASK_UPTAKE, "High normal uptake"))
 SD_FLOOR_FRACTION = 0.2         # SD floor: 20 % of the median SD in the mask
 DEFAULT_MAXIMUM = 5.0           # score window: -5 ... +5, 0 in the middle
 SCORE_COLORMAPS = ("ColdToHotRainbow", "DivergingBlueRed", "Plasma", "Viridis")     # the first is the default
@@ -68,6 +74,13 @@ def uptakeMask(mean, scored, fraction=UPTAKE_FRACTION):
     """The score map voxels shown: scored (the scoreMask) where the database mean is above fraction x its maximum,
     the regions of high normal uptake (grey matter); white matter and CSF, low in the normals anyway, hidden."""
     return np.asarray(scored, dtype=bool) & scoreMask(mean, None, max(float(fraction), 0.0))
+
+
+def greyMatterMask(greyMatter, scored, minimum=GM_MINIMUM):
+    """The score map voxels shown: scored where the grey matter probability (on the same grid) is at least
+    minimum."""
+    greyMatter = np.nan_to_num(np.asarray(greyMatter, dtype=np.float32))
+    return np.asarray(scored, dtype=bool) & (greyMatter >= np.float32(minimum))
 
 
 def sdFloor(sd, mask, fraction=SD_FLOOR_FRACTION):
@@ -342,11 +355,14 @@ def divergingColors(table, hypoOnly=False, count=256, grey=GREY):
     return rgba
 
 
-def maskedScores(scores, mask, factor=1.0):
-    """The score map divided by factor (t from z) with OUTSIDE where the mask is not (shown black)."""
+def maskedScores(scores, mask, factor=1.0, hideBelow=0.0):
+    """The score map divided by factor (t from z) with OUTSIDE (transparent) where the mask is not and where
+    |score| < hideBelow."""
     out = np.full(np.shape(scores), OUTSIDE, dtype=np.float32)
     mask = np.asarray(mask, dtype=bool)
     out[mask] = np.asarray(scores, dtype=np.float32)[mask] / np.float32(factor)
+    if hideBelow > 0:
+        out[mask & (np.abs(out) < np.float32(hideBelow))] = OUTSIDE
     return out
 
 
