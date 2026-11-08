@@ -574,7 +574,7 @@ class DynamicNeuroPETLogic(ScriptedLoadableModuleLogic):
 
     def loadRegions(self, labelsPath, entries, referencePath=None, referenceName=None, referenceEntries=None,
                     name=REGIONS_NAME, overlayPath=None, referenceOverlayPath=None, growMm=0.0, erodeReferenceMm=0.0,
-                    allowedMask=None):
+                    allowedMask=None, target=None):
         """A segmentation of the atlas labels (labelsPath, entries [(value, name, color)]) with their names. The
         reference region referenceName comes from referencePath (another version of the atlas on the same grid, e.g.
         the bilateral one, with its referenceEntries) as a segment of its own, or, when referencePath is labelsPath
@@ -582,8 +582,8 @@ class DynamicNeuroPETLogic(ScriptedLoadableModuleLogic):
         overlap the others (the pons), added as segments of their own. growMm: the regions grown into the unlabelled
         voxels (each to the nearest region, so they never overlap; only where allowedMask, when given on the same
         grid; ventricles fixed; the overlays not grown). erodeReferenceMm: the reference region eroded (then always a
-        segment of its own, made from the atlas before growing). Returns (segmentation node, reference segment ID or
-        None)."""
+        segment of its own, made from the atlas before growing). target: a segmentation node to fill (its segments are
+        replaced) instead of a new one. Returns (segmentation node, reference segment ID or None)."""
         scene = slicer.mrmlScene
         array, source = self._loadLabels(labelsPath)
         colorNode = labelNode = referenceNode = overlayNode = None
@@ -612,11 +612,16 @@ class DynamicNeuroPETLogic(ScriptedLoadableModuleLogic):
             slicer.util.updateVolumeFromArray(labelNode, remapped)
             labelNode.CreateDefaultDisplayNodes()
             labelNode.GetDisplayNode().SetAndObserveColorNodeID(colorNode.GetID())
-            segmentation = scene.AddNewNodeByClass("vtkMRMLSegmentationNode", scene.GenerateUniqueName(name))
+            if target is not None and scene.IsNodePresent(target):
+                segmentation = target
+                segmentation.GetSegmentation().RemoveAllSegments()
+            else:
+                segmentation = scene.AddNewNodeByClass("vtkMRMLSegmentationNode", scene.GenerateUniqueName(name))
             segmentation.CreateDefaultDisplayNodes()
             segmentation.SetReferenceImageGeometryParameterFromVolumeNode(labelNode)
             if not slicer.modules.segmentations.logic().ImportLabelmapToSegmentationNode(labelNode, segmentation):
-                scene.RemoveNode(segmentation)
+                if segmentation is not target:
+                    scene.RemoveNode(segmentation)
                 raise RuntimeError("Could not make the CerebrA segmentation")
             self._nameSegments(segmentation, entries)
             if overlayPath:
@@ -684,15 +689,15 @@ class DynamicNeuroPETLogic(ScriptedLoadableModuleLogic):
                 return value
         return None
 
-    def growthMask(self, atlas):
-        """Voxels the regions may grow into: in the MNI brain mask and, when the white matter probability map is
-        there, below WM_PROBABILITY_LIMIT. None without a brain mask."""
+    def growthMask(self, atlas, intoWhiteMatter=False):
+        """Voxels the regions may grow into: in the MNI brain mask and, unless intoWhiteMatter or without the white
+        matter probability map, below WM_PROBABILITY_LIMIT. None without a brain mask."""
         if neuro.BRAIN_MASK not in atlas:
             return None
         mask, node = self._loadLabels(atlas[neuro.BRAIN_MASK])
         slicer.mrmlScene.RemoveNode(node)
         allowed = mask > 0
-        if "WM" in atlas:
+        if "WM" in atlas and not intoWhiteMatter:
             wmNode = slicer.util.loadVolume(atlas["WM"], {"show": False})
             try:
                 wm = slicer.util.arrayFromVolume(wmNode).astype(np.float32)
@@ -705,12 +710,13 @@ class DynamicNeuroPETLogic(ScriptedLoadableModuleLogic):
         return allowed
 
     def loadAtlasRegions(self, atlas, targetKind=None, referenceKind=None, referenceName=None, growMm=GROW_MM,
-                         erodeReferenceMm=ERODE_REFERENCE_MM):
+                         erodeReferenceMm=ERODE_REFERENCE_MM, growIntoWhiteMatter=False, target=None):
         """Regions of the atlas folder (neuro.findAtlasFiles): the target regions from one CerebrA version, the
         reference region from another (default: the left and right regions, the bilateral cerebellar grey matter
         as the reference). The CerebrA with pons is used when it is in the folder (its pons as segments of their
-        own, over the brainstem). Makes the bilateral version and the pons overlays on first use. Returns
-        (segmentation, reference segment ID)."""
+        own, over the brainstem). Makes the bilateral version and the pons overlays on first use. growIntoWhiteMatter:
+        the grown regions may take white matter voxels too. target: a segmentation to fill instead of a new one.
+        Returns (segmentation, reference segment ID)."""
         targetKind = targetKind or ATLAS_LATERAL
         referenceKind = referenceKind or ATLAS_BILATERAL
         atlas = dict(atlas)
@@ -721,10 +727,10 @@ class DynamicNeuroPETLogic(ScriptedLoadableModuleLogic):
         referencePath, referenceEntries, referenceOverlayPath = self.atlasPaths(atlas, referenceKind)
         if referenceName is None:
             referenceName = defaultReferenceName(referenceEntries)
-        allowed = self.growthMask(atlas) if growMm > 0 else None
+        allowed = self.growthMask(atlas, growIntoWhiteMatter) if growMm > 0 else None
         return self.loadRegions(labelsPath, entries, referencePath, referenceName, referenceEntries,
                                 overlayPath=overlayPath, referenceOverlayPath=referenceOverlayPath, growMm=growMm,
-                                erodeReferenceMm=erodeReferenceMm, allowedMask=allowed)
+                                erodeReferenceMm=erodeReferenceMm, allowedMask=allowed, target=target)
 
     @staticmethod
     def _addMaskSegment(segmentation, mask, geometryNode, name, color):
@@ -1696,6 +1702,14 @@ class DynamicNeuroPETWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             "brain mask and outside the white matter (probability < 0.5, when the WM map is in the atlas folder); "
             "the ventricles and the pons do not grow.")
         form.addRow("Grow regions:", self.growSpin)
+        self.growWhiteMatterCheck = qt.QCheckBox("Grow into the white matter too")
+        self.growWhiteMatterCheck.toolTip = ("Off: the regions grow into CSF and the cortex edge only (white matter "
+                                             "probability < 0.5). On: they may take white matter voxels too (still "
+                                             "inside the brain mask, each voxel to the nearest region).")
+        form.addRow("", self.growWhiteMatterCheck)
+        self.growSpin.connect("valueChanged(double)",
+                              lambda v: setattr(self.growWhiteMatterCheck, "enabled", v > 0))
+        self.growWhiteMatterCheck.enabled = GROW_MM > 0
         self.erodeSpin = qt.QDoubleSpinBox()
         self.erodeSpin.setRange(0.0, 10.0)
         self.erodeSpin.setDecimals(1)
@@ -1706,6 +1720,12 @@ class DynamicNeuroPETWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.erodeSpin.toolTip = ("Erode the reference region (taken from the atlas before growing), so spill-over "
                                   "from the neighbouring tissue does not reach it.")
         form.addRow("Erode reference:", self.erodeSpin)
+        self.regionsTargetSelector = self._nodeSelector(
+            ["vtkMRMLSegmentationNode"],
+            "Segmentation the regions are written into: its segments are replaced, so loading again (e.g. after "
+            "changing the atlas or the growth) does not pile up segmentations. 'Create new' makes a new one.")
+        self.regionsTargetSelector.noneDisplay = "Create new segmentation"
+        form.addRow("Output segmentation:", self.regionsTargetSelector)
         self.loadRegionsButton = _button("Load regions and go to modeling")
         form.addRow(self.loadRegionsButton)
         self.regionsLabel = qt.QLabel()
@@ -1755,6 +1775,9 @@ class DynamicNeuroPETWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         segmentation = self.node("Segmentation")
         if segmentation is not None:
             text.append(f"Loaded: '{segmentation.GetName()}'.")
+            if not getattr(self, "_targetInitialized", False):     # once: loading again replaces it by default
+                self._targetInitialized = True
+                self.regionsTargetSelector.setCurrentNode(segmentation)
         if not text:
             text.append(f"'{sequence.GetName()}' is in the template space. Load the CerebrA regions.")
         self.regionsInfo.text = " ".join(text)
@@ -1772,7 +1795,9 @@ class DynamicNeuroPETWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         try:
             segmentation, referenceId = self.logic.loadAtlasRegions(
                 self.atlas, self.targetAtlasCombo.currentData, self.referenceAtlasCombo.currentData,
-                self.referenceRegionCombo.currentText or None, float(self.growSpin.value), float(self.erodeSpin.value))
+                self.referenceRegionCombo.currentText or None, float(self.growSpin.value), float(self.erodeSpin.value),
+                growIntoWhiteMatter=bool(self.growWhiteMatterCheck.checked),
+                target=self.regionsTargetSelector.currentNode())
         except Exception as error:
             logging.exception("Neuro: could not load the regions")
             slicer.util.errorDisplay(f"Could not load the CerebrA regions:\n{error}")
@@ -1780,7 +1805,10 @@ class DynamicNeuroPETWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         finally:
             qt.QApplication.restoreOverrideCursor()
         old = self.node("Segmentation")
+        if old is segmentation:
+            old = None
         self.setNode("Segmentation", segmentation)
+        self.regionsTargetSelector.setCurrentNode(segmentation)
         self._parameter().SetParameter(NEURO_PREFIX + "ReferenceSegment", referenceId or "")
         self.atlas = neuro.findAtlasFiles(self.logic.atlasFolder()) or self.atlas   # the bilateral files are new
         count = len(self.logic.segmentIds(segmentation))
@@ -2147,6 +2175,10 @@ class DynamicNeuroPETTest(ScriptedLoadableModuleTest):
         names = sorted(grouped.GetSegmentation().GetSegment(i).GetName() for i in logic.segmentIds(grouped))
         self.assertEqual(names, ["Cerebellum Gray Matter", "Pons", "Putamen"])
         self.assertIn(neuro.GROUPED_BILATERAL_LABELS, neuro.findAtlasFiles(folder))
+        # loading again into the same segmentation replaces its segments
+        again, _ = logic.loadAtlasRegions(atlas, ATLAS_GROUPED_BILATERAL, ATLAS_GROUPED_BILATERAL, target=grouped)
+        self.assertIs(again, grouped)
+        self.assertEqual(len(logic.segmentIds(again)), 3)
         # grown regions (no brain mask here) and an eroded reference of its own
         grown, grownRef = logic.loadAtlasRegions(atlas, ATLAS_BILATERAL, ATLAS_BILATERAL, growMm=1.0,
                                                  erodeReferenceMm=0.5)

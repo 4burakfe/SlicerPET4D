@@ -533,8 +533,11 @@ without, the result is kept, or stay).
    on first use and again whenever the table, CerebrA or the pons change.
    **Grow regions** (mm, off by default): the regions grow into the unlabelled voxels around them, each voxel to
    the nearest region (so they never overlap and the order does not matter), only inside the MNI brain mask and
-   where the white matter probability is below 0.5; the ventricles and the pons do not grow. **Erode reference**
+   where the white matter probability is below 0.5 (or into the white matter too, with *Grow into the white matter
+   too*); the ventricles and the pons do not grow. **Erode reference**
    (mm, off by default): the reference region, taken from the atlas before growing, is eroded against spill-over.
+   **Output segmentation:** the segmentation the regions are written into (its segments replaced), by default the
+   one loaded before, so loading again does not pile up segmentations; *Create new segmentation* makes a new one.
 6. **Modeling** (Dynamic PET Modeling), ready with the normalized series, the regions, **SRTM**, the reference region
    and the putamen as the target.
 
