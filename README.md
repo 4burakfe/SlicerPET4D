@@ -652,16 +652,16 @@ steps, on the toolbar like the Dynamic Neuro Receptor PET:
 4. **Regions**: the CerebrA regions. The database sets the region settings (atlas, growth, white matter, reference
    region from its own reference mask): they are locked; **Unlock** (with a warning) changes them. Without a
    database the workflow goes on and the review gives the regional values only.
-5. **Review**: the patient compared with the normal database, in a 4 x 4 layout. Columns 1-3: the normalized
-   PET (axial, coronal, sagittal) with the regions as outlines (no fill); below it the **voxel score map**; the two
-   lower rows the **3D-SSP** views (top, anterior, left / bottom, posterior, right; black background, parallel
-   projection, top and bottom with the front up). Column
-   4: the **region table**: SUVmean, the value of the database's map type (SUVR / ratio), the normals' mean, SD and
-   n, and the score. Press **Compare with the database** (without a database: *Compute the regional values*, SUV and
-   SUVR to the reference region). Settings on the left:
+5. **Review**: the patient compared with the normal database. Entering the step compares automatically (once per
+   image, regions and database; **Compare with the database** again by hand, or *Compute the regional values*
+   without a database: SUV and SUVR to the reference region). **Layout** (left): *Single monitor* (the normalized
+   PET axial / coronal / sagittal with the region outlines, below it the **voxel score map**, then the six **3D-SSP**
+   views, the **region table** on the right), *Dual monitor* (the default with two screens: the slices and the table
+   in the main window, the 3D-SSP views in a window maximized on the second screen), *Slices and table* or
+   *3D-SSP only*. The slice views are linked and have no title bars. Settings on the left:
    - **Normals**: automatically the patient's age group (the master when the age is not known or its group has no
-     maps), or picked by hand. **Score**: z = (normal mean - patient) / SD or the Crawford-Howell t = z /
-     sqrt(1 + 1/n) (default); positive means below the normals (hypometabolism / hypoperfusion).
+     maps), or picked by hand. **Score**: z = (patient - normal mean) / SD or the Crawford-Howell t = z /
+     sqrt(1 + 1/n) (default); negative means below the normals (hypometabolism / hypoperfusion).
    - Voxel scores: the patient on the database grid (SUVR to the database's reference mask for an SUVR database),
      smoothed with the database's FWHM like the normals, scored inside the MNI brain mask where the normal mean is
      above 30 % of its maximum, with an SD floor of 20 % of the median SD there. Regional scores: the unsmoothed
@@ -669,17 +669,25 @@ steps, on the toolbar like the Dynamic Neuro Receptor PET:
      are the database's (locked); for other regions of a user defined database computed from its subjects on the fly
      and cached in `<database>/cache/`; otherwise approximated from the mean / SD maps (the mean voxel SD is larger
      than the SD of a regional mean, so these scores are conservative). The optic chiasm is left out of the regions.
-   - **Display**: PET colors and window; score colors (above the threshold; blue below minus the threshold),
-     threshold (2) and maximum (6); *Below the normals only*. Below the threshold the score views are black.
+   - **Display**: PET colors and window; score colors (diverging, ColdToHotRainbow or DivergingBlueRed: below the
+     normals cold, above them hot, 0 in the middle) over a window symmetric about 0 (default +/- 5); *Below the
+     normals only* greys the positive side. **Scores where normal uptake >** (default 50 % of the normal mean's
+     maximum): the score slices show only where the normals' uptake is high (cortex, deep grey matter); white matter
+     and CSF are black. **Show the region outlines** (2 px, on the PET and the score slices).
+   - **Region table**: the region color, SUVmean, the value of the database's map type (SUVR / ratio), the normals'
+     mean, SD and n, and the score; as wide as its content. Click a column header to sort (by name or by value);
+     click a region to show it alone on the slices for 5 s.
    - **3D-SSP** (Minoshima et al. 1995): the surface of all the regions together; each vertex takes the maximum of
      the patient's smoothed map along its inward normal (0-13.5 mm, 1 mm steps). **Map**: the score (default) or the
-     patient's projected values. **Score from**: *Minoshima* (default; against the same projection of every normal:
-     the database's `stats/ssp.npz` when the regions are the database's, else computed from the subjects of a user
-     defined database and cached), or *Voxel score map projected* (the most extreme voxel score along the normal;
-     used automatically when the normals' projections are not there, e.g. an older predefined database). Its own
-     score colors, threshold and maximum (below the threshold the surface is grey), patient colors and window.
+     patient's projected values (SUVR for an SUVR database, else SUV; smoothed). **Score from**: *Minoshima*
+     (default; against the same projection of every normal: the database's `stats/ssp.npz` when the regions are the
+     database's, else computed from the subjects of a user defined database and cached), or *Voxel score map
+     projected* (the most extreme voxel score along the normal; used automatically when the normals' projections are
+     not there, e.g. an older predefined database). Its own score colors and window, patient colors and window.
+     Black background, parallel projection, a box orientation marker; **Restore 3D views** puts back the default
+     direction, zoom and position.
    - **MR fusion**: the PET and the scores over the MNI template T1, or over the patient's CT / MR when the
-     normalization went through it, with the PET opacity and the MR window.
+     normalization went through it, with the PET opacity, the score opacity (default 0.5) and the MR window.
 
    **Add this patient to a normal database** (user
    defined databases) builds a database from normal subjects: the normalized image is resampled onto the database

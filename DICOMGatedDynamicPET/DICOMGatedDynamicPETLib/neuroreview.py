@@ -28,6 +28,8 @@ SCORE_Z, SCORE_T = "z", "t"
 SCORES = ((SCORE_T, "t (Crawford-Howell)"), (SCORE_Z, "z"))
 DEFAULT_SCORE = SCORE_T
 MASK_FRACTION = 0.3             # voxels scored: the database mean above 30 % of its maximum (and in the brain mask)
+UPTAKE_FRACTION = 0.5           # score map shown: the database mean above 50 % of its maximum (cortex, deep grey
+                                # matter; white matter and CSF, low in the normals, hidden); adjustable >= MASK_FRACTION
 SD_FLOOR_FRACTION = 0.2         # SD floor: 20 % of the median SD in the mask
 DEFAULT_MAXIMUM = 5.0           # score window: -5 ... +5, 0 in the middle
 SCORE_COLORMAPS = ("ColdToHotRainbow", "DivergingBlueRed")     # Slicer's colour tables; the first is the default
@@ -55,6 +57,12 @@ def scoreMask(mean, brainMask=None, fraction=MASK_FRACTION):
             raise ValueError("The brain mask is not on the grid of the database maps.")
         mask &= brainMask > 0
     return mask
+
+
+def uptakeMask(mean, scored, fraction=UPTAKE_FRACTION):
+    """The score map voxels shown: scored (the scoreMask) where the database mean is above fraction x its maximum,
+    the regions of high normal uptake (grey matter); white matter and CSF, low in the normals anyway, hidden."""
+    return np.asarray(scored, dtype=bool) & scoreMask(mean, None, max(float(fraction), 0.0))
 
 
 def sdFloor(sd, mask, fraction=SD_FLOOR_FRACTION):
@@ -294,9 +302,20 @@ def maskedScores(scores, mask, factor=1.0):
     return out
 
 
-# Layout: rows 1-2 slice views (PET with the region outlines; the score map), rows 3-4 the 3D-SSP views, the
-# region table on the right
-LAYOUT_ID = 7810
+# Layouts: rows 1-2 slice views (PET with the region outlines; the score map), rows 3-4 the 3D-SSP views, the
+# region table on the right. Single monitor: all of it; dual monitor: the slices and the table in the main window,
+# the 3D-SSP views in a floating window placed on the second screen; and the slices (with the table) or the 3D-SSP
+# views alone.
+LAYOUT_ID = LAYOUT_SINGLE = 7810
+LAYOUT_DUAL = 7811
+LAYOUT_SLICES = 7812
+LAYOUT_SSP = 7813
+LAYOUTS = ((LAYOUT_SINGLE, "Single monitor (slices, 3D-SSP, table)"),
+           (LAYOUT_DUAL, "Dual monitor (3D-SSP on the second screen)"),
+           (LAYOUT_SLICES, "Slices and table"),
+           (LAYOUT_SSP, "3D-SSP only"))
+LAYOUT_IDS = tuple(k for k, _ in LAYOUTS)
+MONITOR2_TITLE = "Static Neuro - 3D-SSP (Monitor 2)"
 ORIENTATIONS = (("Axial", "#F34A33"), ("Coronal", "#6EB04B"), ("Sagittal", "#EDD54C"))
 PET_ROW, SCORE_ROW = "PET", "Score"
 VIEW_PREFIX = "NeuroRev"
@@ -314,7 +333,12 @@ def sspViewName(key):
     return f"{VIEW_PREFIX}SSP{key}"
 
 
-def layoutXml():
+def defaultLayout(screens):
+    """Dual monitor with two screens or more, else the single monitor layout."""
+    return LAYOUT_DUAL if screens >= 2 else LAYOUT_SINGLE
+
+
+def _sliceRows():
     def sliceView(row, orientation, color, label):
         return (f'<item><view class="vtkMRMLSliceNode" singletontag="{sliceViewName(row, orientation)}">'
                 f'<property name="orientation" action="default">{orientation}</property>'
@@ -322,22 +346,41 @@ def layoutXml():
                 f'<property name="viewcolor" action="default">{color}</property>'
                 f'<property name="viewgroup" action="default">{VIEW_GROUP}</property>'
                 '</view></item>')
+    return ['<item><layout type="horizontal" split="true">' + "".join(
+        sliceView(row, o, c, prefix + o[0]) for o, c in ORIENTATIONS) + '</layout></item>'
+        for row, prefix in ((PET_ROW, ""), (SCORE_ROW, "S"))]
 
+
+def _sspRows():
     def threeD(key, title):
         return (f'<item><view class="vtkMRMLViewNode" singletontag="{sspViewName(key)}">'
                 f'<property name="viewlabel" action="default">{title}</property>'
                 f'<property name="viewgroup" action="default">{VIEW_GROUP + 1}</property>'
                 '</view></item>')
+    return ['<item><layout type="horizontal" split="true">' + "".join(
+        threeD(k, t) for k, t in SSP_VIEWS[start:start + 3]) + '</layout></item>' for start in (0, 3)]
 
-    rows = []
-    for row, prefix in ((PET_ROW, ""), (SCORE_ROW, "S")):
-        rows.append('<item><layout type="horizontal" split="true">' + "".join(
-            sliceView(row, o, c, prefix + o[0]) for o, c in ORIENTATIONS) + '</layout></item>')
-    for start in (0, 3):
-        rows.append('<item><layout type="horizontal" split="true">' + "".join(
-            threeD(k, t) for k, t in SSP_VIEWS[start:start + 3]) + '</layout></item>')
+
+def _withTable(rows):
     left = f'<layout type="vertical" split="true">{"".join(rows)}</layout>'
     table = (f'<view class="vtkMRMLTableViewNode" singletontag="{TABLE_VIEW}">'
              '<property name="viewlabel" action="default">R</property></view>')
     return (f'<layout type="horizontal" split="true"><item splitSize="750">{left}</item>'
             f'<item splitSize="250">{table}</item></layout>')
+
+
+def layoutXml(layoutId=LAYOUT_SINGLE, mainViewportAttributes=""):
+    """The layout description of a review layout. mainViewportAttributes: XML attributes of the main window viewport
+    of the dual monitor layout (as in Slicer's own dual monitor layouts)."""
+    if layoutId == LAYOUT_SLICES:
+        return _withTable(_sliceRows())
+    if layoutId == LAYOUT_SSP:
+        return f'<layout type="vertical" split="true">{"".join(_sspRows())}</layout>'
+    if layoutId == LAYOUT_DUAL:
+        main = _withTable(_sliceRows())
+        main = main.replace('<layout type="horizontal" split="true">',
+                            f'<layout type="horizontal" split="true"{mainViewportAttributes}>', 1)
+        return ('<viewports>' + main
+                + f'<layout name="StaticNeuroMonitor2" type="vertical" split="true" label="{MONITOR2_TITLE}" '
+                  'dockable="true" dockPosition="floating">' + "".join(_sspRows()) + '</layout></viewports>')
+    return _withTable(_sliceRows() + _sspRows())

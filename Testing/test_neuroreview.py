@@ -23,6 +23,16 @@ def test_score_mask_and_sd_floor():
     assert floored.tolist() == pytest.approx([0.5, 1.0, 1.0, 0.5, 2.0])
 
 
+def test_uptake_mask():
+    mean = np.array([[0.0, 2.0, 4.0, 6.0, 8.0, 10.0]], dtype=np.float32)
+    scored = nr.scoreMask(mean)                     # above 30 % of 10
+    assert scored.tolist() == [[False, False, True, True, True, True]]
+    shown = nr.uptakeMask(mean, scored)             # above 50 %: the white matter (low in the normals) hidden
+    assert shown.tolist() == [[False, False, False, True, True, True]]
+    assert nr.uptakeMask(mean, scored, 0.75).tolist() == [[False, False, False, False, True, True]]
+    assert not nr.uptakeMask(mean, np.zeros_like(scored), 0.3).any()
+
+
 def test_voxel_scores_sign_and_t():
     mean = np.full(4, 10.0, np.float32)
     sd = np.full(4, 2.0, np.float32)
@@ -102,3 +112,12 @@ def test_layout_xml():
     tags = [v.getAttribute("singletontag") for v in document.getElementsByTagName("view")]
     assert len(tags) == 13 and nr.TABLE_VIEW in tags
     assert nr.sliceViewName(nr.SCORE_ROW, "Sagittal") in tags and nr.sspViewName("Right") in tags
+    dual = xml.dom.minidom.parseString(nr.layoutXml(nr.LAYOUT_DUAL, ' name="main"'))
+    layouts = dual.documentElement.getElementsByTagName("layout")
+    assert dual.documentElement.tagName == "viewports"
+    assert layouts[0].getAttribute("name") == "main"
+    floating = [l for l in layouts if l.getAttribute("dockable") == "true"]
+    assert len(floating) == 1 and len(floating[0].getElementsByTagName("view")) == 6
+    assert len(xml.dom.minidom.parseString(nr.layoutXml(nr.LAYOUT_SLICES)).getElementsByTagName("view")) == 7
+    assert len(xml.dom.minidom.parseString(nr.layoutXml(nr.LAYOUT_SSP)).getElementsByTagName("view")) == 6
+    assert nr.defaultLayout(2) == nr.LAYOUT_DUAL and nr.defaultLayout(1) == nr.LAYOUT_SINGLE
