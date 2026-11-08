@@ -2158,7 +2158,12 @@ class StaticNeuroPETWidget(DynamicNeuroPETWidget):
         if lookup is None:
             return np.tile(np.linspace(0, 1, 256)[:, None], (1, 3))
         low, high = lookup.GetRange()
-        return np.array([lookup.GetColor(low + (high - low) * i / 255.0) for i in range(256)], dtype=float)
+        colors = np.zeros((256, 3), dtype=float)
+        rgb = [0.0, 0.0, 0.0]
+        for i in range(256):        # GetColor(value, rgb): the output array form works in every VTK wrapping
+            lookup.GetColor(low + (high - low) * i / 255.0, rgb)
+            colors[i] = rgb
+        return colors
 
     def _scoreColorNode(self):
         scene = slicer.mrmlScene
