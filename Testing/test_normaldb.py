@@ -199,8 +199,12 @@ def test_old_header_defaults_to_pet(tmp_path):
 
 
 def test_region_settings_in_header():
-    h = header(regionAtlas="groupedBilateral", regionGrowMm=2.0, growIntoWhiteMatter=True)
+    h = header(regionAtlas="groupedBilateral", regionGrowMm=2.0, growInto=normaldb.GROW_ONLY_WM)
     assert normaldb.validateHeader(h) == []
+    assert header()["growInto"] == normaldb.GROW_NO_WM
+    assert any("growInto" in e for e in normaldb.validateHeader(header(growInto="nope")))
+    assert normaldb.growInto({"growIntoWhiteMatter": True}) == normaldb.GROW_WITH_WM
+    assert normaldb.growInto({}) == normaldb.GROW_NO_WM
     assert normaldb.regionAtlasTitle("groupedBilateral") == "CerebrA broad regions, sides merged"
     assert any("growth" in e for e in normaldb.validateHeader(header(regionGrowMm=-1)))
     assert any("region atlas" in e for e in normaldb.validateHeader(header(regionAtlas="nope")))
@@ -225,8 +229,12 @@ def test_normalization_settings(tmp_path):
     folder = normaldb.createDatabase(str(tmp_path), header(name="old"))
     data = json.load(open(normaldb.headerPath(folder)))
     del data["normalization"]
+    del data["growInto"]
+    data["growIntoWhiteMatter"] = True          # before the three growth targets
     json.dump(data, open(normaldb.headerPath(folder), "w"))
-    assert normaldb.readHeader(folder)["normalization"] == normaldb.emptyNormalization()
+    old = normaldb.readHeader(folder)
+    assert old["normalization"] == normaldb.emptyNormalization()
+    assert old["growInto"] == normaldb.GROW_WITH_WM and "growIntoWhiteMatter" not in old
 
 
 def test_add_subject(tmp_path):

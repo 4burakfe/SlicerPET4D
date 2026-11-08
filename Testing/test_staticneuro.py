@@ -58,7 +58,7 @@ def test_database_match():
 
 def test_region_settings(tmp_path):
     header = normaldb.newHeader("db", nuclide="F-18", tracer="FDG", regionAtlas="grouped", regionGrowMm=2.0,
-                                growIntoWhiteMatter=True, referenceErosionMm=1.0, smoothingFwhmMm=8.0,
+                                growInto=normaldb.GROW_ONLY_WM, referenceErosionMm=1.0, smoothingFwhmMm=8.0,
                                 referenceRegion=normaldb.REF_PONS, referenceMask="reference_mask.nii.gz")
     settings = sn.regionSettings(str(tmp_path), header)
     assert settings["referenceMaskPath"] is None and settings["referenceAtlasRegion"] == "Pons"
@@ -66,7 +66,7 @@ def test_region_settings(tmp_path):
     settings = sn.regionSettings(str(tmp_path), header)
     assert settings["referenceMaskPath"].endswith("reference_mask.nii.gz") and settings["growMm"] == 2.0
     text = "\n".join(sn.settingsText(settings))
-    assert "broad regions" in text and "white matter" in text and "8 mm" in text and "database's mask" in text
+    assert "broad regions" in text and "white matter only" in text and "8 mm" in text and "database's mask" in text
     assert sn.masterMeanPath(str(tmp_path), header) is None
     (tmp_path / "stats").mkdir()
     (tmp_path / "stats" / "master_mean.nii.gz").write_bytes(b"m")

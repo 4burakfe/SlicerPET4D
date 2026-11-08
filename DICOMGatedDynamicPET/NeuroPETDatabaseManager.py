@@ -353,10 +353,14 @@ class HeaderForm:
         self.growSpin.toolTip = ("Grow the regions into the unlabelled voxels around them (each voxel to the nearest "
                                  "region, inside the brain mask), for the PET / SPECT resolution.")
         refForm.addRow("Grow regions:", self.growSpin)
-        self.growWhiteMatterCheck = qt.QCheckBox("Grow into the white matter too")
-        self.growWhiteMatterCheck.enabled = False
-        self.growSpin.connect("valueChanged(double)", lambda v: setattr(self.growWhiteMatterCheck, "enabled", v > 0))
-        refForm.addRow("", self.growWhiteMatterCheck)
+        self.growIntoCombo = qt.QComboBox()
+        for key, title in normaldb.GROW_INTO:
+            self.growIntoCombo.addItem(title, key)
+        self.growIntoCombo.toolTip = ("Where the grown regions may go (inside the brain mask): CSF and the cortex edge "
+                                      "only, white matter too, or white matter only (no outward growth into CSF).")
+        self.growIntoCombo.enabled = False
+        self.growSpin.connect("valueChanged(double)", lambda v: setattr(self.growIntoCombo, "enabled", v > 0))
+        refForm.addRow("Grow into:", self.growIntoCombo)
         if predefined:
             self.mapTypeCombo = qt.QComboBox()
             self.mapTypeCombo.toolTip = ("What the mean / SD maps hold: PET SUVR (divided by the reference) or SUV, "
@@ -568,7 +572,8 @@ class HeaderForm:
             referenceErosionMm=float(self.erosionSpin.value),
             regionAtlas=self.regionAtlasCombo.itemData(self.regionAtlasCombo.currentIndex),
             regionGrowMm=float(self.growSpin.value),
-            growIntoWhiteMatter=bool(self.growWhiteMatterCheck.checked) and self.growSpin.value > 0,
+            growInto=(self.growIntoCombo.itemData(self.growIntoCombo.currentIndex) if self.growSpin.value > 0
+                      else normaldb.GROW_NO_WM),
             normalization=self.normalization(),
             ageStratified=stratified,
             ageGroups=self.ageGroups() if stratified else [],
@@ -753,7 +758,8 @@ class NeuroPETDatabaseManagerWidget(ScriptedLoadableModuleWidget):
             ("Reference erosion", f"{header.get('referenceErosionMm') or 0:g} mm"),
             ("Regions", f"{normaldb.regionAtlasTitle(header.get('regionAtlas'))}, grown "
                         f"{header.get('regionGrowMm') or 0:g} mm"
-                        + (" (into the white matter too)" if header.get("growIntoWhiteMatter") else "")),
+                        + (f" ({normaldb.GROW_INTO_TEXT[normaldb.growInto(header)]})"
+                           if normaldb.GROW_INTO_TEXT[normaldb.growInto(header)] else "")),
             ("Spatial normalization", normaldb.normalizationText(header.get("normalization"))),
             ("Maps", f"{header.get('mapType')}, smoothing {header.get('smoothingFwhmMm') or 0:g} mm FWHM"),
             ("Scanner", header.get("scanner")),

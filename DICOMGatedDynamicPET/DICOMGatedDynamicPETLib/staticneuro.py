@@ -229,13 +229,13 @@ REFERENCE_ATLAS_REGION = {normaldb.REF_CEREBELLUM_GM: "Cerebellum Gray Matter", 
 
 def regionSettings(folder, header):
     """The region settings of a database, as the Regions step applies them: {"regionAtlas", "growMm",
-    "growIntoWhiteMatter", "erodeReferenceMm", "referenceRegion", "referenceTitle", "referenceMaskPath",
+    "growInto", "erodeReferenceMm", "referenceRegion", "referenceTitle", "referenceMaskPath",
     "referenceAtlasRegion", "smoothingFwhmMm", "mapType"}."""
     reference = header.get("referenceRegion") or ""
     return {
         "regionAtlas": header.get("regionAtlas") or normaldb.DEFAULT_REGION_ATLAS,
         "growMm": float(header.get("regionGrowMm") or 0.0),
-        "growIntoWhiteMatter": bool(header.get("growIntoWhiteMatter")),
+        "growInto": normaldb.growInto(header),
         "erodeReferenceMm": float(header.get("referenceErosionMm") or 0.0),
         "referenceRegion": reference,
         "referenceTitle": normaldb.referenceTitle(reference),
@@ -250,8 +250,9 @@ def settingsText(settings):
     """One line per setting of regionSettings(), for the page."""
     grow = settings["growMm"]
     lines = [f"Regions: {normaldb.regionAtlasTitle(settings['regionAtlas'])}",
-             "Grow regions: " + (f"{grow:g} mm" + (" (into the white matter too)" if settings["growIntoWhiteMatter"]
-                                                    else "") if grow > 0 else "off"),
+             "Grow regions: " + (f"{grow:g} mm" + (f" ({normaldb.GROW_INTO_TEXT[settings['growInto']]})"
+                                                    if normaldb.GROW_INTO_TEXT.get(settings["growInto"]) else "")
+                                 if grow > 0 else "off"),
              f"Reference: {settings['referenceTitle'] or 'none'}"
              + (" (the database's mask)" if settings["referenceMaskPath"] else "")
              + (f", eroded {settings['erodeReferenceMm']:g} mm" if settings["erodeReferenceMm"] > 0 else ""),
