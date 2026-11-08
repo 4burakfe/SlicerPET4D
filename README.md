@@ -581,6 +581,16 @@ database:
 - **Add predefined database...**: a *predefined* database has no subject images, only mean and SD maps: either a
   package (.zip) or the maps picked one by one (master and each age group, with the number of subjects and whether
   they hold SUVR / SUV, or ratio / counts for SPECT).
+- **Batch add subjects...** (user defined databases): many normal subjects at once from a BIDS folder
+  (`sub-<id>[_ses-<session>]_pet.nii[.gz]` with the `.json` sidecars and `participants.tsv` for age and sex; pick the
+  session, e.g. `SUV`). Each image is normalized to the MNI template with the database's normalization settings
+  (PET/SPECT to an MR template; module defaults when the database has none, then stored with the first subject),
+  without a manual check, resampled onto the template grid and added like **Add this patient to a normal database**
+  (SUV and SUVR maps, the database's reference mask). Subject IDs already in the database are skipped, so a stopped
+  batch can be run again; a failing subject is logged and the batch goes on. The log is `qc/batch_<time>.csv`, and a
+  **QC picture** of each subject (the normalized PET over the MNI T1: axial, coronal, sagittal through the PET's
+  centre) is `qc/<id>_qc.png`. Check them and remove the badly normalized subjects (**Remove subjects...**: the rows
+  and maps of the selected subjects are deleted) before the mean / SD maps.
 - **Export as predefined...**: a user defined database as a .zip without its subject images (the number of
   subjects and an age summary are kept).
 - **Delete database** removes the folder from disk after a warning.

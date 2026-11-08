@@ -463,3 +463,106 @@ def ratioMap(values, mask):
     if not mean > 0:
         raise ValueError(f"The mean in the reference region is {mean:g}: is the image normalized to the MNI space?")
     return (values / mean).astype(np.float32), mean
+
+
+# ---------------------------------------------------------------------------
+# Batch: many normal subjects (BIDS PET files) into a database
+# ---------------------------------------------------------------------------
+def findPetFiles(root):
+    """BIDS PET images under root (sub-<id>[_ses-<session>]..._pet.nii[.gz]), sorted by path."""
+    found = []
+    for folder, dirs, files in os.walk(root or ""):
+        dirs[:] = sorted(d for d in dirs if not d.startswith("."))
+        for name in files:
+            stem, extension = splitImageName(name)
+            if extension.lower() in (".nii", ".nii.gz") and parseBidsName(name).get("suffix") == "pet":
+                found.append(os.path.join(folder, name))
+    return sorted(found)
+
+
+def bidsSession(path):
+    return parseBidsName(path).get("ses", "")
+
+
+def bidsSubjectId(path):
+    """Database subject ID of a BIDS file ('sub-<id>'), "" when the name is not BIDS."""
+    subject = parseBidsName(path).get("sub")
+    return f"sub-{subject}" if subject else ""
+
+
+def batchNormalization(norm, defaultTemplate, defaultEngine, engineDefaults):
+    """The normalization a batch runs with: the database's settings (normaldb.NORM_KEYS) with the module defaults where
+    they are not specified. engineDefaults: {engine: (linear, deformable)}. Only the PET/SPECT to MR template method
+    works without a CT/MR or a database mean map: ValueError for the others."""
+    norm = dict(normaldb.emptyNormalization(), **(norm or {}))
+    method = norm.get("method") or normaldb.NORM_PET
+    if method != normaldb.NORM_PET:
+        title = dict(normaldb.NORM_METHODS).get(method, method)
+        raise ValueError(f"The database's normalization is '{title}': the batch can only register the PET / SPECT to "
+                         "an MR template (no CT/MR, and the database has no mean map yet).")
+    engine = norm.get("engine") or defaultEngine
+    linear, deformable = engineDefaults[engine]
+    return {"method": method, "template": norm.get("template") or defaultTemplate, "engine": engine,
+            "linear": norm.get("linear") or linear,
+            "deformable": deformable if norm.get("deformable") is None else bool(norm["deformable"]),
+            "brainMask": True if norm.get("brainMask") is None else bool(norm["brainMask"])}
+
+
+def rasArray(array, ijkToRas):
+    """A (k, j, i) volume array (as Slicer gives it) as an [x, y, z] array whose indices grow to the right, anterior
+    and superior (axis-aligned grids; oblique ones are taken to their nearest axes)."""
+    import numpy as np
+    out = np.asarray(array).transpose(2, 1, 0)         # [i, j, k]
+    directions = np.asarray(ijkToRas, dtype=float)[:3, :3]
+    order = [int(np.argmax(np.abs(directions[axis, :]))) for axis in range(3)]   # RAS axis -> ijk axis
+    if sorted(order) != [0, 1, 2]:
+        raise ValueError("The image grid is too oblique for the QC picture.")
+    out = out.transpose(order)
+    for axis in range(3):
+        if directions[axis, order[axis]] < 0:
+            out = np.flip(out, axis)
+    return out
+
+
+HOT = ((0.0, (0, 0, 0)), (0.35, (230, 0, 0)), (0.7, (255, 210, 0)), (1.0, (255, 255, 255)))
+
+
+def _hot(values):
+    import numpy as np
+    stops = np.array([s for s, _ in HOT])
+    colors = np.array([c for _, c in HOT], dtype=float)
+    return np.stack([np.interp(values, stops, colors[:, c]) for c in range(3)], axis=-1)
+
+
+def qcMontage(anatomy, pet, scale=2, opacity=0.5):
+    """RGB (uint8) picture of the PET over the anatomy (both [x, y, z] arrays of rasArray() on the same grid): axial,
+    coronal and sagittal slices through the PET's centre of mass side by side, as Slicer shows them (patient's right
+    on the left, anterior up / left)."""
+    import numpy as np
+    anatomy = np.nan_to_num(np.asarray(anatomy, dtype=np.float32))
+    pet = np.nan_to_num(np.asarray(pet, dtype=np.float32))
+    if anatomy.shape != pet.shape:
+        raise ValueError("The PET and the anatomy are not on the same grid.")
+    low, high = np.percentile(anatomy, (1, 99)) if anatomy.size else (0.0, 1.0)
+    grey = np.clip((anatomy - low) / max(high - low, 1e-6), 0, 1)
+    positive = pet[pet > 0]
+    top = float(np.percentile(positive, 99.5)) if positive.size else 1.0
+    level = np.clip(pet / max(top, 1e-6), 0, 1)
+    weights = np.where(pet > 0.25 * top, pet, 0)
+    if weights.sum() > 0:
+        centre = [int(round(float((weights.sum(axis=tuple(a for a in range(3) if a != axis)) *
+                                   np.arange(pet.shape[axis])).sum() / weights.sum()))) for axis in range(3)]
+    else:
+        centre = [n // 2 for n in pet.shape]
+    x, y, z = centre
+    # axial (anterior up, patient's right on the left), coronal (superior up), sagittal (anterior on the left)
+    pictures = []
+    for index in (np.s_[:, :, z], np.s_[:, y, :], np.s_[x, :, :]):
+        g, v = grey[index].T[::-1, ::-1], level[index].T[::-1, ::-1]     # up = +, right side of the screen = -
+        rgb = np.repeat(g[..., None] * 255.0, 3, axis=-1)
+        alpha = np.where(v > 0.2, opacity, 0.0)[..., None]
+        rgb = (1 - alpha) * rgb + alpha * _hot(v)
+        pictures.append(np.kron(rgb, np.ones((scale, scale, 1))) if scale > 1 else rgb)
+    height = max(p.shape[0] for p in pictures)
+    padded = [np.pad(p, ((0, height - p.shape[0]), (0, 4 * scale), (0, 0))) for p in pictures]
+    return np.clip(np.concatenate(padded, axis=1), 0, 255).astype(np.uint8)
