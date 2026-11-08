@@ -196,3 +196,12 @@ def test_old_header_defaults_to_pet(tmp_path):
     loaded = normaldb.readHeader(folder)
     assert loaded["modality"] == normaldb.PET
     assert normaldb.summary(folder, loaded)["modality"] == "PET"
+
+
+def test_region_settings_in_header():
+    h = header(regionAtlas="groupedBilateral", regionGrowMm=2.0, growIntoWhiteMatter=True)
+    assert normaldb.validateHeader(h) == []
+    assert normaldb.regionAtlasTitle("groupedBilateral") == "CerebrA broad regions, sides merged"
+    assert any("growth" in e for e in normaldb.validateHeader(header(regionGrowMm=-1)))
+    assert any("region atlas" in e for e in normaldb.validateHeader(header(regionAtlas="nope")))
+    assert header()["regionAtlas"] == normaldb.DEFAULT_REGION_ATLAS and header()["regionGrowMm"] == 0.0

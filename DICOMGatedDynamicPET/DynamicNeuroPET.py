@@ -67,7 +67,7 @@ WM_PROBABILITY_LIMIT = 0.5      # the regions grow only into voxels with a lower
 DEFAULT_TARGET = "Putamen"
 DEFAULT_MODEL = "SRTM"
 
-METHOD_PET, METHOD_ANATOMY = "pet", "anatomy"
+METHOD_PET, METHOD_ANATOMY, METHOD_PET_TEMPLATE = "pet", "anatomy", "petTemplate"   # the last: Static Neuro
 METHODS = ((METHOD_PET, "Register the PET to the template"),
            (METHOD_ANATOMY, "Normalize the CT/MR, apply the same transform to the PET"))
 NORMALIZATION_STEPS = (reg.SCALE_SKEW, "BSpline")      # rigid + scale + skew, then B-spline
@@ -95,8 +95,9 @@ NORMALIZATION_ITERATIVE_QUALITY = "Thorough"
 NORMALIZATION_ITERATIVE_GRID_MM = 30.0     # iterative engine: last control-point spacing (brain to template)
 # The PET is registered to the skull-stripped template by default (the scalp of the T1 has no PET counterpart);
 # the CT/MR is registered to the whole template.
-NORMALIZATION_BRAIN_MASK = {METHOD_PET: True, METHOD_ANATOMY: False}
-NORMALIZATION_INITIALIZATION = {METHOD_PET: "useMomentsAlign", METHOD_ANATOMY: "useGeometryAlign"}
+NORMALIZATION_BRAIN_MASK = {METHOD_PET: True, METHOD_ANATOMY: False, METHOD_PET_TEMPLATE: True}
+NORMALIZATION_INITIALIZATION = {METHOD_PET: "useMomentsAlign", METHOD_ANATOMY: "useGeometryAlign",
+                                METHOD_PET_TEMPLATE: "useMomentsAlign"}
 # Harden: the template's field of view with the PET voxel size (default), the template grid (1 mm), or custom
 NORMALIZATION_GRIDS = (("Keep the PET voxel size (over the template field of view)", reg.OUTPUT_PET_SPACING),
                        ("Resample to the template grid (1 mm)", reg.OUTPUT_FIXED_GRID),
@@ -246,6 +247,23 @@ class DynamicNeuroPETLogic(ScriptedLoadableModuleLogic):
                                      values["0018,0080"], values["0018,0081"], values["0018,0082"])
 
     # --- normalization -----------------------------------------------------------------------------
+    @staticmethod
+    def firstImage(sequence):
+        """A volume of the series with its geometry (the first frame)."""
+        return sequence.GetNthDataNode(0)
+
+    @staticmethod
+    def displayImage(sequence):
+        """The image shown for the series: its summed image, else the first frame."""
+        from DynamicPETRegistration import DynamicPETRegistrationLogic
+        return DynamicPETRegistrationLogic.summedVolumeOf(sequence) or sequence.GetNthDataNode(0)
+
+    @staticmethod
+    def revertHarden(undo):
+        """Undo a Harden (the record harden() returned)."""
+        from DynamicPETRegistration import DynamicPETRegistrationLogic
+        DynamicPETRegistrationLogic().revert(undo)
+
     @staticmethod
     def referenceImage(sequence):
         """The PET image registered to the template: the summed image of the series, else the frame of the highest
@@ -574,7 +592,7 @@ class DynamicNeuroPETLogic(ScriptedLoadableModuleLogic):
 
     def loadRegions(self, labelsPath, entries, referencePath=None, referenceName=None, referenceEntries=None,
                     name=REGIONS_NAME, overlayPath=None, referenceOverlayPath=None, growMm=0.0, erodeReferenceMm=0.0,
-                    allowedMask=None, target=None):
+                    allowedMask=None, target=None, referenceMaskPath=None):
         """A segmentation of the atlas labels (labelsPath, entries [(value, name, color)]) with their names. The
         reference region referenceName comes from referencePath (another version of the atlas on the same grid, e.g.
         the bilateral one, with its referenceEntries) as a segment of its own, or, when referencePath is labelsPath
@@ -583,7 +601,9 @@ class DynamicNeuroPETLogic(ScriptedLoadableModuleLogic):
         voxels (each to the nearest region, so they never overlap; only where allowedMask, when given on the same
         grid; ventricles fixed; the overlays not grown). erodeReferenceMm: the reference region eroded (then always a
         segment of its own, made from the atlas before growing). target: a segmentation node to fill (its segments are
-        replaced) instead of a new one. Returns (segmentation node, reference segment ID or None)."""
+        replaced) instead of a new one. referenceMaskPath: the reference region from a mask file on the atlas grid
+        (a normal database's reference mask, used as it is) instead of referenceName / referencePath. Returns
+        (segmentation node, reference segment ID or None)."""
         scene = slicer.mrmlScene
         array, source = self._loadLabels(labelsPath)
         colorNode = labelNode = referenceNode = overlayNode = None
@@ -635,7 +655,16 @@ class DynamicNeuroPETLogic(ScriptedLoadableModuleLogic):
                 scene.RemoveNode(overlayNode)
                 overlayNode = None
             referenceId = None
-            if referenceName:
+            if referenceMaskPath:
+                referenceArray, referenceNode = self._loadLabels(referenceMaskPath)
+                if referenceArray.shape != array.shape:
+                    raise ValueError("The reference mask is not on the grid of the region atlas (MNI 2009c 1 mm).")
+                if not (referenceArray > 0).any():
+                    raise ValueError("The reference mask is empty.")
+                referenceId = self._addMaskSegment(segmentation, referenceArray > 0, labelNode,
+                                                   (referenceName or "Reference") + REFERENCE_SUFFIX,
+                                                   (0.85, 0.85, 0.2))
+            elif referenceName:
                 sameAtlas = referencePath is None or os.path.normcase(os.path.abspath(referencePath)) == \
                     os.path.normcase(os.path.abspath(labelsPath))
                 if sameAtlas and erodeReferenceMm <= 0 and growMm <= 0:
@@ -710,7 +739,8 @@ class DynamicNeuroPETLogic(ScriptedLoadableModuleLogic):
         return allowed
 
     def loadAtlasRegions(self, atlas, targetKind=None, referenceKind=None, referenceName=None, growMm=GROW_MM,
-                         erodeReferenceMm=ERODE_REFERENCE_MM, growIntoWhiteMatter=False, target=None):
+                         erodeReferenceMm=ERODE_REFERENCE_MM, growIntoWhiteMatter=False, target=None,
+                         referenceMaskPath=None):
         """Regions of the atlas folder (neuro.findAtlasFiles): the target regions from one CerebrA version, the
         reference region from another (default: the left and right regions, the bilateral cerebellar grey matter
         as the reference). The CerebrA with pons is used when it is in the folder (its pons as segments of their
@@ -730,7 +760,8 @@ class DynamicNeuroPETLogic(ScriptedLoadableModuleLogic):
         allowed = self.growthMask(atlas, growIntoWhiteMatter) if growMm > 0 else None
         return self.loadRegions(labelsPath, entries, referencePath, referenceName, referenceEntries,
                                 overlayPath=overlayPath, referenceOverlayPath=referenceOverlayPath, growMm=growMm,
-                                erodeReferenceMm=erodeReferenceMm, allowedMask=allowed, target=target)
+                                erodeReferenceMm=erodeReferenceMm, allowedMask=allowed, target=target,
+                                referenceMaskPath=referenceMaskPath)
 
     @staticmethod
     def _addMaskSegment(segmentation, mask, geometryNode, name, color):
@@ -827,7 +858,19 @@ def _button(text, role="action"):
 
 class DynamicNeuroPETWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
     """Step bar on top, the page of the current step below: the module's own pages (Data, Normalization, Regions)
-    and the panels of the PET4D modules (Motion Correction, Registration, Modeling)."""
+    and the panels of the PET4D modules (Motion Correction, Registration, Modeling). The Static Neuro PET/SPECT
+    module derives from it (its own steps, logic, toolbar and pages)."""
+
+    MODULE_NAME = "DynamicNeuroPET"
+    STEPS = STEPS
+    LOGIC_CLASS = None              # None: DynamicNeuroPETLogic
+    TOOLBAR_NAME = TOOLBAR_OBJECT_NAME
+    TOOLBAR_TITLE = "Neuro Receptor PET"
+    TOOLBAR_TOOLTIP = "Dynamic Neuro Receptor PET: back to the first step"
+    ICON = ICON_PATH
+    STEP_AFTER_REGIONS = STEP_MODEL
+    NORM_METHODS = METHODS
+    LOAD_REGIONS_TEXT = "Load regions and go to modeling"
 
     def __init__(self, parent=None):
         ScriptedLoadableModuleWidget.__init__(self, parent)
@@ -835,7 +878,7 @@ class DynamicNeuroPETWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
 
     def setup(self):
         ScriptedLoadableModuleWidget.setup(self)
-        self.logic = DynamicNeuroPETLogic()
+        self.logic = (self.LOGIC_CLASS or DynamicNeuroPETLogic)()
         self.current = STEP_DATA
         self.pages = {}            # step key -> page widget (own pages)
         self.embedded = {}         # step key -> widget representation of the embedded module
@@ -856,7 +899,7 @@ class DynamicNeuroPETWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             barLayout = qt.QGridLayout(bar)
             barLayout.setContentsMargins(4, 4, 4, 4)
             barLayout.setSpacing(4)
-            for index, (key, _, title, explanation) in enumerate(STEPS):
+            for index, (key, _, title, explanation) in enumerate(self.STEPS):
                 button = self._stepButton(index, key, title, explanation)
                 button.setSizePolicy(qt.QSizePolicy.Expanding, qt.QSizePolicy.Fixed)
                 barLayout.addWidget(button, index // 3, index % 3)
@@ -920,32 +963,32 @@ class DynamicNeuroPETWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             mainWindow = None
         if mainWindow is None:
             return None
-        for old in [w for w in mainWindow.findChildren(qt.QToolBar) if w.objectName == TOOLBAR_OBJECT_NAME]:
+        for old in [w for w in mainWindow.findChildren(qt.QToolBar) if w.objectName == self.TOOLBAR_NAME]:
             old.setVisible(False)
-            old.objectName = TOOLBAR_OBJECT_NAME + "Retired"
+            old.objectName = self.TOOLBAR_NAME + "Retired"
             try:
                 old.toggleViewAction().setVisible(False)
             except Exception:
                 pass
-        toolbar = qt.QToolBar("Neuro receptor PET workflow", mainWindow)
-        toolbar.objectName = TOOLBAR_OBJECT_NAME
+        toolbar = qt.QToolBar(self.TOOLBAR_TITLE + " workflow", mainWindow)
+        toolbar.objectName = self.TOOLBAR_NAME
         mainWindow.addToolBarBreak()
         mainWindow.addToolBar(toolbar)
         toolbar.setMovable(True)
         toolbar.setVisible(False)
         title = qt.QToolButton()
-        title.setText("Neuro Receptor PET")
+        title.setText(self.TOOLBAR_TITLE)
         title.setToolButtonStyle(qt.Qt.ToolButtonTextBesideIcon)
         title.setAutoRaise(True)
         title.setFocusPolicy(qt.Qt.NoFocus)
         title.setStyleSheet("QToolButton { font-weight: bold; }")
-        if os.path.exists(ICON_PATH):
-            title.setIcon(qt.QIcon(ICON_PATH))
-        title.toolTip = "Dynamic Neuro Receptor PET: back to the first step"
+        if os.path.exists(self.ICON):
+            title.setIcon(qt.QIcon(self.ICON))
+        title.toolTip = self.TOOLBAR_TOOLTIP
         title.connect("clicked(bool)", lambda checked: self.showStep(STEP_DATA))
         toolbar.addWidget(title)
         toolbar.addSeparator()
-        for index, (key, _, stepTitle, explanation) in enumerate(STEPS):
+        for index, (key, _, stepTitle, explanation) in enumerate(self.STEPS):
             if index > 0:
                 arrow = qt.QLabel("\u203a")
                 arrow.setStyleSheet("color: #8f969c; font-weight: bold; padding: 0 2px;")
@@ -1133,7 +1176,7 @@ class DynamicNeuroPETWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         box = qt.QGroupBox("Normalization")
         form = qt.QFormLayout(box)
         self.methodCombo = qt.QComboBox()
-        for key, title in METHODS:
+        for key, title in self.NORM_METHODS:
             self.methodCombo.addItem(title, key)
         self.methodCombo.toolTip = (
             "PET: the summed image (or the frame of the highest activity) is registered to the template. CT/MR: the "
@@ -1149,6 +1192,7 @@ class DynamicNeuroPETWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.templateNote = qt.QLabel()
         self.templateNote.wordWrap = True
         form.addRow(self.templateNote)
+        self._addTemplateRows(form)
         self.maskCheck = qt.QCheckBox("Skull-stripped template (brain mask)")
         self.maskCheck.checked = NORMALIZATION_BRAIN_MASK[METHOD_PET]
         self.maskCheck.toolTip = ("Register to the template with the voxels outside its brain mask "
@@ -1323,6 +1367,9 @@ class DynamicNeuroPETWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.onMethodChanged()
         self.onNormEngineChanged()
         return page
+
+    def _addTemplateRows(self, form):
+        """More rows under the template choice (the Static Neuro module's normal database template)."""
 
     def onAtlasFolderChanged(self, folder, save=True):
         folder = folder or ""
@@ -1583,11 +1630,8 @@ class DynamicNeuroPETWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         if self.normResult is None or self.normSession is None or sequence is None:
             return
         template, method = self.normResult["template"], self.normResult["method"]
-        petSpacing = reg.gridSpacing(_ijkToRas(sequence.GetNthDataNode(0)))
-        text = (f"Resample the {sequence.GetNumberOfDataNodes()} frames of '{sequence.GetName()}' (and its summed "
-                f"image) through the normalization onto the field of view of the template '{template.GetName()}'."
-                + ("\nThe CT/MR is normalized too (on the template grid)." if method == METHOD_ANATOMY else "")
-                + "\n\nSave separately (default) keeps the series in the patient space next to the normalized one.")
+        petSpacing = reg.gridSpacing(_ijkToRas(self.logic.firstImage(sequence)))
+        text = self._normHardenText(sequence, template, method)
         choice = hardenDialog("Harden normalization", text, NORMALIZATION_GRIDS, petSpacing,
                               [("Save separately", reg.SAVE_SEPARATELY), ("Overwrite", reg.OVERWRITE)],
                               slicer.util.mainWindow())
@@ -1622,10 +1666,16 @@ class DynamicNeuroPETWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self._updateNormButtons()
         self.refresh()
 
+    @staticmethod
+    def _normHardenText(sequence, template, method):
+        return (f"Resample the {sequence.GetNumberOfDataNodes()} frames of '{sequence.GetName()}' (and its summed "
+                f"image) through the normalization onto the field of view of the template '{template.GetName()}'."
+                + ("\nThe CT/MR is normalized too (on the template grid)." if method == METHOD_ANATOMY else "")
+                + "\n\nSave separately (default) keeps the series in the patient space next to the normalized one.")
+
     def _showNormalized(self, sequence, template):
         """The normalized summed image over the template in the standard views."""
-        from DynamicPETRegistration import DynamicPETRegistrationLogic
-        summed = DynamicPETRegistrationLogic.summedVolumeOf(sequence) or sequence.GetNthDataNode(0)
+        summed = self.logic.displayImage(sequence)
         try:
             slicer.app.layoutManager().setLayout(slicer.vtkMRMLLayoutNode.SlicerLayoutFourUpView)
             slicer.util.setSliceViewerLayers(background=template, foreground=summed, foregroundOpacity=0.5,
@@ -1639,10 +1689,9 @@ class DynamicNeuroPETWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             return
         if self.normUndo is None:
             return
-        from DynamicPETRegistration import DynamicPETRegistrationLogic
         record = self.normUndo
         try:
-            DynamicPETRegistrationLogic().revert(record["undo"])
+            self.logic.revertHarden(record["undo"])
         except Exception as error:
             logging.exception("Neuro: could not revert the normalization")
             slicer.util.errorDisplay(f"Could not revert the normalization:\n{error}")
@@ -1726,7 +1775,7 @@ class DynamicNeuroPETWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             "changing the atlas or the growth) does not pile up segmentations. 'Create new' makes a new one.")
         self.regionsTargetSelector.noneDisplay = "Create new segmentation"
         form.addRow("Output segmentation:", self.regionsTargetSelector)
-        self.loadRegionsButton = _button("Load regions and go to modeling")
+        self.loadRegionsButton = _button(self.LOAD_REGIONS_TEXT)
         form.addRow(self.loadRegionsButton)
         self.regionsLabel = qt.QLabel()
         self.regionsLabel.wordWrap = True
@@ -1767,11 +1816,11 @@ class DynamicNeuroPETWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         files = neuro.CEREBRA_LABELS in self.atlas and neuro.CEREBRA_CSV in self.atlas
         text = []
         if not normalized:
-            text.append("<span style='color:#c0392b'>The series is not normalized yet (step 4): the CerebrA regions "
-                        "lie in the template space.</span>")
+            text.append("<span style='color:#c0392b'>The image is not normalized yet (Normalization step): the "
+                        "CerebrA regions lie in the template space.</span>")
         if not files:
             text.append("<span style='color:#c0392b'>mni_icbm152_CerebrA_tal_nlin_sym_09c.nii and "
-                        "CerebrA_LabelDetails.csv are not in the atlas folder (step 4).</span>")
+                        "CerebrA_LabelDetails.csv are not in the atlas folder (Normalization step).</span>")
         segmentation = self.node("Segmentation")
         if segmentation is not None:
             text.append(f"Loaded: '{segmentation.GetName()}'.")
@@ -1788,16 +1837,17 @@ class DynamicNeuroPETWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         if sequence is None:
             return
         if not sequence.GetAttribute(NEURO_PREFIX + "Template") and not slicer.util.confirmOkCancelDisplay(
-                "The series is not normalized (step 4), so the CerebrA regions will not lie on the brain. Load them "
-                "anyway?", windowTitle="Regions"):
+                "The image is not normalized (Normalization step), so the CerebrA regions will not lie on the brain. "
+                "Load them anyway?", windowTitle="Regions"):
+            return
+        try:
+            arguments = self._regionsArguments()
+        except ValueError as error:
+            slicer.util.errorDisplay(str(error), windowTitle="Regions")
             return
         qt.QApplication.setOverrideCursor(qt.Qt.WaitCursor)
         try:
-            segmentation, referenceId = self.logic.loadAtlasRegions(
-                self.atlas, self.targetAtlasCombo.currentData, self.referenceAtlasCombo.currentData,
-                self.referenceRegionCombo.currentText or None, float(self.growSpin.value), float(self.erodeSpin.value),
-                growIntoWhiteMatter=bool(self.growWhiteMatterCheck.checked),
-                target=self.regionsTargetSelector.currentNode())
+            segmentation, referenceId = self.logic.loadAtlasRegions(self.atlas, **arguments)
         except Exception as error:
             logging.exception("Neuro: could not load the regions")
             slicer.util.errorDisplay(f"Could not load the CerebrA regions:\n{error}")
@@ -1816,12 +1866,19 @@ class DynamicNeuroPETWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.regionsLabel.text = (f"'{segmentation.GetName()}': {count} segments"
                                   + (f", reference '{reference}'" if reference else ", no reference region") + "."
                                   + (f" (The earlier '{old.GetName()}' is still in the scene.)" if old else ""))
-        self.showStep(STEP_MODEL)
+        self.showStep(self.STEP_AFTER_REGIONS)
+
+    def _regionsArguments(self):
+        """Keyword arguments of logic.loadAtlasRegions() from the page."""
+        return {"targetKind": self.targetAtlasCombo.currentData, "referenceKind": self.referenceAtlasCombo.currentData,
+                "referenceName": self.referenceRegionCombo.currentText or None,
+                "growMm": float(self.growSpin.value), "erodeReferenceMm": float(self.erodeSpin.value),
+                "growIntoWhiteMatter": bool(self.growWhiteMatterCheck.checked),
+                "target": self.regionsTargetSelector.currentNode()}
 
     # --- embedded modules --------------------------------------------------------------------------
-    @staticmethod
-    def _moduleName(key):
-        return next(m for k, m, _, _ in STEPS if k == key)
+    def _moduleName(self, key):
+        return next(m for k, m, _, _ in self.STEPS if k == key)
 
     def stepPanel(self, key):
         """The page of a step: an own page, or the widget representation of the embedded module (taken back into
@@ -1950,7 +2007,7 @@ class DynamicNeuroPETWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         """Leaving a step with a result that is not hardened: offer Harden. False to stay on the step."""
         if not self.pendingHarden(key):
             return True
-        title = dict((k, t) for k, _, t, _ in STEPS)[key]
+        title = dict((k, t) for k, _, t, _ in self.STEPS)[key]
         box = qt.QMessageBox(slicer.util.mainWindow())
         box.setIcon(qt.QMessageBox.Question)
         box.setWindowTitle(title)
@@ -1995,12 +2052,12 @@ class DynamicNeuroPETWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             self._syncDataPage()
         if key in self.embedded:
             self._prepareStep(key)
-        if enterStep and slicer.util.selectedModule() == "DynamicNeuroPET":
+        if enterStep and slicer.util.selectedModule() == self.MODULE_NAME:
             self._callStep(key, "enter")
         self.refresh()
 
     def moveStep(self, delta):
-        keys = [k for k, _, _, _ in STEPS]
+        keys = [k for k, _, _, _ in self.STEPS]
         index = keys.index(self.current) + delta
         if 0 <= index < len(keys):
             self.showStep(keys[index])
@@ -2036,13 +2093,13 @@ class DynamicNeuroPETWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             return
         self._defaultMethod()
         states = self.stepStates()
-        for number, (key, _, title, explanation) in enumerate(STEPS, start=1):
+        for number, (key, _, title, explanation) in enumerate(self.STEPS, start=1):
             button = self.stepButtons[key]
             button.setIcon(_badge(states[key], number))
             button.checked = key == self.current
             if key == self.current:
                 self.titleLabel.text = f"<b>{number}. {title}</b> - {explanation}"
-        keys = [k for k, _, _, _ in STEPS]
+        keys = [k for k, _, _, _ in self.STEPS]
         index = keys.index(self.current)
         self.backButton.enabled = index > 0
         self.nextButton.enabled = index < len(keys) - 1

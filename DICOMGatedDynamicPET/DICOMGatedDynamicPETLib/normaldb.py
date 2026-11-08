@@ -112,6 +112,13 @@ def tracers(nuclide, modality=None):
 def mapTypes(modality=PET):
     return MAP_TYPES_BY_MODALITY.get(modality, MAP_TYPES_BY_MODALITY[PET])
 
+# Regions of the workflows (the Neuro modules' region atlases, same keys) and how they are drawn; stored in the
+# header so the subjects added and the patients compared use the same regions
+REGION_ATLASES = (("lateral", "CerebrA, left and right separate"), ("bilateral", "CerebrA bilateral"),
+                  ("grouped", "CerebrA broad regions, left and right"),
+                  ("groupedBilateral", "CerebrA broad regions, sides merged"))
+DEFAULT_REGION_ATLAS = "lateral"
+
 MASTER = "master"
 MASTER_TITLE = "Master (all subjects)"
 IMAGE_EXTENSIONS = (".nii.gz", ".nii", ".nrrd", ".nhdr", ".mha", ".mhd")
@@ -135,6 +142,10 @@ def imageExtension(path):
         if lower.endswith(ext):
             return ext
     return ""
+
+
+def regionAtlasTitle(key):
+    return dict(REGION_ATLASES).get(key, key or "")
 
 
 def referenceTitle(key):
@@ -249,6 +260,9 @@ def newHeader(name, mode=STATIC, kind=USER_DEFINED, **fields):
         "mapType": MAP_SUVR,
         "smoothingFwhmMm": 0.0,
         "referenceErosionMm": 0.0,
+        "regionAtlas": DEFAULT_REGION_ATLAS,
+        "regionGrowMm": 0.0,
+        "growIntoWhiteMatter": False,
         "ageStratified": False,
         "ageGroups": [],
         "scanner": "",
@@ -293,6 +307,10 @@ def validateHeader(header):
         errors.append("The smoothing cannot be negative")
     if float(header.get("referenceErosionMm") or 0) < 0:
         errors.append("The reference erosion cannot be negative")
+    if float(header.get("regionGrowMm") or 0) < 0:
+        errors.append("The region growth cannot be negative")
+    if header.get("regionAtlas") not in dict(REGION_ATLASES):
+        errors.append("Unknown region atlas")
     if header.get("ageStratified"):
         errors.extend(validateAgeGroups(header.get("ageGroups")))
     return errors
