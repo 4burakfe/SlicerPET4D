@@ -600,6 +600,58 @@ def createDatabase(root, header):
     return folder
 
 
+# Settings that can be edited after a database is made; those of a predefined database's maps stay as they are
+EDITABLE_KEYS = ("name", "modality", "nuclide", "tracer", "acquisition", "segmentation", "referenceRegion",
+                 "referenceErosionMm", "smoothingFwhmMm", "mapType", "regionAtlas", "regionGrowMm", "growInto",
+                 "normalization", "ageStratified", "ageGroups", "scanner", "description")
+PREDEFINED_FIXED_KEYS = ("referenceRegion", "referenceErosionMm", "smoothingFwhmMm", "mapType", "ageStratified",
+                         "ageGroups")
+STATISTICS_KEYS = ("referenceRegion", "referenceErosionMm", "smoothingFwhmMm", "ageStratified", "ageGroups")
+
+
+def editedHeader(old, new):
+    """(header, changes) of a database whose settings are edited: the editable keys from new (not the fixed ones of a
+    predefined database), the rest (kind, mode, statistics, reference mask, version, ...) kept. changes: {"name",
+    "reference" (region or erosion: the mask and the subjects' SUVR maps are to be made again), "statistics" (the
+    mean / SD maps out of date), "normalization", "keys" [changed keys]}. Raises ValueError for a header with errors."""
+    header = json.loads(json.dumps(old))
+    fixed = PREDEFINED_FIXED_KEYS if old.get("kind") == PREDEFINED else ()
+    changed = []
+    for key in EDITABLE_KEYS:
+        if key in fixed or key not in new:
+            continue
+        if json.dumps(new[key], sort_keys=True) != json.dumps(old.get(key), sort_keys=True):
+            header[key] = json.loads(json.dumps(new[key]))
+            changed.append(key)
+    header["name"] = str(header.get("name", "")).strip()
+    if not header["ageStratified"]:
+        header["ageGroups"] = []
+    errors = validateHeader(header)
+    if errors:
+        raise ValueError("\n".join(errors))
+    changes = {"name": "name" in changed and safeName(header["name"]) != safeName(old.get("name", "")),
+               "reference": any(k in changed for k in ("referenceRegion", "referenceErosionMm")),
+               "statistics": any(k in changed for k in STATISTICS_KEYS),
+               "normalization": "normalization" in changed, "keys": changed}
+    stats = header.setdefault("statistics", {"computed": None, "stale": False, "groups": {}})
+    if changes["statistics"] and stats.get("computed"):
+        stats["stale"] = True
+    return header, changes
+
+
+def renameDatabase(folder, root, name):
+    """Move a database folder to the folder of its new name in root. Returns the new folder."""
+    target = databaseFolder(root, name)
+    if os.path.normcase(os.path.realpath(target)) == os.path.normcase(os.path.realpath(folder)):
+        return folder
+    if os.path.exists(target):
+        raise ValueError(f"A database or folder named '{os.path.basename(target)}' already exists in {root}")
+    if not _inside(folder, root):
+        raise ValueError(f"{folder} is not in the database folder {root}")
+    os.rename(folder, target)
+    return target
+
+
 def _inside(path, root):
     path, root = os.path.realpath(path), os.path.realpath(root)
     return os.path.commonpath([path, root]) == root and path != root

@@ -279,3 +279,31 @@ def test_remove_subjects(tmp_path):
     assert os.path.exists(os.path.join(folder, "subjects", "S2_SUVR.nii.gz"))
     assert normaldb.readHeader(folder)["statistics"]["stale"] is True
     assert normaldb.removeSubjects(folder, ["S1"]) == []
+
+
+def test_edit_header(tmp_path):
+    old = header(name="FDG normals", smoothingFwhmMm=8.0)
+    old["statistics"]["computed"] = "2026-11-08T10:00:00"
+    old["referenceMask"] = normaldb.REFERENCE_MASK_NAME
+    new = dict(old, description="cnpet", normalization=dict(normaldb.emptyNormalization(), template="GM"),
+               kind="predefined", referenceMask="x")
+    h, changes = normaldb.editedHeader(old, new)
+    assert h["description"] == "cnpet" and h["normalization"]["template"] == "GM"
+    assert h["kind"] == normaldb.USER_DEFINED and h["referenceMask"] == normaldb.REFERENCE_MASK_NAME
+    assert changes["normalization"] and not changes["reference"] and not changes["statistics"]
+    assert h["statistics"]["stale"] is False
+    h, changes = normaldb.editedHeader(old, dict(old, referenceRegion=normaldb.REF_PONS, name="FDG 2"))
+    assert changes["reference"] and changes["statistics"] and changes["name"] and h["statistics"]["stale"] is True
+    with pytest.raises(ValueError):
+        normaldb.editedHeader(old, dict(old, regionGrowMm=-1))
+    predefined = header(name="pre", smoothingFwhmMm=8.0)
+    predefined["kind"] = normaldb.PREDEFINED
+    h, changes = normaldb.editedHeader(predefined, dict(predefined, smoothingFwhmMm=4.0, scanner="Biograph"))
+    assert h["smoothingFwhmMm"] == 8.0 and h["scanner"] == "Biograph" and changes["keys"] == ["scanner"]
+    folder = normaldb.createDatabase(str(tmp_path), header(name="db"))
+    moved = normaldb.renameDatabase(folder, str(tmp_path), "db two")
+    assert os.path.isdir(moved) and not os.path.exists(folder) and normaldb.isDatabase(moved)
+    assert normaldb.renameDatabase(moved, str(tmp_path), "db two") == moved
+    other = normaldb.createDatabase(str(tmp_path), header(name="other"))
+    with pytest.raises(ValueError, match="already exists"):
+        normaldb.renameDatabase(other, str(tmp_path), "db two")

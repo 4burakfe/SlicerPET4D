@@ -217,6 +217,63 @@ class NeuroPETDatabaseManagerLogic(ScriptedLoadableModuleLogic):
         header["referenceMask"] = relative
         return relative
 
+    def editDatabase(self, folder, root, header, changes, atlasFolder="", customMask=None, progress=None):
+        """Save edited settings (normaldb.editedHeader): a new reference region makes the reference mask (user
+        defined: and the subjects' SUVR maps) again, a new name renames the folder. Returns the folder."""
+        if changes.get("reference") and header.get("kind") == normaldb.USER_DEFINED:
+            sameCustom = (header.get("referenceRegion") == normaldb.REF_CUSTOM and not customMask
+                          and header.get("referenceMask"))
+            if not sameCustom:
+                self.writeReferenceMask(folder, header, atlasFolder, customMask)
+            normaldb.writeHeader(folder, header)
+            self.recomputeRatios(folder, header, progress)
+        else:
+            normaldb.writeHeader(folder, header)
+        if changes.get("name"):
+            folder = normaldb.renameDatabase(folder, root, header["name"])
+        return folder
+
+    @staticmethod
+    def recomputeRatios(folder, header, progress=None):
+        """The SUVR maps of the subjects of a user defined database again from their SUV maps and its reference
+        mask (after the reference region changed); their reference mean and region in subjects.csv too."""
+        from DICOMGatedDynamicPETLib import staticneuro as sn
+        subjects = normaldb.readSubjects(folder)
+        if not subjects:
+            return
+        maskPath = sn.referenceMaskPath(folder, header)
+        if not maskPath:
+            raise ValueError("The database has no reference mask.")
+        maskNode = slicer.util.loadLabelVolume(maskPath, {"show": False})
+        try:
+            mask = slicer.util.arrayFromVolume(maskNode) > 0
+        finally:
+            slicer.mrmlScene.RemoveNode(maskNode)
+        title = normaldb.referenceTitle(header.get("referenceRegion"))
+        problems = []
+        for index, subject in enumerate(subjects):
+            if progress is not None:
+                progress(index, len(subjects), f"SUVR map of {subject.get('id')}")
+            suvPath = os.path.join(folder, subject.get("suvFile") or "")
+            if not subject.get("suvFile") or not os.path.isfile(suvPath):
+                problems.append(f"{subject.get('id')}: no SUV map")
+                continue
+            node = slicer.util.loadVolume(suvPath, {"show": False})
+            try:
+                ratio, mean = sn.ratioMap(slicer.util.arrayFromVolume(node), mask)
+                slicer.util.updateVolumeFromArray(node, ratio)
+                suvrFile = subject.get("suvrFile") or normaldb.subjectFileNames(subject.get("id"))[1]
+                if not slicer.util.saveNode(node, os.path.join(folder, suvrFile)):
+                    raise ValueError("could not write the SUVR map")
+                subject.update(suvrFile=suvrFile, referenceMean=f"{mean:.6g}", reference=title)
+            except Exception as error:
+                problems.append(f"{subject.get('id')}: {error}")
+            finally:
+                slicer.mrmlScene.RemoveNode(node)
+        normaldb.writeSubjects(folder, subjects)
+        if problems:
+            raise ValueError("Some SUVR maps were not made again:\n" + "\n".join(problems[:20]))
+
     def createUserDefined(self, root, header, atlasFolder, customMask=None):
         """New empty user defined database with its reference mask. Returns the folder."""
         import shutil
@@ -541,6 +598,54 @@ class HeaderForm:
                           "sd": self.ageTable.cellWidget(row, 5).currentPath}
         return maps
 
+    def setHeader(self, header, fixed=()):
+        """The fields from an existing database's header (Edit settings); the keys in fixed are shown but locked."""
+        def pick(combo, value, editable=False):
+            index = combo.findData(value) if combo.findData(value) >= 0 else combo.findText(str(value or ""))
+            if index >= 0:
+                combo.setCurrentIndex(index)
+            elif editable:
+                combo.setEditText(str(value or ""))
+
+        self.nameEdit.text = header.get("name", "")
+        pick(self.modalityCombo, header.get("modality"))
+        self._updateModality()
+        pick(self.nuclideCombo, header.get("nuclide"), editable=True)
+        self._updateTracers(self.nuclideCombo.currentText)
+        pick(self.tracerCombo, header.get("tracer"), editable=True)
+        acquisition = header.get("acquisition") or {}
+        self.startSpin.value = float(acquisition.get("startMinutes") or 0)
+        self.durationSpin.value = float(acquisition.get("durationMinutes") or 0)
+        self.segmentationEdit.text = header.get("segmentation", "")
+        pick(self.referenceCombo, header.get("referenceRegion"))
+        self.smoothingSpin.value = float(header.get("smoothingFwhmMm") or 0)
+        self.erosionSpin.value = float(header.get("referenceErosionMm") or 0)
+        pick(self.regionAtlasCombo, header.get("regionAtlas"))
+        self.growSpin.value = float(header.get("regionGrowMm") or 0)
+        pick(self.growIntoCombo, normaldb.growInto(header))
+        norm = dict(normaldb.emptyNormalization(), **(header.get("normalization") or {}))
+        for combo, key in ((self.normMethodCombo, "method"), (self.normTemplateCombo, "template"),
+                           (self.normEngineCombo, "engine"), (self.normLinearCombo, "linear")):
+            pick(combo, norm.get(key) or "")
+        for combo, key in ((self.normDeformableCombo, "deformable"), (self.normMaskCombo, "brainMask")):
+            pick(combo, "" if norm.get(key) is None else ("yes" if norm[key] else "no"))
+        self._updateNormTemplate()
+        self.ageTable.setRowCount(self._firstGroupRow())
+        for group in header.get("ageGroups") or []:
+            self._addRow(group.get("name", ""), "" if group.get("min") is None else f"{group['min']:g}",
+                         "" if group.get("max") is None else f"{group['max']:g}")
+        self.ageCheck.checked = bool(header.get("ageStratified"))
+        self._updateAge()
+        self.scannerEdit.text = header.get("scanner", "")
+        self.descriptionEdit.setPlainText(header.get("description", ""))
+        self._updateReference()
+        widgets = {"referenceRegion": [self.referenceCombo], "referenceErosionMm": [self.erosionSpin],
+                   "smoothingFwhmMm": [self.smoothingSpin],
+                   "ageStratified": [self.ageCheck, self.ageTable, self.addGroupButton, self.removeGroupButton]}
+        for key in fixed:
+            for widget in widgets.get(key, []):
+                widget.enabled = False
+
     def _updateNormTemplate(self):
         """The template counts for the PET/SPECT to MR template method (or a method not specified) only."""
         method = self.normMethodCombo.itemData(self.normMethodCombo.currentIndex)
@@ -675,14 +780,18 @@ class NeuroPETDatabaseManagerWidget(ScriptedLoadableModuleWidget):
         grid.addWidget(self.createButton, 0, 0)
         grid.addWidget(self.predefinedButton, 0, 1)
         self.removeSubjectsButton = qt.QPushButton("Remove subjects...")
+        self.editButton = qt.QPushButton("Edit settings...")
+        self.editButton.toolTip = ("Change the settings of the selected database (name, tracer, reference region, "
+                                   "region and normalization settings, age groups, notes).")
         self.removeSubjectsButton.toolTip = ("Remove subjects (e.g. badly normalized ones, after the QC pictures) "
                                              "from the selected user defined database, with their maps.")
         grid.addWidget(self.batchButton, 1, 0)
         grid.addWidget(self.removeSubjectsButton, 1, 1)
-        grid.addWidget(self.exportButton, 2, 0)
-        grid.addWidget(self.deleteButton, 2, 1)
-        grid.addWidget(self.openButton, 3, 0)
-        grid.addWidget(self.refreshButton, 3, 1)
+        grid.addWidget(self.editButton, 2, 0)
+        grid.addWidget(self.exportButton, 2, 1)
+        grid.addWidget(self.deleteButton, 3, 0)
+        grid.addWidget(self.openButton, 3, 1)
+        grid.addWidget(self.refreshButton, 4, 0, 1, 2)
         layout.addLayout(grid)
 
         self.table.connect("itemSelectionChanged()", self._updateSelection)
@@ -690,6 +799,7 @@ class NeuroPETDatabaseManagerWidget(ScriptedLoadableModuleWidget):
         self.predefinedButton.connect("clicked()", self.onAddPredefined)
         self.exportButton.connect("clicked()", self.onExport)
         self.batchButton.connect("clicked()", self.onBatchAdd)
+        self.editButton.connect("clicked()", self.onEdit)
         self.removeSubjectsButton.connect("clicked()", self.onRemoveSubjects)
         self.deleteButton.connect("clicked()", self.onDelete)
         self.openButton.connect("clicked()", self.onOpenFolder)
@@ -748,6 +858,7 @@ class NeuroPETDatabaseManagerWidget(ScriptedLoadableModuleWidget):
         self.createButton.enabled = rootOk
         self.predefinedButton.enabled = rootOk
         self.deleteButton.enabled = folder is not None
+        self.editButton.enabled = folder is not None
         self.openButton.enabled = rootOk
         self.exportButton.enabled = folder is not None and header.get("kind") == normaldb.USER_DEFINED
         self.batchButton.enabled = self.exportButton.enabled
@@ -916,6 +1027,95 @@ class NeuroPETDatabaseManagerWidget(ScriptedLoadableModuleWidget):
         except Exception:
             return
         slicer.util.infoDisplay(f"Saved {path}", windowTitle="Neuro PET Database Manager")
+
+    def onEdit(self):
+        folder, old = self.selected()
+        if not folder:
+            return
+        predefined = old.get("kind") == normaldb.PREDEFINED
+        dialog, layout, buttons = _scrollDialog(f"Edit '{old.get('name')}'", slicer.util.mainWindow())
+        count = normaldb.subjectCount(folder, old)
+        info = qt.QLabel(
+            ("A predefined database: the settings of its mean / SD maps (reference region, smoothing, age groups) "
+             "stay as they are." if predefined else
+             f"{count} subject(s). A new reference region (or erosion) makes the reference mask again and the SUVR "
+             "maps of the subjects from their SUV maps; reference, smoothing or age group changes put the mean / SD "
+             "maps out of date. A new name renames the folder."))
+        info.wordWrap = True
+        layout.addWidget(info)
+        form = HeaderForm(layout, predefined=False, atlasFolder=self.logic.atlasFolder())
+        form.setHeader(old, normaldb.PREDEFINED_FIXED_KEYS if predefined else ())
+        layout.addStretch(1)
+        save = buttons.addButton("Save", qt.QDialogButtonBox.AcceptRole)
+        buttons.addButton(qt.QDialogButtonBox.Cancel)
+        buttons.connect("rejected()", dialog.reject)
+        done = {}
+
+        def accept():
+            try:
+                header, changes = normaldb.editedHeader(old, form.header())
+            except ValueError as error:
+                _error(dialog, str(error))
+                return
+            if not changes["keys"]:
+                dialog.reject()
+                return
+            atlasFolder = form.atlasPath.currentPath
+            customPath = form.maskPath.currentPath
+            notes = []
+            if changes["reference"] and not predefined:
+                if header["referenceRegion"] == normaldb.REF_CUSTOM:
+                    if not customPath and old.get("referenceRegion") != normaldb.REF_CUSTOM:
+                        _error(dialog, "Pick the custom reference mask file.")
+                        return
+                else:
+                    problem = self.logic.maskSourceProblem(header["referenceRegion"], atlasFolder)
+                    if problem:
+                        _error(dialog, problem + " - pick the Neuro atlas folder.")
+                        return
+                notes.append("The reference mask is made again" + (f" and the SUVR maps of the {count} subject(s) "
+                                                                   "computed again from their SUV maps"
+                                                                   if count else "") + ".")
+            if changes["statistics"] and (old.get("statistics") or {}).get("computed"):
+                notes.append("The mean / SD maps become out of date.")
+            if changes["normalization"] and count and not predefined:
+                notes.append(f"The {count} subject(s) already in were normalized with the earlier settings (they "
+                             "stay; remove and add them again to normalize them anew).")
+            if changes["name"]:
+                notes.append(f"The folder is renamed to '{normaldb.safeName(header['name'])}'.")
+            if notes and not slicer.util.confirmOkCancelDisplay("\n\n".join(notes), windowTitle="Edit database",
+                                                                parent=dialog):
+                return
+            done.update(header=header, changes=changes, atlasFolder=atlasFolder, customPath=customPath)
+            dialog.accept()
+
+        save.connect("clicked()", accept)
+        if not dialog.exec_() or not done:
+            return
+        progressDialog = None
+        if done["changes"]["reference"] and count and not predefined:
+            progressDialog = slicer.util.createProgressDialog(windowTitle="Edit database", maximum=count,
+                                                              labelText="SUVR maps...")
+
+        def progress(index, total, text):
+            if progressDialog is not None:
+                progressDialog.setValue(index)
+                progressDialog.setLabelText(text)
+                slicer.app.processEvents()
+            return True
+
+        try:
+            with slicer.util.tryWithErrorDisplay("Could not save the database settings", waitCursor=True):
+                folder = self.logic.editDatabase(folder, self.root(), done["header"], done["changes"],
+                                                 done["atlasFolder"], done["customPath"], progress)
+                if done["atlasFolder"]:
+                    self.logic.setAtlasFolder(done["atlasFolder"])
+        except Exception:
+            pass
+        finally:
+            if progressDialog is not None:
+                progressDialog.close()
+            self.refresh(select=folder)
 
     def onBatchAdd(self):
         from StaticNeuroPET import StaticNeuroPETLogic
@@ -1161,6 +1361,14 @@ class NeuroPETDatabaseManagerTest(ScriptedLoadableModuleTest):
         self.assertEqual(saved["referenceMask"], normaldb.REFERENCE_MASK_NAME)
         mask = slicer.util.loadLabelVolume(os.path.join(folder, normaldb.REFERENCE_MASK_NAME), {"show": False})
         self.assertEqual(int(np.count_nonzero(slicer.util.arrayFromVolume(mask))), 16)
+        # edit: another reference region makes the mask again; a new name renames the folder
+        edited, changes = normaldb.editedHeader(saved, dict(saved, referenceRegion=normaldb.REF_BRAINSTEM,
+                                                            name="test 2"))
+        folder = logic.editDatabase(folder, root, edited, changes, atlasFolder)
+        self.assertTrue(folder.endswith("test 2") or folder.endswith("test_2"))
+        mask = slicer.util.loadLabelVolume(os.path.join(folder, normaldb.REFERENCE_MASK_NAME), {"show": False})
+        self.assertEqual(int(np.count_nonzero(slicer.util.arrayFromVolume(mask))), 1)
+        self.assertEqual(normaldb.readHeader(folder)["referenceRegion"], normaldb.REF_BRAINSTEM)
         normaldb.deleteDatabase(folder, root)
         self.assertFalse(os.path.exists(folder))
         # pons from the CerebrA with pons (a segmentation whose segments are named Segment_<label value>)
