@@ -47,6 +47,20 @@ def test_grey_matter_mask_and_hidden_scores():
     assert halved.tolist()[:4] == [-1.5, nr.OUTSIDE, nr.OUTSIDE, 1.25]
 
 
+def test_brightness_colors():
+    values = np.array([0.0, 1.0, 2.0, 4.0, -1.0], dtype=np.float32)
+    brightness = nr.petBrightness(values, percentile=100.0, gamma=1.0)
+    assert brightness.tolist() == pytest.approx([0.0, 0.25, 0.5, 1.0, 0.0])
+    rgba = np.array([[0, 0, 1, 1], [0, 1, 0, 1], [1, 0, 0, 1]], dtype=float)       # blue, green, red
+    scores = np.array([-5.0, 0.0, 9.0, 5.0, 0.0], dtype=np.float32)
+    rgb = nr.brightnessColors(scores, brightness, rgba, 5.0)
+    assert rgb.dtype == np.uint8 and rgb.shape == (5, 3)
+    assert rgb[0].tolist() == [0, 0, 0]                     # no uptake: black whatever the score
+    assert rgb[1].tolist() == [0, 64, 0]                    # 0: green, a quarter bright
+    assert rgb[2].tolist() == [128, 0, 0]                   # above the window: red
+    assert rgb[3].tolist() == [255, 0, 0]
+
+
 def test_voxel_scores_sign_and_t():
     mean = np.full(4, 10.0, np.float32)
     sd = np.full(4, 2.0, np.float32)

@@ -642,6 +642,7 @@ class StaticNeuroPETLogic(DynamicNeuroPETLogic):
         smoothed = normaldb.smoothMap(values, fwhm, spacing)
         result.update(smoothed=smoothed, union=nr.unionMask(masks, mean.shape))
         result["z"] = nr.scoreMap(smoothed, mean, sd, mask, nr.SCORE_Z)
+        result["brightness"] = nr.petBrightness(values)     # the patient's map (not smoothed) as brightness
         result["gm"] = None         # the MNI grey matter probability on the grid: the score slices' default mask
         if atlas and "GM" in atlas:
             try:
@@ -1974,6 +1975,14 @@ class StaticNeuroPETWidget(DynamicNeuroPETWidget):
         self.hypoOnlyCheck.toolTip = ("Show only the scores below the normals (negative: hypometabolism / "
                                       "hypoperfusion); the positive ones grey (score slices and 3D-SSP)")
         view.addRow(self.hypoOnlyCheck)
+        self.scoreStyleCombo = qt.QComboBox()
+        for key, title in nr.SCORE_STYLES:
+            self.scoreStyleCombo.addItem(title, key)
+        self.scoreStyleCombo.toolTip = (
+            "Score as color, PET as brightness (default): each voxel colored by its score and as bright as the "
+            "patient's uptake there, with no threshold or mask (the PET's own pattern in the score's colors; the MR "
+            "fusion is not used in this row). Score map: the scores alone, in a mask and with a threshold (below).")
+        view.addRow("Score slices:", self.scoreStyleCombo)
         self.scoreMaskCombo = qt.QComboBox()
         for key, title in nr.SCORE_MASKS:
             self.scoreMaskCombo.addItem(title, key)
@@ -2068,6 +2077,8 @@ class StaticNeuroPETWidget(DynamicNeuroPETWidget):
         self.gmSpin.connect("valueChanged(double)", lambda v: self._showScoreMap())
         self.hideBelowSpin.connect("valueChanged(double)", lambda v: self._showScoreMap())
         self.scoreMaskCombo.connect("currentIndexChanged(int)", lambda i: self._showScoreMap())
+        self.scoreStyleCombo.connect("currentIndexChanged(int)", lambda i: (self._showScoreMap(),
+                                                                          self._assignReviewViews()))
         self.scoreBackgroundCombo.connect("currentIndexChanged(int)", lambda i: self._assignReviewViews())
         self.outlineCheck.connect("toggled(bool)", lambda on: self._assignReviewViews())
         self.legendCheck.connect("toggled(bool)", lambda on: (self._updateLegends(), self._showSsp()))
@@ -2288,15 +2299,20 @@ class StaticNeuroPETWidget(DynamicNeuroPETWidget):
         kind = self._scoreKind()
         factor = nr.tFactor(result.get("n")) if kind == nr.SCORE_T else 1.0
         mask = result["mask"]
+        masked = self._scoreStyle() == nr.STYLE_MASKED
         greyMatter = self.scoreMaskCombo.currentData == nr.MASK_GM and result.get("gm") is not None
-        self.gmSpin.enabled = greyMatter
-        self.uptakeSpin.enabled = not greyMatter
-        if greyMatter:
+        for widget in (self.scoreMaskCombo, self.hideBelowSpin, self.scoreBackgroundCombo):
+            widget.enabled = masked
+        self.gmSpin.enabled = masked and greyMatter
+        self.uptakeSpin.enabled = masked and not greyMatter
+        if not masked:
+            pass        # the colored PET: every scored voxel (the score node for the data probe and the legend)
+        elif greyMatter:
             mask = nr.greyMatterMask(result["gm"], mask, float(self.gmSpin.value))
         elif result.get("mean") is not None:
             mask = nr.uptakeMask(result["mean"], mask, self.uptakeSpin.value / 100.0)
-        slicer.util.updateVolumeFromArray(self.scoreNode, nr.maskedScores(result["z"], mask, factor,
-                                                                          float(self.hideBelowSpin.value)))
+        slicer.util.updateVolumeFromArray(self.scoreNode, nr.maskedScores(
+            result["z"], mask, factor, float(self.hideBelowSpin.value) if masked else 0.0))
         self.scoreNode.SetName(f"{result['volume'].GetName()} {kind} map")
         self._applyScoreDisplay()
         self._updateLegends()
@@ -2610,6 +2626,42 @@ class StaticNeuroPETWidget(DynamicNeuroPETWidget):
         display.SetApplyThreshold(True)         # outside the brain mask (OUTSIDE) transparent: black
         display.SetLowerThreshold(nr.OUTSIDE / 2.0)
         display.SetUpperThreshold(-nr.OUTSIDE)
+        self._updateScoreColors()
+
+    def _scoreStyle(self):
+        return self.scoreStyleCombo.currentData if hasattr(self, "scoreStyleCombo") else nr.STYLE_MASKED
+
+    def _scoreColorsNode(self):
+        """The colored PET (RGB: the score's color times the PET's brightness) when shown, else None."""
+        node = getattr(self, "scoreRgbNode", None)
+        if self._scoreStyle() != nr.STYLE_BRIGHTNESS or node is None or not slicer.mrmlScene.IsNodePresent(node):
+            return None
+        return node
+
+    def _updateScoreColors(self):
+        """The colored PET of the score row: each voxel the score's color, as bright as the patient's uptake."""
+        result = self.reviewResult or {}
+        if (self._scoreStyle() != nr.STYLE_BRIGHTNESS or result.get("z") is None
+                or result.get("brightness") is None):
+            return
+        scene = slicer.mrmlScene
+        node = getattr(self, "scoreRgbNode", None)
+        if node is None or not scene.IsNodePresent(node):
+            node = scene.AddNewNodeByClass("vtkMRMLVectorVolumeNode", scene.GenerateUniqueName(
+                f"{result['volume'].GetName()} score colors"))
+            self.scoreRgbNode = node
+        node.SetIJKToRASMatrix(_vtkMatrix(_ijkToRas(result["grid"])))
+        factor = nr.tFactor(result.get("n")) if self._scoreKind() == nr.SCORE_T else 1.0
+        rgba = nr.divergingColors(self._rgbOf(self.scoreColorCombo.currentText), self.hypoOnlyCheck.checked)
+        rgb = nr.brightnessColors(np.asarray(result["z"], np.float32) / np.float32(factor), result["brightness"],
+                                  rgba, float(self.scoreMaximumSpin.value))
+        slicer.util.updateVolumeFromArray(node, rgb)
+        if node.GetDisplayNode() is None:
+            node.CreateDefaultDisplayNodes()
+        display = node.GetDisplayNode()
+        if display is not None:     # the RGB as it is
+            display.SetAutoWindowLevel(False)
+            display.SetWindowLevelMinMax(0.0, 255.0)
 
     def _initPetWindow(self):
         volume = self.volume()
@@ -3240,7 +3292,10 @@ class StaticNeuroPETWidget(DynamicNeuroPETWidget):
             composite = widget.mrmlSliceCompositeNode()
             composite.SetLinkedControl(False)
             top = pet if row == nr.PET_ROW else score
-            if anatomy is not None:
+            colored = self._scoreColorsNode() if row == nr.SCORE_ROW and score is not None else None
+            if colored is not None:     # the colored PET; the scores on top, invisible (data probe, legend)
+                background, foreground, opacity = colored, score, 0.0
+            elif anatomy is not None:
                 background, foreground = anatomy, top
                 opacity = float((self.fusionOpacity if row == nr.PET_ROW else self.scoreOpacity).value)
             elif row == nr.SCORE_ROW and self.scoreBackgroundCombo.currentData == "pet" and score is not None:
@@ -3506,6 +3561,7 @@ class StaticNeuroPETWidget(DynamicNeuroPETWidget):
         self.regUndo = None
         self._databaseKey = None
         self.reviewResult = self.scoreNode = self.reviewTable = self.sspModel = self.greyPetNode = None
+        self.scoreRgbNode = None
         self._cameraObservers = []
         self._segmentationDisplay = None
         self._anatomyWindowFor = None
