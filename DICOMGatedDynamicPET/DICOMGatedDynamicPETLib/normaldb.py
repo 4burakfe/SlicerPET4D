@@ -875,6 +875,12 @@ def exportPredefined(folder, zipPath):
         exported["normalizationTemplate"] = {}
     for group in stats["groups"].values():
         files.extend(group.get(w) for w in ("mean", "sd") if group.get(w))
+    for key in ("regions", "ssp"):      # the regional statistics and the 3D-SSP projections (Review), when made
+        if stats.get(key):
+            if os.path.isfile(os.path.join(folder, stats[key])):
+                files.append(stats[key])
+            else:
+                exported["statistics"].pop(key, None)
     with zipfile.ZipFile(zipPath, "w", zipfile.ZIP_DEFLATED) as archive:
         archive.writestr(f"{base}/{HEADER_NAME}", json.dumps(exported, indent=2, ensure_ascii=False) + "\n")
         for relative in files:

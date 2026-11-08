@@ -586,7 +586,13 @@ database:
   added one at a time so 100+ subjects fit in memory: the master map of all subjects and, when age stratified, each
   age group with at least two subjects (`stats/master_mean.nii.gz`, `stats/age_<group>_sd.nii.gz`, ...). The
   subjects are stored unsmoothed, so a new FWHM only needs this step again; the patient is smoothed the same way in
-  the review. The database version goes up at every computation.
+  the review. The database version goes up at every computation. With the CerebrA in the Neuro atlas folder, the
+  same pass makes the **regional statistics** (`stats/regions.json`): the regions drawn with the database's region
+  settings (atlas, growth, reference mask; the optic chiasm left out), each subject's regional mean (unsmoothed
+  maps) and their mean, SD and n per group (master and age groups); and the **3D-SSP projections**
+  (`stats/ssp.npz`): the brain surface (union of those regions) and, per group, the vertex mean / SD of every
+  subject's smoothed map projected on it (Minoshima: the maximum along the inward normal, 0-13.5 mm). Both are
+  exported with the database, so a predefined database carries them too.
 - **Use mean as template** (a study specific template, iterated): the master mean map is copied as
   `template.nii.gz` and the database's normalization becomes PET to PET. Run **Batch add subjects...** again with
   **Normalize again the subjects already in the database** (every subject registered to the template and replaced),
@@ -646,7 +652,36 @@ steps, on the toolbar like the Dynamic Neuro Receptor PET:
 4. **Regions**: the CerebrA regions. The database sets the region settings (atlas, growth, white matter, reference
    region from its own reference mask): they are locked; **Unlock** (with a warning) changes them. Without a
    database the workflow goes on and the review gives the regional values only.
-5. **Review**: the comparison with the database comes next. **Add this patient to a normal database** (user
+5. **Review**: the patient compared with the normal database, in a 4 x 4 layout. Columns 1-3: the normalized
+   PET (axial, coronal, sagittal) with the regions as outlines (no fill); below it the **voxel score map**; the two
+   lower rows the **3D-SSP** views (top, anterior, left / bottom, posterior, right; black background, parallel
+   projection, top and bottom with the front up). Column
+   4: the **region table**: SUVmean, the value of the database's map type (SUVR / ratio), the normals' mean, SD and
+   n, and the score. Press **Compare with the database** (without a database: *Compute the regional values*, SUV and
+   SUVR to the reference region). Settings on the left:
+   - **Normals**: automatically the patient's age group (the master when the age is not known or its group has no
+     maps), or picked by hand. **Score**: z = (normal mean - patient) / SD or the Crawford-Howell t = z /
+     sqrt(1 + 1/n) (default); positive means below the normals (hypometabolism / hypoperfusion).
+   - Voxel scores: the patient on the database grid (SUVR to the database's reference mask for an SUVR database),
+     smoothed with the database's FWHM like the normals, scored inside the MNI brain mask where the normal mean is
+     above 30 % of its maximum, with an SD floor of 20 % of the median SD there. Regional scores: the unsmoothed
+     patient against the normals' regional statistics: the database's own (`stats/regions.json`) when the regions
+     are the database's (locked); for other regions of a user defined database computed from its subjects on the fly
+     and cached in `<database>/cache/`; otherwise approximated from the mean / SD maps (the mean voxel SD is larger
+     than the SD of a regional mean, so these scores are conservative). The optic chiasm is left out of the regions.
+   - **Display**: PET colors and window; score colors (above the threshold; blue below minus the threshold),
+     threshold (2) and maximum (6); *Below the normals only*. Below the threshold the score views are black.
+   - **3D-SSP** (Minoshima et al. 1995): the surface of all the regions together; each vertex takes the maximum of
+     the patient's smoothed map along its inward normal (0-13.5 mm, 1 mm steps). **Map**: the score (default) or the
+     patient's projected values. **Score from**: *Minoshima* (default; against the same projection of every normal:
+     the database's `stats/ssp.npz` when the regions are the database's, else computed from the subjects of a user
+     defined database and cached), or *Voxel score map projected* (the most extreme voxel score along the normal;
+     used automatically when the normals' projections are not there, e.g. an older predefined database). Its own
+     score colors, threshold and maximum (below the threshold the surface is grey), patient colors and window.
+   - **MR fusion**: the PET and the scores over the MNI template T1, or over the patient's CT / MR when the
+     normalization went through it, with the PET opacity and the MR window.
+
+   **Add this patient to a normal database** (user
    defined databases) builds a database from normal subjects: the normalized image is resampled onto the database
    grid (MNI 2009c, 1 mm) and saved as `subjects/<id>_SUV.nii.gz` and `subjects/<id>_SUVR.nii.gz`, divided by the
    mean in the **reference region** picked there (a segment of the regions, their reference region by default, or

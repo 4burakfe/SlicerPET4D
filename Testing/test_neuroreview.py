@@ -1,0 +1,101 @@
+"""Tests of the Static Neuro Review helpers without Slicer: python -m pytest Testing."""
+import math
+import os
+import sys
+import xml.dom.minidom
+
+import numpy as np
+import pytest
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "DICOMGatedDynamicPET"))
+from DICOMGatedDynamicPETLib import neuroreview as nr, normaldb  # noqa: E402
+
+
+def test_score_mask_and_sd_floor():
+    mean = np.array([0.0, 1.0, 5.0, 10.0, np.nan], dtype=np.float32)
+    assert nr.scoreMask(mean).tolist() == [False, False, True, True, False]
+    brain = np.array([1, 1, 0, 1, 1])
+    assert nr.scoreMask(mean, brain).tolist() == [False, False, False, True, False]
+    with pytest.raises(ValueError):
+        nr.scoreMask(mean, np.ones(3))
+    sd = np.array([0.0, 1.0, 1.0, 0.01, 2.0], dtype=np.float32)
+    floored = nr.sdFloor(sd, np.array([0, 1, 1, 1, 1], bool), 0.5)
+    assert floored.tolist() == pytest.approx([0.5, 1.0, 1.0, 0.5, 2.0])
+
+
+def test_voxel_scores_sign_and_t():
+    mean = np.full(4, 10.0, np.float32)
+    sd = np.full(4, 2.0, np.float32)
+    patient = np.array([6.0, 10.0, 14.0, 6.0], np.float32)
+    mask = np.array([1, 1, 1, 0], bool)
+    z = nr.scoreMap(patient, mean, sd, mask, nr.SCORE_Z)
+    assert z.tolist() == pytest.approx([2.0, 0.0, -2.0, 0.0])        # below the mean: positive
+    t = nr.scoreMap(patient, mean, sd, mask, nr.SCORE_T, n=4)
+    assert t[0] == pytest.approx(2.0 / math.sqrt(1.25))
+    with pytest.raises(ValueError):
+        nr.scoreMap(patient[:3], mean, sd, mask)
+    assert nr.regionScore(6, 10, 2, kind=nr.SCORE_Z) == pytest.approx(2.0)
+    assert nr.regionScore(6, 10, 2, 4, nr.SCORE_T) == pytest.approx(2.0 / math.sqrt(1.25))
+    assert nr.regionScore(6, 10, 0) is None and nr.regionScore(None, 10, 1) is None
+
+
+def test_patient_group():
+    header = {"ageStratified": True, "ageGroups": [{"name": "Young", "min": 20, "max": 49},
+                                                   {"name": "Old", "min": 50, "max": 90}],
+              "statistics": {"groups": {"master": {"name": "Master", "mean": "a", "sd": "b", "n": 10},
+                                        "age_Young": {"name": "Young", "mean": "c", "sd": "d", "n": 4}}}}
+    assert nr.statisticsGroups(header)[0][0] == normaldb.MASTER
+    key = normaldb.groupKey("Young")
+    assert nr.patientGroup(header, 30)[0] == key
+    assert nr.patientGroup(header, None)[0] == normaldb.MASTER
+    assert nr.patientGroup(header, 60)[0] == normaldb.MASTER       # Old has no maps
+    assert nr.patientGroup({"statistics": header["statistics"]}, 30)[0] == normaldb.MASTER
+
+
+def test_regions():
+    values = np.arange(8, dtype=np.float32)
+    masks = {"A": values < 4, "B": values >= 4, "Empty": values > 100}
+    means = nr.regionMeans(values, masks)
+    assert means["A"] == pytest.approx(1.5) and means["B"] == pytest.approx(5.5) and math.isnan(means["Empty"])
+    subjects = {"s1": {"A": 1.0, "B": 2.0}, "s2": {"A": 3.0, "B": 4.0}, "s3": {"A": 5.0}}
+    groups = {"master": {"name": "Master", "ids": ["s1", "s2", "s3"]}, "g": {"name": "G", "ids": ["s1"]}}
+    stats = nr.regionStatistics(subjects, groups)
+    assert set(stats) == {"master"}
+    assert stats["master"]["regions"]["A"] == pytest.approx([3.0, 2.0, 3])
+    assert stats["master"]["regions"]["B"][2] == 2
+    found, missing = nr.matchRegions(stats, "master", ["a ", "C"])
+    assert list(found) == ["a "] and missing == ["C"]
+    approx = nr.approximateRegions(values, np.ones(8), {"A": masks["A"]})
+    assert approx["A"] == pytest.approx([1.5, 1.0, None])
+    assert nr.masksSignature(masks) == nr.masksSignature(dict(reversed(list(masks.items()))))
+    assert nr.masksSignature(masks) != nr.masksSignature(masks, extra=(2,))
+    rows = nr.tableRows({"A": 6.0, "X": 1.0}, {"A": 7.0}, {"A": [10.0, 2.0, 4]}, nr.SCORE_Z)
+    assert rows[0] == ("A", 7.0, 6.0, 10.0, 2.0, 4, pytest.approx(2.0))
+    assert rows[1][-1] is None
+    assert nr.isDroppedSegment("Optic Chiasm") and not nr.isDroppedSegment("Putamen R")
+
+
+def test_json_roundtrip(tmp_path):
+    path = os.path.join(tmp_path, "stats", "regions.json")
+    nr.writeJson(path, nr.regionsDocument({"master": {}}, "suvrFile", 3))
+    assert nr.readJson(path)["version"] == 3
+    assert nr.readJson(os.path.join(tmp_path, "none.json")) is None
+    header = {"statistics": {"regions": nr.REGIONS_FILE}}
+    assert nr.regionsPath(str(tmp_path), header) == path
+    assert nr.regionsPath(str(tmp_path), {}) is None
+
+
+def test_score_colors():
+    red = np.tile([[1.0, 0.0, 0.0]], (256, 1))
+    blue = np.tile([[0.0, 0.0, 1.0]], (256, 1))
+    rgba = nr.scoreColors(red, blue, 2.0, 6.0, hypoOnly=False, count=13)   # values -6..6 by 1
+    assert rgba[:, 3].tolist() == [1, 1, 1, 1, 1, 0, 0, 0, 1, 1, 1, 1, 1]
+    assert rgba[12, :3].tolist() == [1, 0, 0] and rgba[0, :3].tolist() == [0, 0, 1]
+    assert nr.scoreColors(red, blue, 2.0, 6.0, hypoOnly=True, count=13)[0, 3] == 0
+
+
+def test_layout_xml():
+    document = xml.dom.minidom.parseString(nr.layoutXml())
+    tags = [v.getAttribute("singletontag") for v in document.getElementsByTagName("view")]
+    assert len(tags) == 13 and nr.TABLE_VIEW in tags
+    assert nr.sliceViewName(nr.SCORE_ROW, "Sagittal") in tags and nr.sspViewName("Right") in tags

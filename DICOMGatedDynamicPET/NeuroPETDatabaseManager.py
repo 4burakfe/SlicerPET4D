@@ -35,6 +35,9 @@ if globals().get("__file__") and _MODULE_DIR not in sys.path:
     sys.path.insert(0, _MODULE_DIR)
 
 from DICOMGatedDynamicPETLib import dynamicviews, neuro, normaldb  # noqa: E402
+from DICOMGatedDynamicPETLib import neuroreview as nr  # noqa: E402
+from DICOMGatedDynamicPETLib import ssp  # noqa: E402
+from DICOMGatedDynamicPETLib import staticneuro as sn  # noqa: E402
 
 SETTINGS_ROOT = "DICOMGatedDynamicPET/NeuroDatabase/RootFolder"
 SETTINGS_ATLAS_FOLDER = "DICOMGatedDynamicPET/Neuro/AtlasFolder"     # shared with Dynamic Neuro Receptor PET
@@ -61,6 +64,12 @@ class NeuroPETDatabaseManager(ScriptedLoadableModule):
         parent.acknowledgementText = (
             "Part of the DICOM Gated / Dynamic PET extension. MNI ICBM 152 2009c: Fonov VS et al., NeuroImage 2011;"
             "54:313-327. CerebrA: Manera AL et al., Scientific Data 2020;7:237 (CC0).")
+
+
+def _ijkToRasOf(node):
+    matrix = vtk.vtkMatrix4x4()
+    node.GetIJKToRASMatrix(matrix)
+    return np.array([[matrix.GetElement(r, c) for c in range(4)] for r in range(4)])
 
 
 def _button(text, role="action"):
@@ -307,6 +316,11 @@ class NeuroPETDatabaseManagerLogic(ScriptedLoadableModuleLogic):
             for subjectId in group["ids"]:
                 membership.setdefault(subjectId, []).append(key)
         fwhm = float(header.get("smoothingFwhmMm") or 0)
+        masks, surface, regionNote = self._regionMasks(folder, header)
+        if regionNote:
+            notes.append(regionNote)
+        regionValues = {}
+        sspAccumulators = {k: normaldb.RunningStatistics() for k in groups} if surface is not None else None
         geometry = None
         for index, subject in enumerate(subjects):
             if progress is not None and not progress(index, len(subjects), f"{subject['id']} ({index + 1} / "
@@ -324,10 +338,20 @@ class NeuroPETDatabaseManagerLogic(ScriptedLoadableModuleLogic):
                 node.GetIJKToRASMatrix(matrix)
                 if geometry is None:
                     geometry = matrix
+                if masks:
+                    try:
+                        regionValues[subject["id"]] = nr.regionMeans(slicer.util.arrayFromVolume(node), masks)
+                    except ValueError as error:
+                        notes.append(f"No regional statistics: {error}")
+                        masks = None
                 smoothed = normaldb.smoothMap(slicer.util.arrayFromVolume(node), fwhm,
                                               tuple(float(x) for x in node.GetSpacing())[::-1])
                 for key in membership.get(subject["id"], []):
                     accumulators[key].add(smoothed)
+                if sspAccumulators is not None:      # 3D-SSP: the smoothed map projected on the regions' surface
+                    projected = ssp.project(smoothed, _ijkToRasOf(node), surface["points"], surface["normals"])
+                    for key in membership.get(subject["id"], []):
+                        sspAccumulators[key].add(projected)
             finally:
                 slicer.mrmlScene.RemoveNode(node)
         output = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLScalarVolumeNode", "normal database map")
@@ -358,10 +382,59 @@ class NeuroPETDatabaseManagerLogic(ScriptedLoadableModuleLogic):
             header["version"] = int(header.get("version") or 1) + 1
         header["statistics"] = {"computed": normaldb.now(), "stale": False, "groups": written,
                                 "smoothingFwhmMm": fwhm, "maps": mapKey}
+        regionsFile = os.path.join(folder, nr.REGIONS_FILE)
+        if masks and regionValues:
+            statistics = nr.regionStatistics(regionValues, groups)
+            settings = {k: v for k, v in sn.regionSettings(folder, header).items() if k != "referenceMaskPath"}
+            nr.writeJson(regionsFile, nr.regionsDocument(statistics, mapKey, header.get("version", 1), settings,
+                                                         nr.masksSignature(masks)))
+            header["statistics"]["regions"] = nr.REGIONS_FILE
+        elif os.path.isfile(regionsFile):
+            os.remove(regionsFile)
+        sspFile = os.path.join(folder, ssp.SSP_FILE)
+        if sspAccumulators is not None:
+            sspGroups = {k: {"mean": a.mean(), "sd": a.sd(), "n": a.n, "name": groups[k]["name"]}
+                         for k, a in sspAccumulators.items() if a.n >= 2}
+            ssp.write(sspFile, surface, sspGroups, {"depthMm": ssp.DEPTH_MM, "stepMm": ssp.STEP_MM, "fwhmMm": fwhm,
+                                                    "maps": mapKey, "version": header.get("version", 1)})
+            header["statistics"]["ssp"] = ssp.SSP_FILE
+        elif os.path.isfile(sspFile):
+            os.remove(sspFile)
         header["subjectAges"] = normaldb.ageSummary(s.get("age") for s in subjects)
         normaldb.writeHeader(folder, header)
         self.forgetLoaded(folder)
         return header, notes
+
+    def _regionMasks(self, folder, header):
+        """(masks {region: boolean array} on the subjects' grid, 3D-SSP surface of their union, note) of the
+        database's regions (its region settings, the CerebrA of the atlas folder) for the regional statistics and the
+        normals' surface projections; (None, None, why) when they cannot be made."""
+        from StaticNeuroPET import StaticNeuroPETLogic
+        atlas = neuro.findAtlasFiles(self.atlasFolder())
+        if neuro.CEREBRA_LABELS not in atlas or neuro.CEREBRA_CSV not in atlas:
+            return None, None, ("No regional statistics: the CerebrA labels are not in the atlas folder (set it in the "
+                                "Static Neuro PET/SPECT module).")
+        gridPath = sn.referenceMaskPath(folder, header) or atlas.get(neuro.BRAIN_MASK)
+        if not gridPath:
+            return None, None, "No regional statistics: no reference mask or MNI brain mask for the grid."
+        logic = StaticNeuroPETLogic()
+        gridNode = slicer.util.loadLabelVolume(gridPath, {"show": False})
+        try:
+            try:
+                masks = logic.databaseRegionMasks(atlas, folder, header, gridNode)
+            except Exception as error:
+                logging.exception("Neuro DB: could not make the regions")
+                return None, None, f"No regional statistics: the regions could not be made ({error})."
+            if not masks:
+                return None, None, "No regional statistics: the regions are empty."
+            try:
+                surface = logic.brainSurface(nr.unionMask(masks, next(iter(masks.values())).shape), gridNode)
+            except Exception as error:
+                logging.exception("Neuro DB: could not make the 3D-SSP surface")
+                return masks, None, f"No 3D-SSP projections: the surface could not be made ({error})."
+            return masks, surface, None
+        finally:
+            slicer.mrmlScene.RemoveNode(gridNode)
 
     def createUserDefined(self, root, header, atlasFolder, customMask=None):
         """New empty user defined database with its reference mask. Returns the folder."""
@@ -995,6 +1068,9 @@ class NeuroPETDatabaseManagerWidget(ScriptedLoadableModuleWidget):
         groups = ((header.get("statistics") or {}).get("groups") or {})
         if groups:
             rows.append(("Mean / SD", "; ".join(f"{g.get('name', k)}: n={g.get('n')}" for k, g in groups.items())))
+            rows.append(("Regional statistics", "yes (stats/regions.json)" if nr.regionsPath(folder, header) else
+                         "no (computed with the mean / SD when the CerebrA is in the atlas folder)"))
+            rows.append(("3D-SSP projections", "yes (stats/ssp.npz)" if ssp.sspPath(folder, header) else "no"))
         ages = header.get("subjectAges")
         if ages and ages.get("n"):
             rows.append(("Ages", f"{ages.get('mean')} ± {ages.get('sd')} ({ages.get('min')}-{ages.get('max')})"))
