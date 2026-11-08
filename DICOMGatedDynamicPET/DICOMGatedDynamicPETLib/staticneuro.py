@@ -212,6 +212,12 @@ def masterMeanPath(folder, header):
     return path if os.path.isfile(path) else None
 
 
+def petTemplatePath(folder, header):
+    """The template of the PET to PET normalization: the database's frozen template (normalizationTemplate), else its
+    master mean map; None when it has neither."""
+    return normaldb.templatePath(folder, header) or masterMeanPath(folder, header)
+
+
 def referenceMaskPath(folder, header):
     """Absolute path of a database's reference mask copy, None when it has none."""
     relative = header.get("referenceMask")
@@ -490,19 +496,22 @@ def bidsSubjectId(path):
     return f"sub-{subject}" if subject else ""
 
 
-def batchNormalization(norm, defaultTemplate, defaultEngine, engineDefaults):
+def batchNormalization(norm, defaultTemplate, defaultEngine, engineDefaults, petTemplate=False):
     """The normalization a batch runs with: the database's settings (normaldb.NORM_KEYS) with the module defaults where
-    they are not specified. engineDefaults: {engine: (linear, deformable)}. Only the PET/SPECT to MR template method
-    works without a CT/MR or a database mean map: ValueError for the others."""
+    they are not specified. engineDefaults: {engine: (linear, deformable)}. The PET/SPECT to MR template method, or
+    the PET to PET one when petTemplate (the database has its template); ValueError for the others (no CT/MR)."""
     norm = dict(normaldb.emptyNormalization(), **(norm or {}))
     method = norm.get("method") or normaldb.NORM_PET
-    if method != normaldb.NORM_PET:
+    if method == normaldb.NORM_PET_TEMPLATE and not petTemplate:
+        raise ValueError("The database's normalization is PET to PET but it has no template (mean map) yet.")
+    if method not in (normaldb.NORM_PET, normaldb.NORM_PET_TEMPLATE):
         title = dict(normaldb.NORM_METHODS).get(method, method)
-        raise ValueError(f"The database's normalization is '{title}': the batch can only register the PET / SPECT to "
-                         "an MR template (no CT/MR, and the database has no mean map yet).")
+        raise ValueError(f"The database's normalization is '{title}': the batch registers the PET / SPECT to a "
+                         "template only (no CT/MR).")
     engine = norm.get("engine") or defaultEngine
     linear, deformable = engineDefaults[engine]
-    return {"method": method, "template": norm.get("template") or defaultTemplate, "engine": engine,
+    template = (norm.get("template") or defaultTemplate) if method == normaldb.NORM_PET else ""
+    return {"method": method, "template": template, "engine": engine,
             "linear": norm.get("linear") or linear,
             "deformable": deformable if norm.get("deformable") is None else bool(norm["deformable"]),
             "brainMask": True if norm.get("brainMask") is None else bool(norm["brainMask"])}

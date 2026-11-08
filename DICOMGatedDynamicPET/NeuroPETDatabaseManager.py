@@ -217,6 +217,152 @@ class NeuroPETDatabaseManagerLogic(ScriptedLoadableModuleLogic):
         header["referenceMask"] = relative
         return relative
 
+    def editDatabase(self, folder, root, header, changes, atlasFolder="", customMask=None, progress=None):
+        """Save edited settings (normaldb.editedHeader): a new reference region makes the reference mask (user
+        defined: and the subjects' SUVR maps) again, a new name renames the folder. Returns the folder."""
+        if changes.get("reference") and header.get("kind") == normaldb.USER_DEFINED:
+            sameCustom = (header.get("referenceRegion") == normaldb.REF_CUSTOM and not customMask
+                          and header.get("referenceMask"))
+            if not sameCustom:
+                self.writeReferenceMask(folder, header, atlasFolder, customMask)
+            normaldb.writeHeader(folder, header)
+            self.recomputeRatios(folder, header, progress)
+        else:
+            normaldb.writeHeader(folder, header)
+        if changes.get("name"):
+            folder = normaldb.renameDatabase(folder, root, header["name"])
+        return folder
+
+    @staticmethod
+    def recomputeRatios(folder, header, progress=None):
+        """The SUVR maps of the subjects of a user defined database again from their SUV maps and its reference
+        mask (after the reference region changed); their reference mean and region in subjects.csv too."""
+        from DICOMGatedDynamicPETLib import staticneuro as sn
+        subjects = normaldb.readSubjects(folder)
+        if not subjects:
+            return
+        maskPath = sn.referenceMaskPath(folder, header)
+        if not maskPath:
+            raise ValueError("The database has no reference mask.")
+        maskNode = slicer.util.loadLabelVolume(maskPath, {"show": False})
+        try:
+            mask = slicer.util.arrayFromVolume(maskNode) > 0
+        finally:
+            slicer.mrmlScene.RemoveNode(maskNode)
+        title = normaldb.referenceTitle(header.get("referenceRegion"))
+        problems = []
+        for index, subject in enumerate(subjects):
+            if progress is not None:
+                progress(index, len(subjects), f"SUVR map of {subject.get('id')}")
+            suvPath = os.path.join(folder, subject.get("suvFile") or "")
+            if not subject.get("suvFile") or not os.path.isfile(suvPath):
+                problems.append(f"{subject.get('id')}: no SUV map")
+                continue
+            node = slicer.util.loadVolume(suvPath, {"show": False})
+            try:
+                ratio, mean = sn.ratioMap(slicer.util.arrayFromVolume(node), mask)
+                slicer.util.updateVolumeFromArray(node, ratio)
+                suvrFile = subject.get("suvrFile") or normaldb.subjectFileNames(subject.get("id"))[1]
+                if not slicer.util.saveNode(node, os.path.join(folder, suvrFile)):
+                    raise ValueError("could not write the SUVR map")
+                subject.update(suvrFile=suvrFile, referenceMean=f"{mean:.6g}", reference=title)
+            except Exception as error:
+                problems.append(f"{subject.get('id')}: {error}")
+            finally:
+                slicer.mrmlScene.RemoveNode(node)
+        normaldb.writeSubjects(folder, subjects)
+        if problems:
+            raise ValueError("Some SUVR maps were not made again:\n" + "\n".join(problems[:20]))
+
+    @staticmethod
+    def forgetLoaded(folder):
+        """Remove the scene's cached copies of a database's files (template, mean maps) loaded by the Neuro workflows,
+        so they are read again after they changed."""
+        from DynamicNeuroPET import ATLAS_FILE_ATTRIBUTE
+        root = os.path.normcase(os.path.realpath(folder)) + os.sep
+        for node in list(slicer.util.getNodesByClass("vtkMRMLScalarVolumeNode")):
+            path = node.GetAttribute(ATLAS_FILE_ATTRIBUTE)
+            if path and os.path.normcase(os.path.realpath(path)).startswith(root):
+                slicer.mrmlScene.RemoveNode(node)
+
+    def computeStatistics(self, folder, progress=None):
+        """The mean / SD maps of a user defined database from its subjects' maps (SUVR or SUV by the map type),
+        each smoothed with the database's FWHM: the master (all subjects) and, when age stratified, each age group
+        with at least two subjects. Written to stats/; the header's statistics, version and age summary updated.
+        progress(index, total, text) returns False to stop (nothing written). Returns (header, notes)."""
+        header = normaldb.readHeader(folder)
+        if header.get("kind") != normaldb.USER_DEFINED:
+            raise ValueError("The mean / SD maps are computed for user defined databases only.")
+        subjects = normaldb.readSubjects(folder)
+        if len(subjects) < 2:
+            raise ValueError("The mean / SD maps need at least two subjects.")
+        mapKey = normaldb.subjectMapKey(header)
+        groups = normaldb.statisticsGroups(header, subjects)
+        notes = [f"Age group '{g['name']}': {len(g['ids'])} subject(s), no mean / SD maps (2 needed)."
+                 for k, g in groups.items() if k != normaldb.MASTER and len(g["ids"]) < 2]
+        groups = {k: g for k, g in groups.items() if len(g["ids"]) >= 2}
+        accumulators = {k: normaldb.RunningStatistics() for k in groups}
+        membership = {}
+        for key, group in groups.items():
+            for subjectId in group["ids"]:
+                membership.setdefault(subjectId, []).append(key)
+        fwhm = float(header.get("smoothingFwhmMm") or 0)
+        geometry = None
+        for index, subject in enumerate(subjects):
+            if progress is not None and not progress(index, len(subjects), f"{subject['id']} ({index + 1} / "
+                                                                           f"{len(subjects)})"):
+                return None, ["Stopped: nothing written."]
+            relative = subject.get(mapKey)
+            path = os.path.join(folder, relative) if relative else ""
+            if not path or not os.path.isfile(path):
+                raise ValueError(f"Subject '{subject['id']}' has no {mapKey[:-4].upper()} map ({relative}).")
+            node = slicer.util.loadVolume(path, {"show": False})
+            if node is None:
+                raise ValueError(f"Could not load {path}")
+            try:
+                matrix = vtk.vtkMatrix4x4()
+                node.GetIJKToRASMatrix(matrix)
+                if geometry is None:
+                    geometry = matrix
+                smoothed = normaldb.smoothMap(slicer.util.arrayFromVolume(node), fwhm,
+                                              tuple(float(x) for x in node.GetSpacing())[::-1])
+                for key in membership.get(subject["id"], []):
+                    accumulators[key].add(smoothed)
+            finally:
+                slicer.mrmlScene.RemoveNode(node)
+        output = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLScalarVolumeNode", "normal database map")
+        written = {}
+        try:
+            output.SetIJKToRASMatrix(geometry)
+            for key, group in groups.items():
+                files = {}
+                for which, array in (("mean", accumulators[key].mean()), ("sd", accumulators[key].sd())):
+                    relative = normaldb.statsFileName(key, which)
+                    slicer.util.updateVolumeFromArray(output, array)
+                    if not slicer.util.saveNode(output, os.path.join(folder, relative)):
+                        raise ValueError(f"Could not write {relative}")
+                    files[which] = relative
+                ages = [s.get("age") for s in subjects if s["id"] in set(group["ids"])]
+                written[key] = {"name": group["name"], "n": accumulators[key].n, **files,
+                                "ages": normaldb.ageSummary(ages)}
+        finally:
+            slicer.mrmlScene.RemoveNode(output)
+        old = header.get("statistics") or {}
+        for key, entry in (old.get("groups") or {}).items():
+            if key not in written:
+                for which in ("mean", "sd"):
+                    path = os.path.join(folder, entry.get(which) or "")
+                    if entry.get(which) and os.path.isfile(path):
+                        os.remove(path)
+        if old.get("computed"):
+            header["version"] = int(header.get("version") or 1) + 1
+        header["statistics"] = {"computed": normaldb.now(), "stale": False, "groups": written,
+                                "smoothingFwhmMm": fwhm, "maps": mapKey}
+        header["subjectAges"] = normaldb.ageSummary(s.get("age") for s in subjects)
+        normaldb.writeHeader(folder, header)
+        self.forgetLoaded(folder)
+        return header, notes
+
     def createUserDefined(self, root, header, atlasFolder, customMask=None):
         """New empty user defined database with its reference mask. Returns the folder."""
         import shutil
@@ -541,6 +687,54 @@ class HeaderForm:
                           "sd": self.ageTable.cellWidget(row, 5).currentPath}
         return maps
 
+    def setHeader(self, header, fixed=()):
+        """The fields from an existing database's header (Edit settings); the keys in fixed are shown but locked."""
+        def pick(combo, value, editable=False):
+            index = combo.findData(value) if combo.findData(value) >= 0 else combo.findText(str(value or ""))
+            if index >= 0:
+                combo.setCurrentIndex(index)
+            elif editable:
+                combo.setEditText(str(value or ""))
+
+        self.nameEdit.text = header.get("name", "")
+        pick(self.modalityCombo, header.get("modality"))
+        self._updateModality()
+        pick(self.nuclideCombo, header.get("nuclide"), editable=True)
+        self._updateTracers(self.nuclideCombo.currentText)
+        pick(self.tracerCombo, header.get("tracer"), editable=True)
+        acquisition = header.get("acquisition") or {}
+        self.startSpin.value = float(acquisition.get("startMinutes") or 0)
+        self.durationSpin.value = float(acquisition.get("durationMinutes") or 0)
+        self.segmentationEdit.text = header.get("segmentation", "")
+        pick(self.referenceCombo, header.get("referenceRegion"))
+        self.smoothingSpin.value = float(header.get("smoothingFwhmMm") or 0)
+        self.erosionSpin.value = float(header.get("referenceErosionMm") or 0)
+        pick(self.regionAtlasCombo, header.get("regionAtlas"))
+        self.growSpin.value = float(header.get("regionGrowMm") or 0)
+        pick(self.growIntoCombo, normaldb.growInto(header))
+        norm = dict(normaldb.emptyNormalization(), **(header.get("normalization") or {}))
+        for combo, key in ((self.normMethodCombo, "method"), (self.normTemplateCombo, "template"),
+                           (self.normEngineCombo, "engine"), (self.normLinearCombo, "linear")):
+            pick(combo, norm.get(key) or "")
+        for combo, key in ((self.normDeformableCombo, "deformable"), (self.normMaskCombo, "brainMask")):
+            pick(combo, "" if norm.get(key) is None else ("yes" if norm[key] else "no"))
+        self._updateNormTemplate()
+        self.ageTable.setRowCount(self._firstGroupRow())
+        for group in header.get("ageGroups") or []:
+            self._addRow(group.get("name", ""), "" if group.get("min") is None else f"{group['min']:g}",
+                         "" if group.get("max") is None else f"{group['max']:g}")
+        self.ageCheck.checked = bool(header.get("ageStratified"))
+        self._updateAge()
+        self.scannerEdit.text = header.get("scanner", "")
+        self.descriptionEdit.setPlainText(header.get("description", ""))
+        self._updateReference()
+        widgets = {"referenceRegion": [self.referenceCombo], "referenceErosionMm": [self.erosionSpin],
+                   "smoothingFwhmMm": [self.smoothingSpin],
+                   "ageStratified": [self.ageCheck, self.ageTable, self.addGroupButton, self.removeGroupButton]}
+        for key in fixed:
+            for widget in widgets.get(key, []):
+                widget.enabled = False
+
     def _updateNormTemplate(self):
         """The template counts for the PET/SPECT to MR template method (or a method not specified) only."""
         method = self.normMethodCombo.itemData(self.normMethodCombo.currentIndex)
@@ -675,14 +869,27 @@ class NeuroPETDatabaseManagerWidget(ScriptedLoadableModuleWidget):
         grid.addWidget(self.createButton, 0, 0)
         grid.addWidget(self.predefinedButton, 0, 1)
         self.removeSubjectsButton = qt.QPushButton("Remove subjects...")
+        self.statsButton = _button("Compute mean / SD")
+        self.statsButton.toolTip = ("The mean / SD maps of the selected user defined database from its subjects' "
+                                    "maps, smoothed with its FWHM (master and age groups).")
+        self.templateButton = qt.QPushButton("Use mean as template")
+        self.templateButton.toolTip = ("Freeze the master mean map as the database's normalization template and make "
+                                       "PET to PET its normalization: then run the batch again (Normalize again) "
+                                       "and compute the mean / SD - an iteration of a study specific template.")
+        self.editButton = qt.QPushButton("Edit settings...")
+        self.editButton.toolTip = ("Change the settings of the selected database (name, tracer, reference region, "
+                                   "region and normalization settings, age groups, notes).")
         self.removeSubjectsButton.toolTip = ("Remove subjects (e.g. badly normalized ones, after the QC pictures) "
                                              "from the selected user defined database, with their maps.")
         grid.addWidget(self.batchButton, 1, 0)
         grid.addWidget(self.removeSubjectsButton, 1, 1)
-        grid.addWidget(self.exportButton, 2, 0)
-        grid.addWidget(self.deleteButton, 2, 1)
-        grid.addWidget(self.openButton, 3, 0)
-        grid.addWidget(self.refreshButton, 3, 1)
+        grid.addWidget(self.statsButton, 2, 0)
+        grid.addWidget(self.templateButton, 2, 1)
+        grid.addWidget(self.editButton, 3, 0)
+        grid.addWidget(self.exportButton, 3, 1)
+        grid.addWidget(self.deleteButton, 4, 0)
+        grid.addWidget(self.openButton, 4, 1)
+        grid.addWidget(self.refreshButton, 5, 0, 1, 2)
         layout.addLayout(grid)
 
         self.table.connect("itemSelectionChanged()", self._updateSelection)
@@ -690,6 +897,9 @@ class NeuroPETDatabaseManagerWidget(ScriptedLoadableModuleWidget):
         self.predefinedButton.connect("clicked()", self.onAddPredefined)
         self.exportButton.connect("clicked()", self.onExport)
         self.batchButton.connect("clicked()", self.onBatchAdd)
+        self.editButton.connect("clicked()", self.onEdit)
+        self.statsButton.connect("clicked()", self.onComputeStatistics)
+        self.templateButton.connect("clicked()", self.onFreezeTemplate)
         self.removeSubjectsButton.connect("clicked()", self.onRemoveSubjects)
         self.deleteButton.connect("clicked()", self.onDelete)
         self.openButton.connect("clicked()", self.onOpenFolder)
@@ -748,10 +958,14 @@ class NeuroPETDatabaseManagerWidget(ScriptedLoadableModuleWidget):
         self.createButton.enabled = rootOk
         self.predefinedButton.enabled = rootOk
         self.deleteButton.enabled = folder is not None
+        self.editButton.enabled = folder is not None
         self.openButton.enabled = rootOk
         self.exportButton.enabled = folder is not None and header.get("kind") == normaldb.USER_DEFINED
         self.batchButton.enabled = self.exportButton.enabled
         self.removeSubjectsButton.enabled = self.exportButton.enabled
+        self.statsButton.enabled = self.exportButton.enabled
+        master = (((header or {}).get("statistics") or {}).get("groups") or {}).get(normaldb.MASTER)
+        self.templateButton.enabled = folder is not None and bool(master and master.get("mean"))
         self.details.setHtml(self._detailsHtml(folder, header) if folder else "")
 
     @staticmethod
@@ -784,6 +998,11 @@ class NeuroPETDatabaseManagerWidget(ScriptedLoadableModuleWidget):
         ages = header.get("subjectAges")
         if ages and ages.get("n"):
             rows.append(("Ages", f"{ages.get('mean')} ± {ages.get('sd')} ({ages.get('min')}-{ages.get('max')})"))
+        frozen = header.get("normalizationTemplate") or {}
+        if frozen.get("file"):
+            rows.append(("Normalization template",
+                         f"{frozen['file']} (mean of n = {frozen.get('n')}, iteration {frozen.get('iteration', 1)}, "
+                         f"{str(frozen.get('made', ''))[:16]})"))
         rows.append(("Version", f"{header.get('version', 1)}, modified {str(header.get('modified', ''))[:16]}"))
         return "<table>" + "".join(f"<tr><td><b>{esc(k)}</b>&nbsp;</td><td>{esc(v)}</td></tr>" for k, v in rows
                                    if v not in (None, "")) + "</table>"
@@ -917,6 +1136,162 @@ class NeuroPETDatabaseManagerWidget(ScriptedLoadableModuleWidget):
             return
         slicer.util.infoDisplay(f"Saved {path}", windowTitle="Neuro PET Database Manager")
 
+    def onComputeStatistics(self):
+        folder, header = self.selected()
+        if not folder or header.get("kind") != normaldb.USER_DEFINED:
+            return
+        count = normaldb.subjectCount(folder, header)
+        fwhm = float(header.get("smoothingFwhmMm") or 0)
+        if not slicer.util.confirmOkCancelDisplay(
+                f"Compute the mean / SD maps of '{header.get('name')}' from its {count} subject(s) ("
+                f"{normaldb.subjectMapKey(header)[:-4].upper()} maps, smoothing "
+                + (f"{fwhm:g} mm FWHM" if fwhm > 0 else "off") + ")?", windowTitle="Compute mean / SD"):
+            return
+        progressDialog = slicer.util.createProgressDialog(windowTitle="Compute mean / SD", labelText="Starting...",
+                                                          maximum=count)
+
+        def progress(index, total, text):
+            progressDialog.setValue(index)
+            progressDialog.setLabelText(f"Smoothing and adding: {text}")
+            slicer.app.processEvents()
+            return not progressDialog.wasCanceled
+
+        result = None
+        try:
+            with slicer.util.tryWithErrorDisplay("Could not compute the mean / SD maps", waitCursor=True):
+                result = self.logic.computeStatistics(folder, progress)
+        except Exception:
+            pass
+        finally:
+            progressDialog.close()
+            self.refresh(select=folder)
+        if result is None:
+            return
+        saved, notes = result
+        if saved is None:
+            slicer.util.infoDisplay("\n".join(notes), windowTitle="Compute mean / SD")
+            return
+        groups = saved["statistics"]["groups"]
+        text = "Done: " + "; ".join(f"{g['name']} n = {g['n']}" for g in groups.values()) + "."
+        if notes:
+            text += "\n\n" + "\n".join(notes)
+        slicer.util.infoDisplay(text, windowTitle="Compute mean / SD")
+
+    def onFreezeTemplate(self):
+        folder, header = self.selected()
+        if not folder:
+            return
+        stats = header.get("statistics") or {}
+        master = (stats.get("groups") or {}).get(normaldb.MASTER) or {}
+        previous = header.get("normalizationTemplate") or {}
+        text = (f"Use the master mean map of '{header.get('name')}' (n = {master.get('n')}) as its normalization "
+                "template?\n\nIt is copied as template.nii.gz and the database's normalization becomes PET to PET: "
+                "the batch (Normalize again) and the Neuro workflow then register to it. It stays fixed when the mean "
+                "/ SD maps are computed again; use it again for the next iteration (1-2 are usually enough).")
+        if previous:
+            text += f"\n\nIt replaces the current template (iteration {previous.get('iteration', 1)})."
+        if stats.get("stale"):
+            text += "\n\nThe mean / SD maps are out of date: compute them first?"
+        if not slicer.util.confirmOkCancelDisplay(text, windowTitle="Use mean as template"):
+            return
+        try:
+            with slicer.util.tryWithErrorDisplay("Could not make the template", waitCursor=True):
+                normaldb.freezeTemplate(folder)
+                self.logic.forgetLoaded(folder)
+        except Exception:
+            pass
+        finally:
+            self.refresh(select=folder)
+
+    def onEdit(self):
+        folder, old = self.selected()
+        if not folder:
+            return
+        predefined = old.get("kind") == normaldb.PREDEFINED
+        dialog, layout, buttons = _scrollDialog(f"Edit '{old.get('name')}'", slicer.util.mainWindow())
+        count = normaldb.subjectCount(folder, old)
+        info = qt.QLabel(
+            ("A predefined database: the settings of its mean / SD maps (reference region, smoothing, age groups) "
+             "stay as they are." if predefined else
+             f"{count} subject(s). A new reference region (or erosion) makes the reference mask again and the SUVR "
+             "maps of the subjects from their SUV maps; reference, smoothing or age group changes put the mean / SD "
+             "maps out of date. A new name renames the folder."))
+        info.wordWrap = True
+        layout.addWidget(info)
+        form = HeaderForm(layout, predefined=False, atlasFolder=self.logic.atlasFolder())
+        form.setHeader(old, normaldb.PREDEFINED_FIXED_KEYS if predefined else ())
+        layout.addStretch(1)
+        save = buttons.addButton("Save", qt.QDialogButtonBox.AcceptRole)
+        buttons.addButton(qt.QDialogButtonBox.Cancel)
+        buttons.connect("rejected()", dialog.reject)
+        done = {}
+
+        def accept():
+            try:
+                header, changes = normaldb.editedHeader(old, form.header())
+            except ValueError as error:
+                _error(dialog, str(error))
+                return
+            if not changes["keys"]:
+                dialog.reject()
+                return
+            atlasFolder = form.atlasPath.currentPath
+            customPath = form.maskPath.currentPath
+            notes = []
+            if changes["reference"] and not predefined:
+                if header["referenceRegion"] == normaldb.REF_CUSTOM:
+                    if not customPath and old.get("referenceRegion") != normaldb.REF_CUSTOM:
+                        _error(dialog, "Pick the custom reference mask file.")
+                        return
+                else:
+                    problem = self.logic.maskSourceProblem(header["referenceRegion"], atlasFolder)
+                    if problem:
+                        _error(dialog, problem + " - pick the Neuro atlas folder.")
+                        return
+                notes.append("The reference mask is made again" + (f" and the SUVR maps of the {count} subject(s) "
+                                                                   "computed again from their SUV maps"
+                                                                   if count else "") + ".")
+            if changes["statistics"] and (old.get("statistics") or {}).get("computed"):
+                notes.append("The mean / SD maps become out of date.")
+            if changes["normalization"] and count and not predefined:
+                notes.append(f"The {count} subject(s) already in were normalized with the earlier settings (they "
+                             "stay; remove and add them again to normalize them anew).")
+            if changes["name"]:
+                notes.append(f"The folder is renamed to '{normaldb.safeName(header['name'])}'.")
+            if notes and not slicer.util.confirmOkCancelDisplay("\n\n".join(notes), windowTitle="Edit database",
+                                                                parent=dialog):
+                return
+            done.update(header=header, changes=changes, atlasFolder=atlasFolder, customPath=customPath)
+            dialog.accept()
+
+        save.connect("clicked()", accept)
+        if not dialog.exec_() or not done:
+            return
+        progressDialog = None
+        if done["changes"]["reference"] and count and not predefined:
+            progressDialog = slicer.util.createProgressDialog(windowTitle="Edit database", maximum=count,
+                                                              labelText="SUVR maps...")
+
+        def progress(index, total, text):
+            if progressDialog is not None:
+                progressDialog.setValue(index)
+                progressDialog.setLabelText(text)
+                slicer.app.processEvents()
+            return True
+
+        try:
+            with slicer.util.tryWithErrorDisplay("Could not save the database settings", waitCursor=True):
+                folder = self.logic.editDatabase(folder, self.root(), done["header"], done["changes"],
+                                                 done["atlasFolder"], done["customPath"], progress)
+                if done["atlasFolder"]:
+                    self.logic.setAtlasFolder(done["atlasFolder"])
+        except Exception:
+            pass
+        finally:
+            if progressDialog is not None:
+                progressDialog.close()
+            self.refresh(select=folder)
+
     def onBatchAdd(self):
         from StaticNeuroPET import StaticNeuroPETLogic
         from DICOMGatedDynamicPETLib import staticneuro as sn
@@ -925,7 +1300,7 @@ class NeuroPETDatabaseManagerWidget(ScriptedLoadableModuleWidget):
             return
         logic = StaticNeuroPETLogic()
         try:
-            plan, _ = logic.batchPlan(header)
+            plan, _ = logic.batchPlan(header, folder)
         except ValueError as error:
             _error(slicer.util.mainWindow(), str(error))
             return
@@ -956,6 +1331,11 @@ class NeuroPETDatabaseManagerWidget(ScriptedLoadableModuleWidget):
         qcCheck = qt.QCheckBox("Save a QC picture of each subject (PET over the MNI T1, 3 slices) in qc/")
         qcCheck.checked = True
         form.addRow(qcCheck)
+        replaceCheck = qt.QCheckBox("Normalize again the subjects already in the database (replace them)")
+        replaceCheck.toolTip = ("For the next iteration of the template: every subject is normalized again (to the "
+                                "database's template) and replaced; subjects not in the folder stay as they are.")
+        replaceCheck.checked = bool(normaldb.templatePath(folder, header))
+        form.addRow(replaceCheck)
         found = qt.QLabel()
         found.wordWrap = True
         form.addRow(found)
@@ -998,13 +1378,16 @@ class NeuroPETDatabaseManagerWidget(ScriptedLoadableModuleWidget):
             existing = sum(1 for f in files if normaldb.hasSubject(folder, sn.bidsSubjectId(f)))
             ids = [sn.bidsSubjectId(f) for f in files]
             duplicates = len(ids) - len(set(ids))
-            found.text = (f"{len(files)} PET image(s)" + (f", {existing} already in the database (skipped)"
+            replace = bool(replaceCheck.checked)
+            found.text = (f"{len(files)} PET image(s)" + (f", {existing} already in the database ("
+                                                           + ("normalized again" if replace else "skipped") + ")"
                                                            if existing else "")
                           + (f"; {duplicates} subject(s) appear twice: pick one session" if duplicates else "") + ".")
-            run.enabled = len(files) > existing
+            run.enabled = len(files) > existing or (replace and len(files) > 0)
 
         folderEdit.connect("currentPathChanged(QString)", scan)
         sessionCombo.connect("currentIndexChanged(int)", pick)
+        replaceCheck.connect("toggled(bool)", pick)
         scan()
         result = {}
 
@@ -1013,7 +1396,8 @@ class NeuroPETDatabaseManagerWidget(ScriptedLoadableModuleWidget):
             if not atlas:
                 _error(dialog, "Pick the Neuro atlas folder (MNI 2009c templates).")
                 return
-            result.update(files=list(state["files"]), atlas=atlas, qc=bool(qcCheck.checked))
+            result.update(files=list(state["files"]), atlas=atlas, qc=bool(qcCheck.checked),
+                          replace=bool(replaceCheck.checked))
             qt.QSettings().setValue(SETTINGS_BATCH_FOLDER, folderEdit.currentPath)
             self.logic.setAtlasFolder(atlasEdit.currentPath)
             dialog.accept()
@@ -1032,7 +1416,8 @@ class NeuroPETDatabaseManagerWidget(ScriptedLoadableModuleWidget):
             return not progressDialog.wasCanceled
 
         try:
-            rows, logPath, stopped = logic.batchAdd(folder, files, result["atlas"], result["qc"], progress)
+            rows, logPath, stopped = logic.batchAdd(folder, files, result["atlas"], result["qc"], progress,
+                                                    result["replace"])
         except Exception as error:
             logging.exception("Batch add failed")
             _error(slicer.util.mainWindow(), f"The batch could not start:\n{error}")
@@ -1140,6 +1525,34 @@ class NeuroPETDatabaseManagerTest(ScriptedLoadableModuleTest):
     def runTest(self):
         self.setUp()
         self.test_ReferenceMask()
+        self.setUp()
+        self.test_Statistics()
+
+    def test_Statistics(self):
+        import tempfile
+        root = tempfile.mkdtemp()
+        folder = normaldb.createDatabase(root, normaldb.newHeader("stats", nuclide="F-18", tracer="FDG",
+                                                                  smoothingFwhmMm=0.0))
+        values = (1.0, 2.0, 4.0)
+        for index, value in enumerate(values):
+            node = slicer.util.addVolumeFromArray(np.full((5, 6, 7), value, dtype=np.float32))
+            suv, suvr = normaldb.subjectFileNames(f"S{index}")
+            for relative in (suv, suvr):
+                slicer.util.saveNode(node, os.path.join(folder, relative))
+            slicer.mrmlScene.RemoveNode(node)
+            normaldb.addSubject(folder, {"id": f"S{index}", "age": 50, "suvFile": suv, "suvrFile": suvr})
+        logic = NeuroPETDatabaseManagerLogic()
+        header, notes = logic.computeStatistics(folder)
+        master = header["statistics"]["groups"][normaldb.MASTER]
+        self.assertEqual(master["n"], 3)
+        mean = slicer.util.loadVolume(os.path.join(folder, master["mean"]), {"show": False})
+        sd = slicer.util.loadVolume(os.path.join(folder, master["sd"]), {"show": False})
+        self.assertAlmostEqual(float(slicer.util.arrayFromVolume(mean)[2, 3, 3]), np.mean(values), places=4)
+        self.assertAlmostEqual(float(slicer.util.arrayFromVolume(sd)[2, 3, 3]), np.std(values, ddof=1), places=4)
+        frozen = normaldb.freezeTemplate(folder)
+        self.assertEqual(frozen["normalization"]["method"], normaldb.NORM_PET_TEMPLATE)
+        self.assertTrue(normaldb.templatePath(folder, frozen))
+        self.delayDisplay("Statistics test passed")
 
     def test_ReferenceMask(self):
         import tempfile
@@ -1161,6 +1574,14 @@ class NeuroPETDatabaseManagerTest(ScriptedLoadableModuleTest):
         self.assertEqual(saved["referenceMask"], normaldb.REFERENCE_MASK_NAME)
         mask = slicer.util.loadLabelVolume(os.path.join(folder, normaldb.REFERENCE_MASK_NAME), {"show": False})
         self.assertEqual(int(np.count_nonzero(slicer.util.arrayFromVolume(mask))), 16)
+        # edit: another reference region makes the mask again; a new name renames the folder
+        edited, changes = normaldb.editedHeader(saved, dict(saved, referenceRegion=normaldb.REF_BRAINSTEM,
+                                                            name="test 2"))
+        folder = logic.editDatabase(folder, root, edited, changes, atlasFolder)
+        self.assertTrue(folder.endswith("test 2") or folder.endswith("test_2"))
+        mask = slicer.util.loadLabelVolume(os.path.join(folder, normaldb.REFERENCE_MASK_NAME), {"show": False})
+        self.assertEqual(int(np.count_nonzero(slicer.util.arrayFromVolume(mask))), 1)
+        self.assertEqual(normaldb.readHeader(folder)["referenceRegion"], normaldb.REF_BRAINSTEM)
         normaldb.deleteDatabase(folder, root)
         self.assertFalse(os.path.exists(folder))
         # pons from the CerebrA with pons (a segmentation whose segments are named Segment_<label value>)

@@ -74,6 +74,10 @@ def test_region_settings(tmp_path):
     (tmp_path / "stats" / "master_mean.nii.gz").write_bytes(b"m")
     header["statistics"]["groups"][normaldb.MASTER] = {"mean": "stats/master_mean.nii.gz"}
     assert sn.masterMeanPath(str(tmp_path), header).endswith("master_mean.nii.gz")
+    assert sn.petTemplatePath(str(tmp_path), header).endswith("master_mean.nii.gz")
+    (tmp_path / normaldb.TEMPLATE_NAME).write_bytes(b"t")
+    header["normalizationTemplate"] = {"file": normaldb.TEMPLATE_NAME}
+    assert sn.petTemplatePath(str(tmp_path), header).endswith(normaldb.TEMPLATE_NAME)
 
 
 def test_import_bids(tmp_path):
@@ -153,8 +157,12 @@ def test_batch_helpers(tmp_path):
                                  defaults)
     assert plan["template"] == "GM" and plan["linear"] == "ScaleSkewVersor3D" and plan["deformable"] is True
     assert plan["brainMask"] is False
-    with pytest.raises(ValueError, match="MR template"):
+    with pytest.raises(ValueError, match="template only"):
         sn.batchNormalization({"method": "anatomy"}, "T1", "iterative", defaults)
+    with pytest.raises(ValueError, match="no template"):
+        sn.batchNormalization({"method": "petTemplate"}, "T1", "iterative", defaults)
+    plan = sn.batchNormalization({"method": "petTemplate", "template": "GM"}, "T1", "iterative", defaults, True)
+    assert plan["method"] == "petTemplate" and plan["template"] == ""
 
 
 def test_qc_montage():

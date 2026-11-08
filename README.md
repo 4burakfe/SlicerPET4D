@@ -581,6 +581,24 @@ database:
 - **Add predefined database...**: a *predefined* database has no subject images, only mean and SD maps: either a
   package (.zip) or the maps picked one by one (master and each age group, with the number of subjects and whether
   they hold SUVR / SUV, or ratio / counts for SPECT).
+- **Compute mean / SD** (user defined databases): the mean and SD (n - 1) maps from the subjects' maps (SUVR, or
+  SUV for an SUV database), each smoothed with the database's **smoothing** FWHM (Gaussian; 8 mm is usual for FDG),
+  added one at a time so 100+ subjects fit in memory: the master map of all subjects and, when age stratified, each
+  age group with at least two subjects (`stats/master_mean.nii.gz`, `stats/age_<group>_sd.nii.gz`, ...). The
+  subjects are stored unsmoothed, so a new FWHM only needs this step again; the patient is smoothed the same way in
+  the review. The database version goes up at every computation.
+- **Use mean as template** (a study specific template, iterated): the master mean map is copied as
+  `template.nii.gz` and the database's normalization becomes PET to PET. Run **Batch add subjects...** again with
+  **Normalize again the subjects already in the database** (every subject registered to the template and replaced),
+  check the QC pictures and compute the mean / SD again; repeat once more if needed (1-2 iterations; each starts
+  from the MNI-anchored first pass, so the template stays in the MNI space). The template stays fixed when the mean /
+  SD maps are computed again, and the Neuro workflow's PET to PET normalization uses it (else the master mean). It
+  is exported with the database.
+- **Edit settings...**: the settings of the selected database in the creation form. A new reference region (or
+  erosion) makes the reference mask again and, for a user defined database, the subjects' SUVR maps from their SUV
+  maps; reference, smoothing or age group changes put the mean / SD maps out of date; a new name renames the folder.
+  A predefined database keeps the settings of its maps (reference, smoothing, age groups). Changing the normalization
+  warns that the subjects already in were normalized with the earlier settings.
 - **Batch add subjects...** (user defined databases): many normal subjects at once from a BIDS folder
   (`sub-<id>[_ses-<session>]_pet.nii[.gz]` with the `.json` sidecars and `participants.tsv` for age and sex; pick the
   session, e.g. `SUV`). Each image is normalized to the MNI template with the database's normalization settings
