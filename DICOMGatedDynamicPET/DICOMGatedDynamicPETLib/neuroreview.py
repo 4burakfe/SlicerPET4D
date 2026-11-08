@@ -340,7 +340,8 @@ def maskedScores(scores, mask, factor=1.0):
     return out
 
 
-# Layouts: rows 1-2 slice views (PET with the region outlines; the score map), rows 3-4 the 3D-SSP views, the
+# Layouts (the views of equal, fixed size: no splitters between them, so a maximized view restores to its size;
+# only the table's width can be dragged): rows 1-2 slice views (PET with the region outlines; the score map), rows 3-4 the 3D-SSP views, the
 # region table on the right. Single monitor: all of it; dual monitor: the slices and the table in the main window,
 # the 3D-SSP views in a floating window placed on the second screen; and the slices (with the table) or the 3D-SSP
 # views alone.
@@ -385,7 +386,7 @@ def _sliceRows():
                 f'<property name="viewcolor" action="default">{color}</property>'
                 f'<property name="viewgroup" action="default">{VIEW_GROUP}</property>'
                 '</view></item>')
-    return ['<item><layout type="horizontal" split="true">' + "".join(
+    return ['<item><layout type="horizontal" split="false">' + "".join(
         sliceView(row, o, c, prefix + o[0]) for o, c in ORIENTATIONS) + '</layout></item>'
         for row, prefix in ((PET_ROW, ""), (SCORE_ROW, "S"))]
 
@@ -396,13 +397,13 @@ def _sspRows():
                 f'<property name="viewlabel" action="default">{title}</property>'
                 f'<property name="viewgroup" action="default">{VIEW_GROUP + 1}</property>'
                 '</view></item>')
-    return ['<item><layout type="horizontal" split="true">' + "".join(
+    return ['<item><layout type="horizontal" split="false">' + "".join(
         threeD(k, t) for k, t in SSP_VIEWS[start:start + SSP_COLUMNS]) + '</layout></item>'
         for start in range(0, len(SSP_VIEWS), SSP_COLUMNS)]
 
 
 def _withTable(rows):
-    left = f'<layout type="vertical" split="true">{"".join(rows)}</layout>'
+    left = f'<layout type="vertical" split="false">{"".join(rows)}</layout>'
     table = (f'<view class="vtkMRMLTableViewNode" singletontag="{TABLE_VIEW}">'
              '<property name="viewlabel" action="default">R</property></view>')
     return (f'<layout type="horizontal" split="true"><item splitSize="750">{left}</item>'
@@ -415,12 +416,12 @@ def layoutXml(layoutId=LAYOUT_SINGLE, mainViewportAttributes=""):
     if layoutId == LAYOUT_SLICES:
         return _withTable(_sliceRows())
     if layoutId == LAYOUT_SSP:
-        return f'<layout type="vertical" split="true">{"".join(_sspRows())}</layout>'
+        return f'<layout type="vertical" split="false">{"".join(_sspRows())}</layout>'
     if layoutId == LAYOUT_DUAL:
         main = _withTable(_sliceRows())
         main = main.replace('<layout type="horizontal" split="true">',
                             f'<layout type="horizontal" split="true"{mainViewportAttributes}>', 1)
         return ('<viewports>' + main
-                + f'<layout name="StaticNeuroMonitor2" type="vertical" split="true" label="{MONITOR2_TITLE}" '
+                + f'<layout name="StaticNeuroMonitor2" type="vertical" split="false" label="{MONITOR2_TITLE}" '
                   'dockable="true" dockPosition="floating">' + "".join(_sspRows()) + '</layout></viewports>')
     return _withTable(_sliceRows() + _sspRows())
