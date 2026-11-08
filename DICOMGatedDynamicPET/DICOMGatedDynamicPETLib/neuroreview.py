@@ -35,6 +35,11 @@ GM_MINIMUM = 0.5                # score slices: where the MNI grey matter probab
                                 # independent: the cortex also with a striatal tracer such as fallypride)
 HIDE_BELOW = 2.0                # score slices: |score| below this transparent (the PET / MR under it)
 MASK_GM, MASK_UPTAKE = "gm", "uptake"
+STYLE_BRIGHTNESS, STYLE_MASKED = "brightness", "masked"
+SCORE_STYLES = ((STYLE_BRIGHTNESS, "Score as color, PET as brightness"),
+                (STYLE_MASKED, "Score map (masked, thresholded)"))
+BRIGHTNESS_PERCENTILE = 99.5    # the PET brightness: full at this percentile of the patient's map
+BRIGHTNESS_GAMMA = 0.8
 SCORE_MASKS = ((MASK_GM, "Grey matter (MNI probability)"), (MASK_UPTAKE, "High normal uptake"))
 SD_FLOOR_FRACTION = 0.2         # SD floor: 20 % of the median SD in the mask
 DEFAULT_MAXIMUM = 5.0           # score window: -5 ... +5, 0 in the middle
@@ -353,6 +358,26 @@ def divergingColors(table, hypoOnly=False, count=256, grey=GREY):
     if hypoOnly:
         rgba[np.linspace(-1.0, 1.0, count) > 0, :3] = grey
     return rgba
+
+
+def petBrightness(values, percentile=BRIGHTNESS_PERCENTILE, gamma=BRIGHTNESS_GAMMA):
+    """0..1 brightness of the patient's map: its values over the percentile of the positive ones, to a gamma."""
+    values = np.nan_to_num(np.asarray(values, dtype=np.float32))
+    positive = values[values > 0]
+    top = float(np.percentile(positive, percentile)) if positive.size else 1.0
+    out = np.clip(values / np.float32(top if top > 0 else 1.0), 0.0, 1.0)
+    return out ** np.float32(gamma) if gamma != 1.0 else out
+
+
+def brightnessColors(scores, brightness, rgba, maximum):
+    """uint8 RGB (shape + (3,)) of a score map in color (the colour table rgba over -maximum .. maximum, 0 in the
+    middle) times the brightness (0..1): the PET's own pattern lit in the score's colors, no threshold or mask."""
+    rgba = np.asarray(rgba, dtype=np.float32)
+    count = len(rgba)
+    scores = np.nan_to_num(np.asarray(scores, dtype=np.float32))
+    index = np.clip(np.rint((scores + maximum) / (2.0 * maximum) * (count - 1)), 0, count - 1).astype(np.int32)
+    rgb = rgba[index, :3] * np.asarray(brightness, dtype=np.float32)[..., None]
+    return np.clip(np.rint(rgb * 255.0), 0, 255).astype(np.uint8)
 
 
 def maskedScores(scores, mask, factor=1.0, hideBelow=0.0):

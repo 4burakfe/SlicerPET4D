@@ -671,7 +671,9 @@ steps, on the toolbar like the Dynamic Neuro Receptor PET:
      than the SD of a regional mean, so these scores are conservative). The optic chiasm is left out of the regions.
    - **Display**: PET colors and window; score colors (ColdToHotRainbow, DivergingBlueRed, Plasma or Viridis: below the
      normals cold, above them hot, 0 in the middle) over a window symmetric about 0 (default +/- 5); *Below the
-     normals only* greys the positive side. **Scores shown in**: *Grey matter* (default; the MNI grey matter
+     normals only* greys the positive side. **Score slices**: *Score as color, PET as brightness* (default: each voxel
+     colored by its score and as bright as the patient's uptake there, with no threshold or mask; the data probe still
+     reads the score) or *Score map* (masked and thresholded, below). **Scores shown in** (score map): *Grey matter* (default; the MNI grey matter
      probability >= 0.5, the same for every tracer, so the cortex stays with a striatal tracer such as fallypride) or
      *High normal uptake* (the normal mean above a percentage of its maximum, default 50 %). **Hide |score| below**
      (default 2): only the clusters below / above the normals are colored. **Score background**: the PET in grey
