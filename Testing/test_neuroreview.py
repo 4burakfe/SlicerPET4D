@@ -98,6 +98,15 @@ def test_label_map_and_lookup():
     assert nr.labelAt(labels, ijkToRas, (100.0, 0.0, 0.0)) == 0
 
 
+def test_inside_point():
+    labels = np.zeros((1, 9, 9), dtype=np.int16)
+    labels[0, 0, :] = 1                             # an L: its centroid is outside it
+    labels[0, :, 0] = 1
+    point = nr.insidePoint(labels, 1)
+    assert labels[point] == 1
+    assert nr.insidePoint(labels, 2) is None
+
+
 def test_json_roundtrip(tmp_path):
     path = os.path.join(tmp_path, "stats", "regions.json")
     nr.writeJson(path, nr.regionsDocument({"master": {}}, "suvrFile", 3))

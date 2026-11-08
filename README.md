@@ -678,7 +678,7 @@ steps, on the toolbar like the Dynamic Neuro Receptor PET:
      legends**: one on the left of each row.
    - **Region table**: the region color, SUVmean, the value of the database's map type (SUVR / ratio), the normals'
      mean, SD and n, and the score; as wide as its content. Click a column header to sort (by name or by value);
-     click a region to show it alone on the slices for 5 s.
+     click a region to show it alone on the slices for 5 s, the slices moved through it.
    - **3D-SSP** (Minoshima et al. 1995): the surface of all the regions together; each vertex takes the maximum of
      the patient's smoothed map along its inward normal (0-13.5 mm, 1 mm steps). **Map**: the score (default) or the
      patient's projected values (SUVR for an SUVR database, else SUV; smoothed). **Score from**: *Minoshima*

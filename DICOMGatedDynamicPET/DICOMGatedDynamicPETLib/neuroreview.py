@@ -221,6 +221,16 @@ def labelAt(labels, ijkToRas, ras):
     return int(labels[k, j, i])
 
 
+def insidePoint(labels, label):
+    """(k, j, i) of the voxel of a label nearest to its centroid (a point inside the region, also for a curved one);
+    None when the label has no voxel."""
+    where = np.argwhere(np.asarray(labels) == label)
+    if not len(where):
+        return None
+    centroid = where.mean(axis=0)
+    return tuple(int(v) for v in where[np.argmin(((where - centroid) ** 2).sum(axis=1))])
+
+
 def approximateRegions(meanMap, sdMap, masks):
     """{region: [mean of the mean map, mean of the SD map, None]}: a predefined database without regional
     statistics. The mean voxel SD is larger than the SD of the regional mean, so scores from it are conservative."""
