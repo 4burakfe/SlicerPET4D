@@ -85,6 +85,19 @@ def test_regions():
     assert nr.isDroppedSegment("Optic Chiasm") and not nr.isDroppedSegment("Putamen R")
 
 
+def test_label_map_and_lookup():
+    a = np.zeros((2, 3, 4), dtype=bool)
+    b = np.zeros((2, 3, 4), dtype=bool)
+    a[0, 0, :2] = True
+    b[0, 0, 1:3] = True                             # overlaps A at i = 1: A kept
+    labels, names = nr.labelMap({"A": a, "B": b}, a.shape)
+    assert names == ["A", "B"] and labels[0, 0].tolist() == [1, 1, 2, 0]
+    ijkToRas = np.diag([2.0, 1.0, 1.0, 1.0])      # x = 2 i
+    assert nr.labelAt(labels, ijkToRas, (4.0, 0.0, 0.0)) == 2
+    assert nr.labelAt(labels, ijkToRas, (0.9, 0.2, 0.0)) == 1
+    assert nr.labelAt(labels, ijkToRas, (100.0, 0.0, 0.0)) == 0
+
+
 def test_json_roundtrip(tmp_path):
     path = os.path.join(tmp_path, "stats", "regions.json")
     nr.writeJson(path, nr.regionsDocument({"master": {}}, "suvrFile", 3))

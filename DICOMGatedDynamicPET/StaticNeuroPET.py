@@ -585,6 +585,7 @@ class StaticNeuroPETLogic(DynamicNeuroPETLogic):
             ratio = None
             masks = self.segmentMasks(segmentation, grid)
             result.update(grid=grid, names=list(masks), suv=nr.regionMeans(suv, masks))
+            result["labels"] = nr.labelMap(masks, values.shape)       # the region names at the mouse
             if referenceSegmentId:
                 mask = slicer.util.arrayFromSegmentBinaryLabelmap(segmentation, referenceSegmentId, grid)
                 if mask is not None and np.any(mask):
@@ -622,6 +623,7 @@ class StaticNeuroPETLogic(DynamicNeuroPETLogic):
             values, referenceMean = sn.ratioMap(suv, referenceMask)
             result["referenceMean"] = referenceMean
         masks = self.segmentMasks(segmentation, grid)
+        result["labels"] = nr.labelMap(masks, mean.shape)             # the region names at the mouse
         result.update(grid=grid, names=list(masks), suv=nr.regionMeans(suv, masks),
                       values=nr.regionMeans(values, masks), ratio=ratio, n=group.get("n"))
         # voxel scores: the patient smoothed like the normals, in the mask, with the SD floor
@@ -3017,22 +3019,32 @@ class StaticNeuroPETWidget(DynamicNeuroPETWidget):
             display = segmentation.GetDisplayNode() if segmentation is not None else None
             names = []
             widget = None
-            if (sliceNode is not None and display is not None and display.GetVisibility()
-                    and display.GetVisibility2DOutline() and display.IsDisplayableInView(sliceNode.GetID())):
+            if sliceNode is not None and display is not None:
                 layoutManager = slicer.app.layoutManager()
                 widget = layoutManager.sliceWidget(sliceNode.GetLayoutName()) if layoutManager else None
             if widget is not None and any(w is widget for _, w in self._reviewSliceWidgets()):
                 ras = [0.0, 0.0, 0.0]
                 crosshair.GetCursorPositionRAS(ras)
-                manager = widget.sliceView().displayableManagerByClassName("vtkMRMLSegmentationsDisplayableManager2D")
-                ids = vtk.vtkStringArray()
-                if manager is not None:
-                    manager.GetVisibleSegmentsForPosition(ras, display, ids)
-                seg = segmentation.GetSegmentation()
-                for i in range(ids.GetNumberOfValues()):
-                    segment = seg.GetSegment(ids.GetValue(i))
-                    if segment is not None:
-                        names.append(segment.GetName())
+                result = self.reviewResult or {}
+                if result.get("labels") is not None and result.get("segmentation") is segmentation:
+                    # the regions of the comparison: named also with the outlines hidden (a region hidden by a click
+                    # in the table is not named)
+                    labels, regionNames = result["labels"]
+                    found = nr.labelAt(labels, _ijkToRas(result["grid"]), ras)
+                    _, ids = self._segmentColors()
+                    if found and display.GetSegmentVisibility(ids.get(regionNames[found - 1], "")):
+                        names.append(regionNames[found - 1])
+                elif display.GetVisibility() and display.GetVisibility2DOutline():
+                    manager = widget.sliceView().displayableManagerByClassName(
+                        "vtkMRMLSegmentationsDisplayableManager2D")
+                    ids = vtk.vtkStringArray()
+                    if manager is not None:
+                        manager.GetVisibleSegmentsForPosition(ras, display, ids)
+                    seg = segmentation.GetSegmentation()
+                    for i in range(ids.GetNumberOfValues()):
+                        segment = seg.GetSegment(ids.GetValue(i))
+                        if segment is not None:
+                            names.append(segment.GetName())
             if not names:
                 self._hideHoverName()
                 return

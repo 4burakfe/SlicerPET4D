@@ -200,6 +200,27 @@ def unionMask(masks, shape):
     return union
 
 
+def labelMap(masks, shape):
+    """(int16 labels, names) of the regions: label i + 1 is names[i] (where regions overlap, the first)."""
+    labels = np.zeros(shape, dtype=np.int16)
+    names = []
+    for name, mask in masks.items():
+        names.append(name)
+        labels[np.asarray(mask, dtype=bool) & (labels == 0)] = len(names)
+    return labels, names
+
+
+def labelAt(labels, ijkToRas, ras):
+    """The label (0: none) of the voxel at a RAS point (nearest voxel of the grid ijkToRas; 0 outside it)."""
+    inverse = np.linalg.inv(np.asarray(ijkToRas, dtype=np.float64))
+    ijk = inverse[:3, :3] @ np.asarray(ras, dtype=np.float64) + inverse[:3, 3]
+    k, j, i = (int(np.floor(v + 0.5)) for v in ijk[::-1])
+    shape = np.shape(labels)
+    if not (0 <= k < shape[0] and 0 <= j < shape[1] and 0 <= i < shape[2]):
+        return 0
+    return int(labels[k, j, i])
+
+
 def approximateRegions(meanMap, sdMap, masks):
     """{region: [mean of the mean map, mean of the SD map, None]}: a predefined database without regional
     statistics. The mean voxel SD is larger than the SD of the regional mean, so scores from it are conservative."""
