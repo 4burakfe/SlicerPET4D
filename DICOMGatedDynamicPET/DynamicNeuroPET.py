@@ -57,8 +57,13 @@ NORMALIZED_SUFFIX = " MNI"
 REGIONS_NAME = "CerebrA regions"
 REFERENCE_SUFFIX = " (reference)"
 ATLAS_LATERAL, ATLAS_BILATERAL = "lateral", "bilateral"
+ATLAS_GROUPED, ATLAS_GROUPED_BILATERAL = "grouped", "groupedBilateral"
 ATLAS_KINDS = ((ATLAS_LATERAL, "CerebrA, left and right separate (Putamen R / L)"),
-               (ATLAS_BILATERAL, "CerebrA bilateral, sides merged (Putamen)"))
+               (ATLAS_BILATERAL, "CerebrA bilateral, sides merged (Putamen)"),
+               (ATLAS_GROUPED, "CerebrA broad regions, left and right (Prefrontal R / L)"),
+               (ATLAS_GROUPED_BILATERAL, "CerebrA broad regions, sides merged (Prefrontal)"))
+GROW_MM, ERODE_REFERENCE_MM = 0.0, 0.0      # defaults: regions as in the atlas
+WM_PROBABILITY_LIMIT = 0.5      # the regions grow only into voxels with a lower white matter probability
 DEFAULT_TARGET = "Putamen"
 DEFAULT_MODEL = "SRTM"
 
@@ -479,11 +484,76 @@ class DynamicNeuroPETLogic(ScriptedLoadableModuleLogic):
                 if node is not None and scene.IsNodePresent(node):
                     scene.RemoveNode(node)
 
+    def ensureGrouped(self, atlas, mergeSides=False):
+        """The grouped CerebrA (broad regions of neuro.groupsCsv, sides separate or merged): (labels path, CSV
+        path, overlay path or None). Made on first use and whenever the groups, the CerebrA labels or the pons
+        changed, saved next to CerebrA (else in Slicer's temporary folder)."""
+        labelsPath, csvPath, overlayPath = neuro.groupedPaths(atlas, mergeSides)
+        if labelsPath is None or not neuro.labelsCsv(atlas):
+            raise ValueError("The CerebrA files are not in the atlas folder.")
+        structures = neuro.readCerebraLabels(neuro.labelsCsv(atlas))
+        groups = neuro.readGroups(neuro.groupsCsv(atlas))
+        entries, mapping, unknown = neuro.groupedTable(structures, groups, mergeSides)
+        if unknown:
+            logging.warning("Neuro: structures of the groups table not in CerebrA: " + ", ".join(unknown))
+        text = neuro.groupedCsvText(entries, groups)
+        ponsOverlay = self.ensurePonsOverlays(atlas)[0]
+        overlayValues = set(neuro.overlayValues(structures)) & set(mapping)
+        wantOverlay = bool(ponsOverlay) and bool(overlayValues)
+
+        def fresh():
+            try:
+                with open(csvPath, encoding="utf-8") as f:
+                    if f.read() != text:
+                        return False
+                newest = max(os.path.getmtime(p) for p in (atlas[neuro.CEREBRA_LABELS], ponsOverlay) if p)
+                files = [labelsPath] + ([overlayPath] if wantOverlay else [])
+                return all(os.path.isfile(p) and os.path.getmtime(p) >= newest for p in files)
+            except OSError:
+                return False
+
+        if fresh():
+            return labelsPath, csvPath, (overlayPath if wantOverlay else None)
+        scene = slicer.mrmlScene
+        array, source = self._loadLabels(atlas[neuro.CEREBRA_LABELS])
+        out = scene.AddNewNodeByClass("vtkMRMLLabelMapVolumeNode", "CerebrA grouped")
+        overlayNode = None
+        try:
+            out.SetIJKToRASMatrix(_vtkMatrix(_ijkToRas(source)))
+            grouped = neuro.remapLabels(array, mapping).astype(np.int16)
+            overlay = None
+            if wantOverlay:
+                ponsArray, overlayNode = self._loadLabels(ponsOverlay)
+                overlay = neuro.remapLabels(ponsArray, {v: mapping[v] for v in overlayValues}).astype(np.int16)
+            for folder in (os.path.dirname(labelsPath), slicer.app.temporaryPath):
+                paths = [os.path.join(folder, os.path.basename(p)) for p in (labelsPath, csvPath, overlayPath)]
+                try:
+                    with open(paths[1], "w", newline="", encoding="utf-8") as f:
+                        f.write(text)
+                    for path, values in ((paths[0], grouped), (paths[2], overlay)):
+                        if values is None:
+                            continue
+                        slicer.util.updateVolumeFromArray(out, values)
+                        if not slicer.util.saveNode(out, path):
+                            raise OSError(f"could not write {path}")
+                    logging.info(f"Neuro: grouped CerebrA saved as {paths[0]} and {paths[1]}")
+                    return paths[0], paths[1], (paths[2] if wantOverlay else None)
+                except OSError:
+                    logging.warning(f"Neuro: could not save the grouped CerebrA in {folder}", exc_info=True)
+            raise RuntimeError("Could not save the grouped CerebrA files.")
+        finally:
+            for node in (source, out, overlayNode):
+                if node is not None and scene.IsNodePresent(node):
+                    scene.RemoveNode(node)
+
     @staticmethod
     def atlasEntries(atlas, kind):
         """[(label value, segment name, (r, g, b))] of a CerebrA version: ATLAS_LATERAL ('Putamen R', 'Putamen L')
         or ATLAS_BILATERAL ('Putamen'; from the bilateral CSV when it exists, else from the CerebrA CSV)."""
         structures = neuro.readCerebraLabels(neuro.labelsCsv(atlas))
+        if kind in (ATLAS_GROUPED, ATLAS_GROUPED_BILATERAL):
+            groups = neuro.readGroups(neuro.groupsCsv(atlas))
+            return neuro.groupedTable(structures, groups, kind == ATLAS_GROUPED_BILATERAL)[0]
         if kind == ATLAS_BILATERAL and neuro.BILATERAL_CSV in atlas and os.path.isfile(atlas[neuro.BILATERAL_CSV]):
             entries = neuro.readBilateralLabels(atlas[neuro.BILATERAL_CSV])
             if [n for _, n, _ in entries] == [st["name"] for st in structures]:
@@ -494,25 +564,40 @@ class DynamicNeuroPETLogic(ScriptedLoadableModuleLogic):
         """(labels path, entries, overlay path or None) of a CerebrA version; the bilateral one and the pons
         overlays (CerebrA with pons) are made first when they are missing."""
         lateralOverlay, bilateralOverlay = self.ensurePonsOverlays(atlas)
+        if kind in (ATLAS_GROUPED, ATLAS_GROUPED_BILATERAL):
+            labelsPath, csvPath, overlayPath = self.ensureGrouped(atlas, kind == ATLAS_GROUPED_BILATERAL)
+            return labelsPath, neuro.readBilateralLabels(csvPath), overlayPath
         if kind == ATLAS_BILATERAL:
             labelsPath, csvPath = self.ensureBilateral(atlas)
             return labelsPath, neuro.readBilateralLabels(csvPath), bilateralOverlay
         return atlas[neuro.CEREBRA_LABELS], self.atlasEntries(atlas, ATLAS_LATERAL), lateralOverlay
 
     def loadRegions(self, labelsPath, entries, referencePath=None, referenceName=None, referenceEntries=None,
-                    name=REGIONS_NAME, overlayPath=None, referenceOverlayPath=None):
+                    name=REGIONS_NAME, overlayPath=None, referenceOverlayPath=None, growMm=0.0, erodeReferenceMm=0.0,
+                    allowedMask=None):
         """A segmentation of the atlas labels (labelsPath, entries [(value, name, color)]) with their names. The
         reference region referenceName comes from referencePath (another version of the atlas on the same grid, e.g.
         the bilateral one, with its referenceEntries) as a segment of its own, or, when referencePath is labelsPath
         (or None), is the segment of that name. overlayPath / referenceOverlayPath: label maps of structures that
-        overlap the others (the pons), added as segments of their own. Returns (segmentation node, reference segment
-        ID or None)."""
+        overlap the others (the pons), added as segments of their own. growMm: the regions grown into the unlabelled
+        voxels (each to the nearest region, so they never overlap; only where allowedMask, when given on the same
+        grid; ventricles fixed; the overlays not grown). erodeReferenceMm: the reference region eroded (then always a
+        segment of its own, made from the atlas before growing). Returns (segmentation node, reference segment ID or
+        None)."""
         scene = slicer.mrmlScene
         array, source = self._loadLabels(labelsPath)
         colorNode = labelNode = referenceNode = overlayNode = None
         try:
             values = {v for v, _, _ in entries}
             remapped = neuro.remapLabels(array, {v: v for v in values}).astype(np.int16)
+            original = remapped
+            spacing = tuple(float(x) for x in source.GetSpacing())[::-1]       # of the numpy axes (k, j, i)
+            if growMm > 0:
+                allowed = allowedMask if allowedMask is not None and np.shape(allowedMask) == array.shape else None
+                if allowedMask is not None and allowed is None:
+                    logging.warning("Neuro: the brain mask is not on the atlas grid; regions grown without it")
+                remapped = neuro.growLabels(remapped, growMm, spacing, allowed,
+                                            neuro.fixedValuesOf(entries)).astype(np.int16)
             colorNode = scene.AddNewNodeByClass("vtkMRMLColorTableNode", scene.GenerateUniqueName("CerebrA colors"))
             colorNode.SetTypeToUser()
             top = max(values) + 1
@@ -546,9 +631,22 @@ class DynamicNeuroPETLogic(ScriptedLoadableModuleLogic):
                 overlayNode = None
             referenceId = None
             if referenceName:
-                if referencePath is None or os.path.normcase(os.path.abspath(referencePath)) == \
-                        os.path.normcase(os.path.abspath(labelsPath)):
+                sameAtlas = referencePath is None or os.path.normcase(os.path.abspath(referencePath)) == \
+                    os.path.normcase(os.path.abspath(labelsPath))
+                if sameAtlas and erodeReferenceMm <= 0 and growMm <= 0:
                     referenceId = self.segmentIdByName(segmentation, referenceName)
+                elif sameAtlas:
+                    # the reference of the atlas as drawn (not grown), eroded: a segment of its own
+                    referenceValue = self.entryValue(entries, referenceName)
+                    if referenceValue is None:
+                        raise ValueError(f"No region '{referenceName}' in the atlas.")
+                    referenceMask = original == referenceValue
+                    if not referenceMask.any() and overlayPath:
+                        overlay, overlayNode = self._loadLabels(overlayPath)
+                        referenceMask = overlay == referenceValue
+                    referenceId = self._addMaskSegment(
+                        segmentation, neuro.erodeMask(referenceMask, erodeReferenceMm, spacing), labelNode,
+                        referenceName + REFERENCE_SUFFIX, (0.85, 0.85, 0.2))
                 else:
                     referenceArray, referenceNode = self._loadLabels(referencePath)
                     if referenceArray.shape != array.shape:
@@ -561,6 +659,9 @@ class DynamicNeuroPETLogic(ScriptedLoadableModuleLogic):
                         overlay, overlayNode = self._loadLabels(referenceOverlayPath)
                         if overlay.shape == array.shape:
                             referenceMask = overlay == referenceValue
+                    referenceMask = neuro.erodeMask(referenceMask, erodeReferenceMm, spacing)
+                    if not referenceMask.any():
+                        raise ValueError(f"The reference region '{referenceName}' is empty (eroded too much?).")
                     referenceId = self._addMaskSegment(segmentation, referenceMask, labelNode,
                                                        referenceName + REFERENCE_SUFFIX, (0.85, 0.85, 0.2))
             segmentation.SetAttribute(NEURO_PREFIX + "Atlas", os.path.basename(labelsPath))
@@ -583,7 +684,28 @@ class DynamicNeuroPETLogic(ScriptedLoadableModuleLogic):
                 return value
         return None
 
-    def loadAtlasRegions(self, atlas, targetKind=None, referenceKind=None, referenceName=None):
+    def growthMask(self, atlas):
+        """Voxels the regions may grow into: in the MNI brain mask and, when the white matter probability map is
+        there, below WM_PROBABILITY_LIMIT. None without a brain mask."""
+        if neuro.BRAIN_MASK not in atlas:
+            return None
+        mask, node = self._loadLabels(atlas[neuro.BRAIN_MASK])
+        slicer.mrmlScene.RemoveNode(node)
+        allowed = mask > 0
+        if "WM" in atlas:
+            wmNode = slicer.util.loadVolume(atlas["WM"], {"show": False})
+            try:
+                wm = slicer.util.arrayFromVolume(wmNode).astype(np.float32)
+                if wm.max() > 1.5:      # stored 0-100 or 0-255
+                    wm = wm / wm.max()
+                if wm.shape == allowed.shape:
+                    allowed &= wm < WM_PROBABILITY_LIMIT
+            finally:
+                slicer.mrmlScene.RemoveNode(wmNode)
+        return allowed
+
+    def loadAtlasRegions(self, atlas, targetKind=None, referenceKind=None, referenceName=None, growMm=GROW_MM,
+                         erodeReferenceMm=ERODE_REFERENCE_MM):
         """Regions of the atlas folder (neuro.findAtlasFiles): the target regions from one CerebrA version, the
         reference region from another (default: the left and right regions, the bilateral cerebellar grey matter
         as the reference). The CerebrA with pons is used when it is in the folder (its pons as segments of their
@@ -599,8 +721,10 @@ class DynamicNeuroPETLogic(ScriptedLoadableModuleLogic):
         referencePath, referenceEntries, referenceOverlayPath = self.atlasPaths(atlas, referenceKind)
         if referenceName is None:
             referenceName = defaultReferenceName(referenceEntries)
+        allowed = self.growthMask(atlas) if growMm > 0 else None
         return self.loadRegions(labelsPath, entries, referencePath, referenceName, referenceEntries,
-                                overlayPath=overlayPath, referenceOverlayPath=referenceOverlayPath)
+                                overlayPath=overlayPath, referenceOverlayPath=referenceOverlayPath, growMm=growMm,
+                                erodeReferenceMm=erodeReferenceMm, allowedMask=allowed)
 
     @staticmethod
     def _addMaskSegment(segmentation, mask, geometryNode, name, color):
@@ -1546,8 +1670,11 @@ class DynamicNeuroPETWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.targetAtlasCombo.setCurrentIndex(self.targetAtlasCombo.findData(ATLAS_LATERAL))
         self.referenceAtlasCombo.setCurrentIndex(self.referenceAtlasCombo.findData(ATLAS_BILATERAL))
         self.targetAtlasCombo.toolTip = ("Atlas of the regions modelled: left and right separate ('Putamen R', "
-                                         "'Putamen L', 102 regions) or merged ('Putamen', 51 regions). The bilateral "
-                                         "version is made from CerebrA on first use and saved next to it.")
+                                         "'Putamen L', 102 regions) or merged ('Putamen', 51 regions), or the broad "
+                                         "regions of the groups table (Prefrontal, Lateral Occipital, ...; "
+                                         "Resources/Atlas/CerebrA_groups.csv, or CerebrA_groups.csv in the atlas "
+                                         "folder). The bilateral and the grouped versions are made on first use and "
+                                         "saved next to CerebrA.")
         self.referenceAtlasCombo.toolTip = ("Atlas the reference region is taken from (bilateral by default: both "
                                             "sides of the cerebellar grey matter in one region)")
         form.addRow("Region atlas:", self.targetAtlasCombo)
@@ -1556,6 +1683,29 @@ class DynamicNeuroPETWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.referenceRegionCombo.toolTip = ("Reference region of the reference tissue models (no specific binding; "
                                              "the cerebellar grey matter by default)")
         form.addRow("Reference region:", self.referenceRegionCombo)
+        self.growSpin = qt.QDoubleSpinBox()
+        self.growSpin.setRange(0.0, 10.0)
+        self.growSpin.setDecimals(1)
+        self.growSpin.singleStep = 0.5
+        self.growSpin.suffix = " mm"
+        self.growSpin.specialValueText = "Off"
+        self.growSpin.value = GROW_MM
+        self.growSpin.toolTip = (
+            "Grow the regions into the unlabelled voxels around them (sulcal CSF, the edge of the cortex), for the "
+            "PET resolution. Each voxel goes to the nearest region, so regions never overlap. Only inside the MNI "
+            "brain mask and outside the white matter (probability < 0.5, when the WM map is in the atlas folder); "
+            "the ventricles and the pons do not grow.")
+        form.addRow("Grow regions:", self.growSpin)
+        self.erodeSpin = qt.QDoubleSpinBox()
+        self.erodeSpin.setRange(0.0, 10.0)
+        self.erodeSpin.setDecimals(1)
+        self.erodeSpin.singleStep = 0.5
+        self.erodeSpin.suffix = " mm"
+        self.erodeSpin.specialValueText = "Off"
+        self.erodeSpin.value = ERODE_REFERENCE_MM
+        self.erodeSpin.toolTip = ("Erode the reference region (taken from the atlas before growing), so spill-over "
+                                  "from the neighbouring tissue does not reach it.")
+        form.addRow("Erode reference:", self.erodeSpin)
         self.loadRegionsButton = _button("Load regions and go to modeling")
         form.addRow(self.loadRegionsButton)
         self.regionsLabel = qt.QLabel()
@@ -1622,7 +1772,7 @@ class DynamicNeuroPETWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         try:
             segmentation, referenceId = self.logic.loadAtlasRegions(
                 self.atlas, self.targetAtlasCombo.currentData, self.referenceAtlasCombo.currentData,
-                self.referenceRegionCombo.currentText or None)
+                self.referenceRegionCombo.currentText or None, float(self.growSpin.value), float(self.erodeSpin.value))
         except Exception as error:
             logging.exception("Neuro: could not load the regions")
             slicer.util.errorDisplay(f"Could not load the CerebrA regions:\n{error}")
@@ -1992,6 +2142,19 @@ class DynamicNeuroPETTest(ScriptedLoadableModuleTest):
         self.assertIn(neuro.PONS_BILATERAL_OVERLAY, atlas)
         self.assertEqual([n for _, n, _ in neuro.readBilateralLabels(atlas[neuro.BILATERAL_CSV])],
                          ["Putamen", "Cerebellum Gray Matter", "Pons"])
+        # broad regions (the extension's groups table): made on first use, the pons group from the overlay
+        grouped, groupedRef = logic.loadAtlasRegions(atlas, ATLAS_GROUPED_BILATERAL, ATLAS_GROUPED_BILATERAL)
+        names = sorted(grouped.GetSegmentation().GetSegment(i).GetName() for i in logic.segmentIds(grouped))
+        self.assertEqual(names, ["Cerebellum Gray Matter", "Pons", "Putamen"])
+        self.assertIn(neuro.GROUPED_BILATERAL_LABELS, neuro.findAtlasFiles(folder))
+        # grown regions (no brain mask here) and an eroded reference of its own
+        grown, grownRef = logic.loadAtlasRegions(atlas, ATLAS_BILATERAL, ATLAS_BILATERAL, growMm=1.0,
+                                                 erodeReferenceMm=0.5)
+        putamen = logic.segmentIdByName(grown, "Putamen")
+        self.assertGreater(int(np.count_nonzero(slicer.util.arrayFromSegmentBinaryLabelmap(grown, putamen))), 2 * 64)
+        self.assertEqual(grown.GetSegmentation().GetSegment(grownRef).GetName(),
+                         "Cerebellum Gray Matter" + REFERENCE_SUFFIX)
+        self.assertLess(int(np.count_nonzero(slicer.util.arrayFromSegmentBinaryLabelmap(grown, grownRef))), 2 * 64)
         self.delayDisplay("Regions test passed")
 
     def test_Widget(self):

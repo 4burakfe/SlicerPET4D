@@ -248,6 +248,7 @@ def newHeader(name, mode=STATIC, kind=USER_DEFINED, **fields):
         "referenceMask": "",
         "mapType": MAP_SUVR,
         "smoothingFwhmMm": 0.0,
+        "referenceErosionMm": 0.0,
         "ageStratified": False,
         "ageGroups": [],
         "scanner": "",
@@ -290,6 +291,8 @@ def validateHeader(header):
             errors.append(f"The acquisition {title} cannot be negative")
     if float(header.get("smoothingFwhmMm") or 0) < 0:
         errors.append("The smoothing cannot be negative")
+    if float(header.get("referenceErosionMm") or 0) < 0:
+        errors.append("The reference erosion cannot be negative")
     if header.get("ageStratified"):
         errors.extend(validateAgeGroups(header.get("ageGroups")))
     return errors
