@@ -1,0 +1,178 @@
+"""3D stereotactic surface projection (3D-SSP; Minoshima et al., J Nucl Med 1995) of the Static Neuro Review
+(numpy + scipy, no Slicer).
+
+    surface     the brain surface (the union of the regions, made in Slicer with VTK): its vertices (RAS mm), outward
+                normals and triangles
+    projection  each vertex takes the maximum of a map along its inward normal, from the surface to DEPTH_MM (13.5 mm,
+                six 2.25 mm voxels as in the original), sampled every STEP_MM with trilinear interpolation
+    scores      Minoshima: every normal's map (smoothed as the voxel maps) is projected, and the patient's projection
+                is scored against the vertex-wise mean / SD of the normals' projections (z, or the Crawford-Howell t);
+                voxel: the voxel score map itself projected (the most extreme score along the normal), quicker and
+                possible without the normals' projections, but not the same as the Minoshima scores
+    statistics  the normals' vertex mean / SD per group in an .npz with the surface (stats/ssp.npz, made with the
+                mean / SD maps; or on the fly, cached in the database's cache/)
+"""
+
+import hashlib
+import json
+import os
+
+import numpy as np
+
+from . import neuroreview as nr
+
+DEPTH_MM = 13.5
+STEP_MM = 1.0
+SOURCE_MINOSHIMA, SOURCE_VOXEL = "minoshima", "voxel"
+SOURCES = ((SOURCE_MINOSHIMA, "Minoshima (normals' projections)"), (SOURCE_VOXEL, "Voxel score map projected"))
+DEFAULT_SOURCE = SOURCE_MINOSHIMA
+MAP_SCORE, MAP_PATIENT = "score", "patient"
+MAPS = ((MAP_SCORE, "Score (z / t)"), (MAP_PATIENT, "Patient (projected values)"))
+SSP_FILE = "stats/ssp.npz"
+SURFACE_GREY = (0.62, 0.62, 0.62)
+
+# camera of each view: (direction from the brain centre to the camera, view up), RAS
+CAMERAS = {
+    "Top": ((0.0, 0.0, 1.0), (0.0, 1.0, 0.0)),
+    "Bottom": ((0.0, 0.0, -1.0), (0.0, 1.0, 0.0)),
+    "Ant": ((0.0, 1.0, 0.0), (0.0, 0.0, 1.0)),
+    "Post": ((0.0, -1.0, 0.0), (0.0, 0.0, 1.0)),
+    "Left": ((-1.0, 0.0, 0.0), (0.0, 0.0, 1.0)),
+    "Right": ((1.0, 0.0, 0.0), (0.0, 0.0, 1.0)),
+}
+
+
+def offsets(depthMm=DEPTH_MM, stepMm=STEP_MM):
+    """Distances (mm) sampled along the inward normal: 0, step, ..., depth."""
+    count = int(np.floor(depthMm / stepMm + 1e-6))
+    values = [i * stepMm for i in range(count + 1)]
+    if values[-1] < depthMm - 1e-6:
+        values.append(depthMm)
+    return np.array(values, dtype=np.float64)
+
+
+def rasToIjk(points, ijkToRas):
+    """(n, 3) RAS points as (n, 3) IJK coordinates of a grid (4 x 4 ijkToRas)."""
+    inverse = np.linalg.inv(np.asarray(ijkToRas, dtype=np.float64))
+    points = np.asarray(points, dtype=np.float64)
+    return points @ inverse[:3, :3].T + inverse[:3, 3]
+
+
+def project(array, ijkToRas, points, outwardNormals, mode="max", depthMm=DEPTH_MM, stepMm=STEP_MM, chunk=20000):
+    """Vertex values of a map (numpy array (k, j, i) on the grid ijkToRas): along each vertex's inward normal (the
+    outward normals negated, unit length), the maximum (mode "max") or the value of the largest magnitude ("extreme",
+    for signed score maps). Outside the grid the map is 0; NaN is taken as 0."""
+    from scipy import ndimage
+    array = np.nan_to_num(np.asarray(array, dtype=np.float32))
+    points = np.asarray(points, dtype=np.float64)
+    normals = np.asarray(outwardNormals, dtype=np.float64)
+    lengths = np.linalg.norm(normals, axis=1)
+    lengths[lengths == 0] = 1.0
+    inward = -normals / lengths[:, None]
+    distances = offsets(depthMm, stepMm)
+    out = np.zeros(len(points), dtype=np.float32)
+    for start in range(0, len(points), chunk):
+        p = points[start:start + chunk]
+        d = inward[start:start + chunk]
+        samples = p[:, None, :] + distances[None, :, None] * d[:, None, :]         # (v, s, 3) RAS
+        ijk = rasToIjk(samples.reshape(-1, 3), ijkToRas)
+        coordinates = ijk[:, ::-1].T                                                 # (k, j, i) rows
+        values = ndimage.map_coordinates(array, coordinates, order=1, mode="constant", cval=0.0)
+        values = values.reshape(len(p), len(distances))
+        if mode == "extreme":
+            index = np.argmax(np.abs(values), axis=1)
+            out[start:start + chunk] = values[np.arange(len(p)), index]
+        else:
+            out[start:start + chunk] = values.max(axis=1)
+    return out
+
+
+def scores(patient, mean, sd, n=None, kind=nr.SCORE_Z, floorFraction=nr.SD_FLOOR_FRACTION):
+    """Vertex z (or t) of the patient's projection against the normals' (positive: below the normals); the SD with
+    the floor of the voxel scores (a fraction of its median)."""
+    patient = np.asarray(patient, dtype=np.float32)
+    mean = np.asarray(mean, dtype=np.float32)
+    sd = nr.sdFloor(sd, np.ones(np.shape(sd), dtype=bool), floorFraction)
+    factor = nr.tFactor(n) if kind == nr.SCORE_T else 1.0
+    return ((mean - patient) / (sd * np.float32(factor))).astype(np.float32)
+
+
+def signature(points, normals, depthMm, stepMm, extra=()):
+    """Short hash of a surface (vertices, normals rounded to 0.01 mm) and the projection, the key of the cached
+    projections."""
+    digest = hashlib.sha1()
+    for values in (points, normals):
+        digest.update(np.round(np.asarray(values, dtype=np.float64), 2).astype(np.float32).tobytes())
+    digest.update(f"{depthMm:g}/{stepMm:g}".encode())
+    for value in extra:
+        digest.update(str(value).encode("utf-8"))
+    return digest.hexdigest()[:16]
+
+
+def write(path, surface, groups, meta):
+    """The surface ({"points", "normals", "triangles"}) and the normals' vertex statistics ({group key: {"mean", "sd",
+    "n", "name"}}) in an .npz; meta (depth, step, FWHM, map type, version, ...) as JSON inside."""
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    arrays = {"points": np.asarray(surface["points"], np.float32), "normals": np.asarray(surface["normals"], np.float32),
+              "triangles": np.asarray(surface["triangles"], np.int32)}
+    names = {}
+    for key, group in groups.items():
+        arrays[f"mean__{key}"] = np.asarray(group["mean"], np.float32)
+        arrays[f"sd__{key}"] = np.asarray(group["sd"], np.float32)
+        names[key] = {"name": group.get("name") or key, "n": int(group.get("n") or 0)}
+    arrays["meta"] = np.frombuffer(json.dumps(dict(meta, groups=names)).encode("utf-8"), dtype=np.uint8)
+    temporary = path + ".tmp.npz"
+    np.savez_compressed(temporary, **arrays)
+    os.replace(temporary, path)
+
+
+def read(path):
+    """(surface, groups, meta) of write(); None when the file is missing or not readable."""
+    try:
+        with np.load(path) as data:
+            meta = json.loads(bytes(data["meta"]).decode("utf-8"))
+            surface = {"points": data["points"].astype(np.float64), "normals": data["normals"].astype(np.float64),
+                       "triangles": data["triangles"].astype(np.int64)}
+            groups = {}
+            for key, info in (meta.get("groups") or {}).items():
+                groups[key] = {"mean": data[f"mean__{key}"], "sd": data[f"sd__{key}"], "n": info.get("n"),
+                               "name": info.get("name")}
+        return surface, groups, meta
+    except (OSError, KeyError, ValueError):
+        return None
+
+
+def sspPath(folder, header):
+    """The normals' projections of a database (stats/ssp.npz), None when missing."""
+    relative = ((header or {}).get("statistics") or {}).get("ssp")
+    path = os.path.join(folder, relative) if relative else ""
+    return path if path and os.path.isfile(path) else None
+
+
+def cachePath(folder, key):
+    return os.path.join(folder, nr.CACHE_DIR, f"ssp_{key}.npz")
+
+
+def sameSurface(a, b, tolerance=0.05):
+    """Whether two surfaces have the same vertices (within tolerance mm)."""
+    pa, pb = np.asarray(a["points"]), np.asarray(b["points"])
+    return pa.shape == pb.shape and bool(np.allclose(pa, pb, atol=tolerance))
+
+
+def surfaceColors(table, low, high, count=256):
+    """count x 4 RGBA of the patient's projected values: the color map from low to high (opaque)."""
+    table = np.asarray(table, dtype=float)
+    index = np.clip(np.rint(np.linspace(0, len(table) - 1, count)).astype(int), 0, len(table) - 1)
+    rgba = np.ones((count, 4))
+    rgba[:, :3] = table[index]
+    return rgba
+
+
+def scoreSurfaceColors(hypoTable, hyperTable, threshold, maximum, hypoOnly=False, count=256, grey=SURFACE_GREY):
+    """count x 4 RGBA of a score surface over [-maximum, maximum]: the score colours above the threshold, the grey
+    surface between (opaque everywhere, so the brain is seen)."""
+    rgba = nr.scoreColors(hypoTable, hyperTable, threshold, maximum, hypoOnly, count)
+    hidden = rgba[:, 3] == 0
+    rgba[hidden, :3] = grey
+    rgba[:, 3] = 1.0
+    return rgba

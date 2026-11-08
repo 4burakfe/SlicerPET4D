@@ -176,6 +176,14 @@ def regionStatistics(subjectValues, groups):
     return out
 
 
+def unionMask(masks, shape):
+    """All the regions together (the brain the 3D-SSP surface is made of)."""
+    union = np.zeros(shape, dtype=bool)
+    for mask in masks.values():
+        union |= np.asarray(mask, dtype=bool)
+    return union
+
+
 def approximateRegions(meanMap, sdMap, masks):
     """{region: [mean of the mean map, mean of the SD map, None]}: a predefined database without regional
     statistics. The mean voxel SD is larger than the SD of the regional mean, so scores from it are conservative."""

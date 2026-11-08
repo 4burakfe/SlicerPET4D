@@ -41,6 +41,7 @@ from DICOMGatedDynamicPETLib import colormaps, colortables, neuro, normaldb  # n
 from DICOMGatedDynamicPETLib import neuroreview as nr  # noqa: E402
 from DICOMGatedDynamicPETLib import registration as reg  # noqa: E402
 from DICOMGatedDynamicPETLib import resampling  # noqa: E402
+from DICOMGatedDynamicPETLib import ssp  # noqa: E402
 from DICOMGatedDynamicPETLib import staticneuro as sn  # noqa: E402
 from DICOMGatedDynamicPETLib.hardendialog import hardenDialog  # noqa: E402
 from DynamicNeuroPET import (DynamicNeuroPETLogic, DynamicNeuroPETWidget, _button, _ijkToRas, _percentiles,  # noqa
@@ -74,6 +75,9 @@ REVIEW_SCORE_COLORMAP = "PET-HotIron"   # scores below the normals (hypometaboli
 SCORE_HYPER_COLORMAP = "Jotun"          # scores above the normals (blue)
 SCORE_COLOR_NODE = "Neuro review score colors"
 REVIEW_FUSION_OPACITY = 0.6
+SSP_TARGET_POINTS = 60000               # vertices of the 3D-SSP surface
+SSP_MODEL_NAME = "Neuro 3D-SSP surface"
+SSP_COLOR_NODE = "Neuro 3D-SSP colors"
 
 
 class StaticNeuroPET(ScriptedLoadableModule):
@@ -506,6 +510,7 @@ class StaticNeuroPETLogic(DynamicNeuroPETLogic):
         if header is None:
             grid = volume
             values = suv = np.array(slicer.util.arrayFromVolume(volume), dtype=np.float32)
+            ratio = None
             masks = self.segmentMasks(segmentation, grid)
             result.update(grid=grid, names=list(masks), suv=nr.regionMeans(suv, masks))
             if referenceSegmentId:
@@ -513,7 +518,10 @@ class StaticNeuroPETLogic(DynamicNeuroPETLogic):
                 if mask is not None and np.any(mask):
                     ratio, mean = sn.ratioMap(values, np.asarray(mask) > 0)
                     result.update(ratio=True, referenceMean=mean, values=nr.regionMeans(ratio, masks))
+                else:
+                    ratio = None
             result.setdefault("values", result["suv"])
+            result.update(smoothed=ratio if result["ratio"] else values, union=nr.unionMask(masks, values.shape))
             return result
         grid = self.loadAtlasVolume(os.path.join(folder, group["mean"]), name=f"{header['name']} mean ({groupKey})")
         sdNode = self.loadAtlasVolume(os.path.join(folder, group["sd"]), name=f"{header['name']} SD ({groupKey})")
@@ -558,6 +566,7 @@ class StaticNeuroPETLogic(DynamicNeuroPETLogic):
                 notes.append("The MNI brain mask is not on the database grid: the score mask is the mean map's.")
         mask = nr.scoreMask(mean, brain)
         smoothed = normaldb.smoothMap(values, fwhm, spacing)
+        result.update(smoothed=smoothed, union=nr.unionMask(masks, mean.shape))
         result["z"] = nr.scoreMap(smoothed, mean, sd, mask, nr.SCORE_Z)
         # regional normal values
         reference = self.regionReference(folder, header, masks, groupKey, locked, progress)
@@ -570,6 +579,160 @@ class StaticNeuroPETLogic(DynamicNeuroPETLogic):
                          "than the SD of a regional mean: these scores are conservative).")
         result.update(reference=found, source=source)
         return result
+
+    # --- 3D-SSP ------------------------------------------------------------------------------------
+    @staticmethod
+    def brainSurface(mask, gridNode, targetPoints=SSP_TARGET_POINTS):
+        """The surface of a brain mask (numpy (k, j, i) on gridNode's grid; holes filled, smoothed 1 voxel, the
+        largest piece, decimated to about targetPoints vertices): {"points" (RAS mm), "normals" (outward, unit),
+        "triangles"}."""
+        from scipy import ndimage
+        from vtk.util import numpy_support
+        mask = ndimage.binary_fill_holes(np.asarray(mask, dtype=bool))
+        if not mask.any():
+            raise ValueError("The regions are empty: no brain surface.")
+        smooth = ndimage.gaussian_filter(mask.astype(np.float32), 1.0)
+        image = vtk.vtkImageData()
+        image.SetDimensions(*smooth.shape[::-1])
+        image.GetPointData().SetScalars(numpy_support.numpy_to_vtk(smooth.ravel(), deep=True,
+                                                                   array_type=vtk.VTK_FLOAT))
+        contour = vtk.vtkFlyingEdges3D() if hasattr(vtk, "vtkFlyingEdges3D") else vtk.vtkMarchingCubes()
+        contour.SetInputData(image)
+        contour.SetValue(0, 0.5)
+        connectivity = vtk.vtkPolyDataConnectivityFilter()
+        connectivity.SetInputConnection(contour.GetOutputPort())
+        connectivity.SetExtractionModeToLargestRegion()
+        connectivity.Update()
+        count = connectivity.GetOutput().GetNumberOfPoints()
+        last = connectivity
+        if count > targetPoints:
+            decimate = vtk.vtkQuadricDecimation()
+            decimate.SetInputConnection(connectivity.GetOutputPort())
+            decimate.SetTargetReduction(1.0 - float(targetPoints) / count)
+            last = decimate
+        transform = vtk.vtkTransform()
+        transform.SetMatrix(_vtkMatrix(_ijkToRas(gridNode)))
+        moved = vtk.vtkTransformPolyDataFilter()
+        moved.SetTransform(transform)
+        moved.SetInputConnection(last.GetOutputPort())
+        normals = vtk.vtkPolyDataNormals()
+        normals.SetInputConnection(moved.GetOutputPort())
+        normals.ComputePointNormalsOn()
+        normals.ComputeCellNormalsOff()
+        normals.SplittingOff()
+        normals.ConsistencyOn()
+        normals.AutoOrientNormalsOn()       # outward
+        normals.Update()
+        poly = normals.GetOutput()
+        points = numpy_support.vtk_to_numpy(poly.GetPoints().GetData()).astype(np.float64)
+        pointNormals = numpy_support.vtk_to_numpy(poly.GetPointData().GetNormals()).astype(np.float64)
+        cells = numpy_support.vtk_to_numpy(poly.GetPolys().GetData()).reshape(-1, 4)[:, 1:]
+        return {"points": points, "normals": pointNormals, "triangles": cells.astype(np.int64)}
+
+    @staticmethod
+    def surfacePolyData(surface, values=None, name="SSP"):
+        """vtkPolyData of a surface dict, with the vertex values as its active scalars."""
+        from vtk.util import numpy_support
+        poly = vtk.vtkPolyData()
+        points = vtk.vtkPoints()
+        points.SetData(numpy_support.numpy_to_vtk(np.asarray(surface["points"], np.float32), deep=True))
+        poly.SetPoints(points)
+        triangles = np.asarray(surface["triangles"], dtype=np.int64)
+        cells = np.hstack([np.full((len(triangles), 1), 3, dtype=np.int64), triangles]).ravel()
+        polys = vtk.vtkCellArray()
+        polys.SetCells(len(triangles), numpy_support.numpy_to_vtkIdTypeArray(cells, deep=True))
+        poly.SetPolys(polys)
+        normals = numpy_support.numpy_to_vtk(np.asarray(surface["normals"], np.float32), deep=True)
+        normals.SetName("Normals")
+        poly.GetPointData().SetNormals(normals)
+        if values is not None:
+            array = numpy_support.numpy_to_vtk(np.asarray(values, np.float32), deep=True)
+            array.SetName(name)
+            poly.GetPointData().AddArray(array)
+            poly.GetPointData().SetActiveScalars(name)
+        return poly
+
+    def sspFromSubjects(self, folder, header, surface, fwhm, progress=None):
+        """{group key: {"mean", "sd", "n", "name"}} of the normals' projections on a surface: each subject's map
+        (SUVR or SUV by the map type) smoothed with fwhm and projected; cached in <database>/cache/ (key: the surface,
+        the projection, the FWHM, the map type, the database version and the subjects). None when stopped."""
+        subjects = normaldb.readSubjects(folder)
+        mapKey = normaldb.subjectMapKey(header)
+        key = ssp.signature(surface["points"], surface["normals"], ssp.DEPTH_MM, ssp.STEP_MM,
+                            extra=(fwhm, mapKey, header.get("version", 1), sorted(s.get("id", "") for s in subjects)))
+        cache = ssp.cachePath(folder, key)
+        cached = ssp.read(cache)
+        if cached is not None:
+            return cached[1]
+        groups = {k: g for k, g in normaldb.statisticsGroups(header, subjects).items() if len(g["ids"]) >= 2}
+        accumulators = {k: normaldb.RunningStatistics() for k in groups}
+        for index, subject in enumerate(subjects):
+            if progress is not None and not progress(index, len(subjects), f"surface projection of {subject['id']} "
+                                                                           f"({index + 1} / {len(subjects)})"):
+                return None
+            relative = subject.get(mapKey)
+            path = os.path.join(folder, relative) if relative else ""
+            if not path or not os.path.isfile(path):
+                continue
+            node = slicer.util.loadVolume(path, {"show": False})
+            try:
+                smoothed = normaldb.smoothMap(slicer.util.arrayFromVolume(node), fwhm,
+                                              tuple(float(x) for x in node.GetSpacing())[::-1])
+                projected = ssp.project(smoothed, _ijkToRas(node), surface["points"], surface["normals"])
+            finally:
+                slicer.mrmlScene.RemoveNode(node)
+            for groupKey, group in groups.items():
+                if subject["id"] in group["ids"]:
+                    accumulators[groupKey].add(projected)
+        out = {k: {"mean": a.mean(), "sd": a.sd(), "n": a.n, "name": groups[k]["name"]}
+               for k, a in accumulators.items() if a.n >= 2}
+        try:
+            ssp.write(cache, surface, out, {"depthMm": ssp.DEPTH_MM, "stepMm": ssp.STEP_MM, "fwhmMm": fwhm,
+                                            "maps": mapKey, "version": header.get("version", 1)})
+        except OSError:
+            logging.warning(f"Static Neuro: could not write {cache}", exc_info=True)
+        return out
+
+    def reviewSsp(self, result, folder=None, header=None, groupKey=normaldb.MASTER, locked=True, progress=None):
+        """3D-SSP of a reviewData() result: {"surface", "patient" (the patient's projection), "mean", "sd", "n" (the
+        normals' projections of the group, Minoshima; None when not available), "voxel" (the voxel z map projected,
+        the most extreme along the normal; None without a database), "source", "notes"}. The surface: the database's
+        (stats/ssp.npz) when the regions are the database's, else made from the union of the regions. None when
+        stopped."""
+        grid = result["grid"]
+        notes = []
+        out = {"mean": None, "sd": None, "n": None, "voxel": None, "source": "", "notes": notes}
+        surface = groups = None
+        mapKey = normaldb.subjectMapKey(header) if header is not None else ""
+        path = ssp.sspPath(folder, header) if header is not None else None
+        if path and locked:
+            read = ssp.read(path)
+            if read is not None and read[2].get("maps") == mapKey:
+                surface, groups, meta = read
+                out["source"] = "the database's surface projections"
+                if abs(float(meta.get("fwhmMm") or 0) - result["fwhm"]) > 1e-6:
+                    notes.append("The database's surface projections were made with another smoothing.")
+        if surface is None:
+            surface = self.brainSurface(result["union"], grid)
+        out["surface"] = surface
+        ijkToRas = _ijkToRas(grid)
+        out["patient"] = ssp.project(result["smoothed"], ijkToRas, surface["points"], surface["normals"])
+        if header is None:
+            return out
+        if groups is None and header.get("kind") == normaldb.USER_DEFINED and normaldb.readSubjects(folder):
+            groups = self.sspFromSubjects(folder, header, surface, result["fwhm"], progress)
+            if groups is None:
+                return None
+            out["source"] = "the database's subjects projected on these regions"
+        group = (groups or {}).get(groupKey)
+        if group is not None:
+            out.update(mean=group["mean"], sd=group["sd"], n=group.get("n") or result.get("n"))
+        else:
+            notes.append("No surface projections of the normals for this database: the 3D-SSP shows the voxel score "
+                         "map projected.")
+        if result.get("z") is not None:
+            out["voxel"] = ssp.project(result["z"], ijkToRas, surface["points"], surface["normals"], mode="extreme")
+        return out
 
     # --- batch: many normal subjects into a database ----------------------------------------------
     BATCH_COLUMNS = ("file", "id", "status", "message", "referenceMean", "seconds")
@@ -1717,6 +1880,7 @@ class StaticNeuroPETWidget(DynamicNeuroPETWidget):
         self.hypoOnlyCheck.toolTip = "Hide the scores above the normals (negative)"
         view.addRow(self.hypoOnlyCheck)
         layout.addWidget(viewBox)
+        self._buildSspBox(layout)
 
         fusionBox = qt.QGroupBox("MR fusion")
         fusion = qt.QFormLayout(fusionBox)
@@ -1753,6 +1917,7 @@ class StaticNeuroPETWidget(DynamicNeuroPETWidget):
         self.fusionOpacity.connect("valueChanged(double)", lambda v: self._assignReviewViews())
         self.anatomyWindowRange.connect("valuesChanged(double,double)", lambda a, b: self._applyAnatomyDisplay())
         self.reviewResult = None
+        self.sspModel = None
         self.scoreNode = None
         self.reviewTable = None
         self._reviewPreviousLayout = None
@@ -1857,7 +2022,7 @@ class StaticNeuroPETWidget(DynamicNeuroPETWidget):
         def progress(index, total, text):
             dialog.maximum = total
             dialog.setValue(index)
-            dialog.setLabelText(f"Regional values of the normals: {text}")
+            dialog.setLabelText(f"The normals: {text}")
             slicer.app.processEvents()
             return not dialog.wasCanceled
 
@@ -1866,6 +2031,17 @@ class StaticNeuroPETWidget(DynamicNeuroPETWidget):
         try:
             result = self.logic.reviewData(volume, segmentation, folder if header is not None else None, header,
                                            groupKey, self.atlas, referenceId, self._locked(), progress)
+            if result is not None:
+                try:
+                    result["ssp"] = self.logic.reviewSsp(result, folder, header, groupKey, self._locked(), progress)
+                    if result["ssp"] is None:
+                        result = None
+                    else:
+                        result["notes"].extend(result["ssp"]["notes"])
+                except Exception as error:
+                    logging.exception("Static Neuro: the 3D-SSP failed")
+                    result["ssp"] = None
+                    result["notes"].append(f"No 3D-SSP: {error}")
         except Exception as error:
             logging.exception("Static Neuro: the review failed")
             slicer.util.errorDisplay(f"Could not compare the patient:\n{error}", windowTitle="Review")
@@ -1880,6 +2056,7 @@ class StaticNeuroPETWidget(DynamicNeuroPETWidget):
         self.reviewResult = result
         self._makeScoreNode()
         self._initPetWindow()
+        self._initSspWindow()
         self._showScores()
         self._enterReviewViews()
         lines = []
@@ -1926,6 +2103,7 @@ class StaticNeuroPETWidget(DynamicNeuroPETWidget):
             self.scoreNode.SetName(f"{result['volume'].GetName()} {kind} map")
             self._applyScoreDisplay()
         self._updateReviewTable(kind)
+        self._showSsp()
 
     def _updateReviewTable(self, kind):
         result = self.reviewResult
@@ -2074,6 +2252,182 @@ class StaticNeuroPETWidget(DynamicNeuroPETWidget):
         display.SetAutoWindowLevel(False)
         display.SetWindowLevelMinMax(self.anatomyWindowRange.minimumValue, self.anatomyWindowRange.maximumValue)
 
+    # 3D-SSP
+    def _buildSspBox(self, layout):
+        box = qt.QGroupBox("3D-SSP")
+        form = qt.QFormLayout(box)
+        self.sspMapCombo = qt.QComboBox()
+        for key, title in ssp.MAPS:
+            self.sspMapCombo.addItem(title, key)
+        self.sspMapCombo.toolTip = ("The score (z / t, as picked above) on the brain surface, or the patient's own "
+                                    "projected values")
+        form.addRow("Map:", self.sspMapCombo)
+        self.sspSourceCombo = qt.QComboBox()
+        for key, title in ssp.SOURCES:
+            self.sspSourceCombo.addItem(title, key)
+        self.sspSourceCombo.toolTip = (
+            "Minoshima: the patient's maximum along the inward normal (0 - 13.5 mm) scored against the same projection "
+            "of every normal (vertex mean / SD). Voxel: the voxel score map projected (its most extreme score along the "
+            "normal); used when the database has no projections of its normals (predefined).")
+        form.addRow("Score from:", self.sspSourceCombo)
+        self.sspColorCombo = qt.QComboBox()
+        self.sspPatientColorCombo = qt.QComboBox()
+        for combo, default in ((self.sspColorCombo, REVIEW_SCORE_COLORMAP),
+                               (self.sspPatientColorCombo, REVIEW_PET_COLORMAP)):
+            for label in colormaps.LABELS:
+                combo.addItem(label)
+            combo.setCurrentIndex(max(0, combo.findText(default)))
+        form.addRow("Score colors:", self.sspColorCombo)
+        self.sspThresholdSpin = qt.QDoubleSpinBox()
+        self.sspThresholdSpin.setRange(0.0, 20.0)
+        self.sspThresholdSpin.decimals = 1
+        self.sspThresholdSpin.singleStep = 0.5
+        self.sspThresholdSpin.value = nr.DEFAULT_THRESHOLD
+        self.sspThresholdSpin.toolTip = "Scores between minus and plus this value stay grey"
+        form.addRow("Score threshold:", self.sspThresholdSpin)
+        self.sspMaximumSpin = qt.QDoubleSpinBox()
+        self.sspMaximumSpin.setRange(0.5, 50.0)
+        self.sspMaximumSpin.decimals = 1
+        self.sspMaximumSpin.singleStep = 0.5
+        self.sspMaximumSpin.value = nr.DEFAULT_MAXIMUM
+        form.addRow("Score maximum:", self.sspMaximumSpin)
+        form.addRow("Patient colors:", self.sspPatientColorCombo)
+        self.sspWindowRange = ctk.ctkRangeWidget()
+        self.sspWindowRange.decimals = 2
+        self.sspWindowRange.toolTip = "Display range of the patient's projected values"
+        form.addRow("Patient window:", self.sspWindowRange)
+        layout.addWidget(box)
+        for combo in (self.sspMapCombo, self.sspSourceCombo, self.sspColorCombo, self.sspPatientColorCombo):
+            combo.connect("currentIndexChanged(int)", lambda i: self._showSsp())
+        for spin in (self.sspThresholdSpin, self.sspMaximumSpin):
+            spin.connect("valueChanged(double)", lambda v: self._showSsp())
+        self.sspWindowRange.connect("valuesChanged(double,double)", lambda a, b: self._showSsp())
+        self.hypoOnlyCheck.connect("toggled(bool)", lambda on: self._showSsp())
+
+    def _initSspWindow(self):
+        data = (self.reviewResult or {}).get("ssp")
+        if not data:
+            return
+        values = np.asarray(data["patient"], dtype=np.float32)
+        low, high = (float(v) for v in np.percentile(values, (1.0, 99.5))) if values.size else (0.0, 1.0)
+        high = high if high > low else low + 1.0
+        self.sspWindowRange.blockSignals(True)
+        self.sspWindowRange.minimum = min(0.0, low)
+        self.sspWindowRange.maximum = max(float(values.max()), high) if values.size else high
+        self.sspWindowRange.singleStep = max(high / 200.0, 0.001)
+        self.sspWindowRange.setValues(low, high)
+        self.sspWindowRange.blockSignals(False)
+
+    def _sspValues(self):
+        """(vertex values, color table RGBA, (low, high), what) of the 3D-SSP shown."""
+        result = self.reviewResult
+        data = result.get("ssp")
+        kind = self._scoreKind()
+        n = data.get("n") or result.get("n")
+        score = None
+        if self.sspMapCombo.currentData == ssp.MAP_SCORE:
+            if self.sspSourceCombo.currentData == ssp.SOURCE_MINOSHIMA and data.get("mean") is not None:
+                score, what = ssp.scores(data["patient"], data["mean"], data["sd"], n, kind), f"{kind} (Minoshima)"
+            elif data.get("voxel") is not None:
+                factor = nr.tFactor(result.get("n")) if kind == nr.SCORE_T else 1.0
+                score, what = np.asarray(data["voxel"], np.float32) / np.float32(factor), f"{kind} (voxel map)"
+        if score is not None:
+            maximum = float(self.sspMaximumSpin.value)
+            colors = ssp.scoreSurfaceColors(self._rgbOf(self.sspColorCombo.currentText),
+                                            self._rgbOf(SCORE_HYPER_COLORMAP), self.sspThresholdSpin.value, maximum,
+                                            self.hypoOnlyCheck.checked)
+            return score, colors, (-maximum, maximum), what
+        low, high = self.sspWindowRange.minimumValue, self.sspWindowRange.maximumValue
+        colors = ssp.surfaceColors(self._rgbOf(self.sspPatientColorCombo.currentText), low, high)
+        return np.asarray(data["patient"], np.float32), colors, (low, max(high, low + 1e-6)), "patient"
+
+    def _sspColorNode(self, rgba):
+        scene = slicer.mrmlScene
+        node = scene.GetFirstNodeByName(SSP_COLOR_NODE)
+        if node is None or not node.IsA("vtkMRMLColorTableNode"):
+            node = scene.CreateNodeByClass("vtkMRMLColorTableNode")
+            node.UnRegister(None)
+            node.SetName(SSP_COLOR_NODE)
+            node.SetTypeToUser()
+            node.SetNumberOfColors(len(rgba))
+            scene.AddNode(node)
+        for i, (r, g, b, a) in enumerate(rgba):
+            node.SetColor(i, f"{i}", float(r), float(g), float(b), float(a))
+        return node
+
+    def _sspViewNodes(self):
+        """{view key: (3D widget, view node)} of the 3D-SSP views of the layout."""
+        layoutManager = slicer.app.layoutManager()
+        out = {}
+        if layoutManager is None:
+            return out
+        tags = {nr.sspViewName(key): key for key, _ in nr.SSP_VIEWS}
+        for index in range(layoutManager.threeDViewCount):
+            widget = layoutManager.threeDWidget(index)
+            viewNode = widget.mrmlViewNode() if widget is not None else None
+            if viewNode is not None and viewNode.GetSingletonTag() in tags:
+                out[tags[viewNode.GetSingletonTag()]] = (widget, viewNode)
+        return out
+
+    def _showSsp(self):
+        result = self.reviewResult
+        data = (result or {}).get("ssp")
+        if not data or not hasattr(self, "sspMapCombo"):
+            return
+        values, rgba, (low, high), _ = self._sspValues()
+        scene = slicer.mrmlScene
+        poly = self.logic.surfacePolyData(data["surface"], values)
+        if self.sspModel is None or not scene.IsNodePresent(self.sspModel):
+            self.sspModel = scene.AddNewNodeByClass("vtkMRMLModelNode", scene.GenerateUniqueName(SSP_MODEL_NAME))
+            self.sspModel.CreateDefaultDisplayNodes()
+        self.sspModel.SetAndObservePolyData(poly)
+        display = self.sspModel.GetDisplayNode()
+        display.SetAndObserveColorNodeID(self._sspColorNode(rgba).GetID())
+        display.SetActiveScalarName("SSP")
+        display.SetScalarVisibility(True)
+        display.SetScalarRangeFlag(slicer.vtkMRMLDisplayNode.UseManualScalarRange)
+        display.SetScalarRange(low, high)
+        display.SetBackfaceCulling(False)
+        display.SetVisibility2D(False)
+        views = self._sspViewNodes()
+        display.RemoveAllViewNodeIDs()
+        for _, viewNode in views.values():
+            display.AddViewNodeID(viewNode.GetID())
+        if not views:       # not in the review layout: hidden (shown in the SSP views only)
+            display.AddViewNodeID("vtkMRMLViewNodeNone")
+
+    def _setupSspViews(self, fit=False):
+        """The six 3D-SSP views: black, no box, parallel projection, each camera looking at the surface from its
+        side (top and bottom with the front up, the others with the top up)."""
+        data = (self.reviewResult or {}).get("ssp")
+        views = self._sspViewNodes()
+        if not views:
+            return
+        self._showSsp()
+        center = np.asarray(data["surface"]["points"]).mean(axis=0) if data else np.zeros(3)
+        for key, (widget, viewNode) in views.items():
+            viewNode.SetBoxVisible(False)
+            viewNode.SetAxisLabelsVisible(False)
+            viewNode.SetBackgroundColor(0.0, 0.0, 0.0)
+            viewNode.SetBackgroundColor2(0.0, 0.0, 0.0)
+            viewNode.SetRenderMode(slicer.vtkMRMLViewNode.Orthographic)
+            if hasattr(viewNode, "SetOrientationMarkerType"):
+                viewNode.SetOrientationMarkerType(slicer.vtkMRMLAbstractViewNode.OrientationMarkerTypeNone)
+            if not data or not fit:
+                continue
+            direction, up = ssp.CAMERAS[key]
+            camera = slicer.modules.cameras.logic().GetViewActiveCameraNode(viewNode)
+            if camera is None:
+                continue
+            camera.SetFocalPoint(*center)
+            camera.SetPosition(*(center + 600.0 * np.asarray(direction)))
+            camera.SetViewUp(*up)
+            renderer = widget.threeDView().renderWindow().GetRenderers().GetFirstRenderer()
+            if renderer is not None:
+                renderer.ResetCamera()
+                renderer.ResetCameraClippingRange()
+            widget.threeDView().forceRender()
+
     # layout and views
     def _enterReviewViews(self):
         if self.volume() is None:
@@ -2142,6 +2496,7 @@ class StaticNeuroPETWidget(DynamicNeuroPETWidget):
             if fit:
                 widget.sliceLogic().FitSliceToAll()
         self._outlineSegmentation(petViews)
+        self._setupSspViews(fit)
 
     def _outlineSegmentation(self, viewIds):
         """The regions as outlines (no fill) in the PET row only; the earlier display restored on leaving."""
@@ -2380,7 +2735,7 @@ class StaticNeuroPETWidget(DynamicNeuroPETWidget):
         self.regResult = None
         self.regUndo = None
         self._databaseKey = None
-        self.reviewResult = self.scoreNode = self.reviewTable = None
+        self.reviewResult = self.scoreNode = self.reviewTable = self.sspModel = None
         self._segmentationDisplay = None
         self._anatomyWindowFor = None
         if hasattr(self, "compareLabel"):
@@ -2451,6 +2806,14 @@ class StaticNeuroPETTest(ScriptedLoadableModuleTest):
         self.assertTrue(any("approximated" in note for note in result["notes"]))
         rows = nr.tableRows(result["values"], result["suv"], result["reference"], nr.SCORE_Z)
         self.assertAlmostEqual(dict((r[0], r[-1]) for r in rows)["A"], 2.0, places=3)
+        # 3D-SSP: the surface of the regions, the voxel scores projected (no normals' projections: predefined)
+        data = logic.reviewSsp(result, folder, normaldb.readHeader(folder))
+        self.assertGreater(len(data["surface"]["points"]), 10)
+        self.assertIsNone(data["mean"])
+        self.assertGreater(float(np.max(data["voxel"])), 1.5)
+        self.assertAlmostEqual(float(np.max(data["patient"])), 5.0, places=2)
+        poly = logic.surfacePolyData(data["surface"], data["voxel"])
+        self.assertEqual(poly.GetNumberOfPoints(), len(data["surface"]["points"]))
         self.delayDisplay("Review passed")
 
     def test_ImportAndHarden(self):
