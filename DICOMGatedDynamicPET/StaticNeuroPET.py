@@ -1174,7 +1174,7 @@ class StaticNeuroPETWidget(DynamicNeuroPETWidget):
         if index >= 0:
             self.targetAtlasCombo.setCurrentIndex(index)
         self.growSpin.value = settings["growMm"]
-        self.growWhiteMatterCheck.checked = settings["growIntoWhiteMatter"]
+        self.growIntoCombo.setCurrentIndex(max(0, self.growIntoCombo.findData(settings["growInto"])))
         self.erodeSpin.value = settings["erodeReferenceMm"]
         if settings["referenceAtlasRegion"]:
             self.referenceAtlasCombo.setCurrentIndex(self.referenceAtlasCombo.findData(ATLAS_BILATERAL))
@@ -1193,7 +1193,7 @@ class StaticNeuroPETWidget(DynamicNeuroPETWidget):
         for widget in (self.targetAtlasCombo, self.referenceAtlasCombo, self.referenceRegionCombo, self.growSpin,
                        self.erodeSpin):
             widget.enabled = not locked
-        self.growWhiteMatterCheck.enabled = not locked and self.growSpin.value > 0
+        self.growIntoCombo.enabled = not locked and self.growSpin.value > 0
         self.unlockCheck.enabled = bool(self._header(self._database()))
 
     def onUnlockToggled(self, on):

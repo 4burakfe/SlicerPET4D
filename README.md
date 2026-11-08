@@ -533,8 +533,9 @@ without, the result is kept, or stay).
    on first use and again whenever the table, CerebrA or the pons change.
    **Grow regions** (mm, off by default): the regions grow into the unlabelled voxels around them, each voxel to
    the nearest region (so they never overlap and the order does not matter), only inside the MNI brain mask and
-   where the white matter probability is below 0.5 (or into the white matter too, with *Grow into the white matter
-   too*); the ventricles and the pons do not grow. **Erode reference**
+   and, by **Grow into**, where the white matter probability is below 0.5 (CSF and the cortex edge, the default),
+   into the white matter too, or into the white matter only (no outward growth into CSF; needs the white matter
+   map); the ventricles and the pons do not grow. **Erode reference**
    (mm, off by default): the reference region, taken from the atlas before growing, is eroded against spill-over.
    **Output segmentation:** the segmentation the regions are written into (its segments replaced), by default the
    one loaded before, so loading again does not pile up segmentations; *Create new segmentation* makes a new one.
@@ -584,7 +585,7 @@ database:
   subjects and an age summary are kept).
 - **Delete database** removes the folder from disk after a warning.
 - Every database also stores how its regions are drawn: the **region atlas** (CerebrA left / right, bilateral, or
-  the broad regions), **grow regions** (mm, optionally into the white matter) and the reference erosion. The Neuro
+  the broad regions), **grow regions** (mm; into CSF / cortex edge, white matter too, or white matter only) and the reference erosion. The Neuro
   workflows use the same settings when a patient is compared with the database.
 - **Spatial normalization (to MNI)**: how the subjects were normalized (method, template, engine, linear and
   deformable stages, brain mask), each item optional ("Not specified"). The Static Neuro workflow takes them as its

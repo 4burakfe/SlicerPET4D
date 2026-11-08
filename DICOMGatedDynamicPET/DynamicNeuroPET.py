@@ -42,7 +42,7 @@ _MODULE_DIR = os.path.dirname(os.path.abspath(globals().get("__file__", "") or "
 if globals().get("__file__") and _MODULE_DIR not in sys.path:
     sys.path.insert(0, _MODULE_DIR)
 
-from DICOMGatedDynamicPETLib import dynamicviews, neuro  # noqa: E402
+from DICOMGatedDynamicPETLib import dynamicviews, neuro, normaldb  # noqa: E402
 from DICOMGatedDynamicPETLib import registration as reg  # noqa: E402
 from DICOMGatedDynamicPETLib import resampling  # noqa: E402
 from DICOMGatedDynamicPETLib.hardendialog import hardenDialog  # noqa: E402
@@ -749,34 +749,48 @@ class DynamicNeuroPETLogic(ScriptedLoadableModuleLogic):
                 return value
         return None
 
-    def growthMask(self, atlas, intoWhiteMatter=False):
-        """Voxels the regions may grow into: in the MNI brain mask and, unless intoWhiteMatter or without the white
-        matter probability map, below WM_PROBABILITY_LIMIT. None without a brain mask."""
-        if neuro.BRAIN_MASK not in atlas:
+    def growthMask(self, atlas, growInto=normaldb.GROW_NO_WM):
+        """Voxels the regions may grow into, by growInto (normaldb.GROW_*): in the MNI brain mask and outside the
+        white matter (probability below WM_PROBABILITY_LIMIT; GROW_NO_WM; without the white matter map the brain
+        mask), anywhere in the brain mask (GROW_WITH_WM), or only in the white matter (GROW_ONLY_WM; needs the white
+        matter map, ValueError otherwise). None (no limit) without a brain mask, unless GROW_ONLY_WM."""
+        onlyWm = growInto == normaldb.GROW_ONLY_WM
+        if onlyWm and "WM" not in atlas:
+            raise ValueError("Growing into the white matter only needs the white matter probability map "
+                             "(mni_icbm152_wm_tal_nlin_sym_09c) in the atlas folder.")
+        allowed = None
+        if neuro.BRAIN_MASK in atlas:
+            mask, node = self._loadLabels(atlas[neuro.BRAIN_MASK])
+            slicer.mrmlScene.RemoveNode(node)
+            allowed = mask > 0
+        elif not onlyWm:
             return None
-        mask, node = self._loadLabels(atlas[neuro.BRAIN_MASK])
-        slicer.mrmlScene.RemoveNode(node)
-        allowed = mask > 0
-        if "WM" in atlas and not intoWhiteMatter:
+        if "WM" in atlas and growInto != normaldb.GROW_WITH_WM:
             wmNode = slicer.util.loadVolume(atlas["WM"], {"show": False})
             try:
                 wm = slicer.util.arrayFromVolume(wmNode).astype(np.float32)
-                if wm.max() > 1.5:      # stored 0-100 or 0-255
-                    wm = wm / wm.max()
-                if wm.shape == allowed.shape:
-                    allowed &= wm < WM_PROBABILITY_LIMIT
             finally:
                 slicer.mrmlScene.RemoveNode(wmNode)
+            if wm.max() > 1.5:      # stored 0-100 or 0-255
+                wm = wm / wm.max()
+            inWm = wm >= WM_PROBABILITY_LIMIT
+            if allowed is None:
+                allowed = inWm
+            elif wm.shape == allowed.shape:
+                allowed &= inWm if onlyWm else ~inWm
+            elif onlyWm:
+                raise ValueError("The white matter map is not on the grid of the brain mask.")
         return allowed
 
     def loadAtlasRegions(self, atlas, targetKind=None, referenceKind=None, referenceName=None, growMm=GROW_MM,
-                         erodeReferenceMm=ERODE_REFERENCE_MM, growIntoWhiteMatter=False, target=None,
+                         erodeReferenceMm=ERODE_REFERENCE_MM, growInto=normaldb.GROW_NO_WM, target=None,
                          referenceMaskPath=None):
         """Regions of the atlas folder (neuro.findAtlasFiles): the target regions from one CerebrA version, the
         reference region from another (default: the left and right regions, the bilateral cerebellar grey matter
         as the reference). The CerebrA with pons is used when it is in the folder (its pons as segments of their
-        own, over the brainstem). Makes the bilateral version and the pons overlays on first use. growIntoWhiteMatter:
-        the grown regions may take white matter voxels too. target: a segmentation to fill instead of a new one.
+        own, over the brainstem). Makes the bilateral version and the pons overlays on first use. growInto
+        (normaldb.GROW_*): the grown regions stay out of the white matter, may take it too, or only take white matter
+        voxels (growthMask). target: a segmentation to fill instead of a new one.
         Returns (segmentation, reference segment ID)."""
         targetKind = targetKind or ATLAS_LATERAL
         referenceKind = referenceKind or ATLAS_BILATERAL
@@ -788,7 +802,7 @@ class DynamicNeuroPETLogic(ScriptedLoadableModuleLogic):
         referencePath, referenceEntries, referenceOverlayPath = self.atlasPaths(atlas, referenceKind)
         if referenceName is None:
             referenceName = defaultReferenceName(referenceEntries)
-        allowed = self.growthMask(atlas, growIntoWhiteMatter) if growMm > 0 else None
+        allowed = self.growthMask(atlas, growInto) if growMm > 0 else None
         return self.loadRegions(labelsPath, entries, referencePath, referenceName, referenceEntries,
                                 overlayPath=overlayPath, referenceOverlayPath=referenceOverlayPath, growMm=growMm,
                                 erodeReferenceMm=erodeReferenceMm, allowedMask=allowed, target=target,
@@ -885,6 +899,17 @@ def _badge(state, number, size=22):
 
 def _button(text, role="action"):
     return dynamicviews.colorButton(qt.QPushButton(text), role)
+
+
+def _growIntoCombo():
+    """Where grown regions may go (normaldb.GROW_INTO); the Neuro workflows and the Database Manager."""
+    combo = qt.QComboBox()
+    for key, title in normaldb.GROW_INTO:
+        combo.addItem(title, key)
+    combo.toolTip = ("Where the grown regions may go (all inside the MNI brain mask, each voxel to the nearest "
+                     "region): CSF and the cortex edge only (white matter probability < 0.5), white matter too, or "
+                     "white matter only (they do not grow outward into CSF).")
+    return combo
 
 
 class DynamicNeuroPETWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
@@ -1798,14 +1823,10 @@ class DynamicNeuroPETWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             "brain mask and outside the white matter (probability < 0.5, when the WM map is in the atlas folder); "
             "the ventricles and the pons do not grow.")
         form.addRow("Grow regions:", self.growSpin)
-        self.growWhiteMatterCheck = qt.QCheckBox("Grow into the white matter too")
-        self.growWhiteMatterCheck.toolTip = ("Off: the regions grow into CSF and the cortex edge only (white matter "
-                                             "probability < 0.5). On: they may take white matter voxels too (still "
-                                             "inside the brain mask, each voxel to the nearest region).")
-        form.addRow("", self.growWhiteMatterCheck)
-        self.growSpin.connect("valueChanged(double)",
-                              lambda v: setattr(self.growWhiteMatterCheck, "enabled", v > 0))
-        self.growWhiteMatterCheck.enabled = GROW_MM > 0
+        self.growIntoCombo = _growIntoCombo()
+        form.addRow("Grow into:", self.growIntoCombo)
+        self.growSpin.connect("valueChanged(double)", lambda v: setattr(self.growIntoCombo, "enabled", v > 0))
+        self.growIntoCombo.enabled = GROW_MM > 0
         self.erodeSpin = qt.QDoubleSpinBox()
         self.erodeSpin.setRange(0.0, 10.0)
         self.erodeSpin.setDecimals(1)
@@ -1920,7 +1941,7 @@ class DynamicNeuroPETWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         return {"targetKind": self.targetAtlasCombo.currentData, "referenceKind": self.referenceAtlasCombo.currentData,
                 "referenceName": self.referenceRegionCombo.currentText or None,
                 "growMm": float(self.growSpin.value), "erodeReferenceMm": float(self.erodeSpin.value),
-                "growIntoWhiteMatter": bool(self.growWhiteMatterCheck.checked),
+                "growInto": self.growIntoCombo.currentData or normaldb.GROW_NO_WM,
                 "target": self.regionsTargetSelector.currentNode()}
 
     # --- embedded modules --------------------------------------------------------------------------
@@ -2291,6 +2312,9 @@ class DynamicNeuroPETTest(ScriptedLoadableModuleTest):
         self.assertEqual(grown.GetSegmentation().GetSegment(grownRef).GetName(),
                          "Cerebellum Gray Matter" + REFERENCE_SUFFIX)
         self.assertLess(int(np.count_nonzero(slicer.util.arrayFromSegmentBinaryLabelmap(grown, grownRef))), 2 * 64)
+        with self.assertRaises(ValueError):        # no white matter map in this atlas folder
+            logic.loadAtlasRegions(atlas, ATLAS_BILATERAL, ATLAS_BILATERAL, growMm=1.0,
+                                   growInto=normaldb.GROW_ONLY_WM)
         self.delayDisplay("Regions test passed")
 
     def test_Widget(self):

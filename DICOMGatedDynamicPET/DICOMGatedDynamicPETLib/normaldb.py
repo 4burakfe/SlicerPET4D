@@ -158,6 +158,21 @@ def imageExtension(path):
     return ""
 
 
+# Where grown regions may go (white matter: probability >= 0.5 in the MNI WM map)
+GROW_NO_WM, GROW_WITH_WM, GROW_ONLY_WM = "noWhiteMatter", "withWhiteMatter", "onlyWhiteMatter"
+GROW_INTO = ((GROW_NO_WM, "CSF and cortex edge (not white matter)"), (GROW_WITH_WM, "White matter too"),
+             (GROW_ONLY_WM, "White matter only"))
+GROW_INTO_TEXT = {GROW_NO_WM: "", GROW_WITH_WM: "into the white matter too", GROW_ONLY_WM: "into the white matter only"}
+
+
+def growInto(header):
+    """GROW_* of a header ("growInto"; older headers: the "growIntoWhiteMatter" flag)."""
+    value = header.get("growInto")
+    if value in GROW_INTO_TEXT:
+        return value
+    return GROW_WITH_WM if header.get("growIntoWhiteMatter") else GROW_NO_WM
+
+
 def regionAtlasTitle(key):
     return dict(REGION_ATLASES).get(key, key or "")
 
@@ -340,7 +355,7 @@ def newHeader(name, mode=STATIC, kind=USER_DEFINED, **fields):
         "referenceErosionMm": 0.0,
         "regionAtlas": DEFAULT_REGION_ATLAS,
         "regionGrowMm": 0.0,
-        "growIntoWhiteMatter": False,
+        "growInto": GROW_NO_WM,
         "normalization": emptyNormalization(),
         "ageStratified": False,
         "ageGroups": [],
@@ -390,6 +405,8 @@ def validateHeader(header):
         errors.append("The region growth cannot be negative")
     if header.get("regionAtlas") not in dict(REGION_ATLASES):
         errors.append("Unknown region atlas")
+    if header.get("growInto") is not None and header.get("growInto") not in GROW_INTO_TEXT:
+        errors.append("Unknown region growth target (growInto)")
     if (header.get("normalization") or {}).get("method", "") not in dict(NORM_METHODS):
         errors.append("Unknown normalization method")
     if header.get("ageStratified"):
@@ -406,6 +423,8 @@ def readHeader(folder):
         header = json.load(f)
     if not isinstance(header, dict) or "name" not in header:
         raise ValueError(f"{headerPath(folder)} is not a database header")
+    header["growInto"] = growInto(header)
+    header.pop("growIntoWhiteMatter", None)
     defaults = newHeader(header.get("name", ""), header.get("mode", STATIC), header.get("kind", USER_DEFINED))
     for key, value in defaults.items():
         header.setdefault(key, value)
