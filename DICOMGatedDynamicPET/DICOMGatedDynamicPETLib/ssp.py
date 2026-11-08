@@ -2,8 +2,8 @@
 (numpy + scipy, no Slicer).
 
     surface     the brain surface (the union of the regions, made in Slicer with VTK): its vertices (RAS mm), outward
-                normals and triangles; with the medial views, the surfaces of the two hemispheres (the union cut at
-                the midline, x = 0 in MNI space) after it, each vertex's part in "parts" (0 brain, 1 left, 2 right)
+                normals and triangles (an .npz made for the medial views, since dropped, also holds the two
+                hemispheres' surfaces after the brain's, each vertex's part in "parts": only the brain's is used)
     projection  each vertex takes the maximum of a map along its inward normal, from the surface to DEPTH_MM (13.5 mm,
                 six 2.25 mm voxels as in the original), sampled every STEP_MM with trilinear interpolation
     scores      Minoshima: every normal's map (smoothed as the voxel maps) is projected, and the patient's projection
@@ -32,8 +32,7 @@ MAPS = ((MAP_SCORE, "Score (z / t)"), (MAP_PATIENT, "Patient (projected values)"
 SSP_FILE = "stats/ssp.npz"
 
 PART_BRAIN, PART_LEFT, PART_RIGHT = 0, 1, 2
-# camera of each view: (direction from the brain centre to the camera, view up), RAS; the medial views look at one
-# hemisphere from the other side
+# camera of each view: (direction from the brain centre to the camera, view up), RAS
 CAMERAS = {
     "Top": ((0.0, 0.0, 1.0), (0.0, 1.0, 0.0)),
     "Bottom": ((0.0, 0.0, -1.0), (0.0, 1.0, 0.0)),
@@ -41,10 +40,7 @@ CAMERAS = {
     "Post": ((0.0, -1.0, 0.0), (0.0, 0.0, 1.0)),
     "Left": ((-1.0, 0.0, 0.0), (0.0, 0.0, 1.0)),
     "Right": ((1.0, 0.0, 0.0), (0.0, 0.0, 1.0)),
-    "LeftMedial": ((1.0, 0.0, 0.0), (0.0, 0.0, 1.0)),
-    "RightMedial": ((-1.0, 0.0, 0.0), (0.0, 0.0, 1.0)),
 }
-VIEW_PARTS = {"LeftMedial": PART_LEFT, "RightMedial": PART_RIGHT}       # the other views: PART_BRAIN
 
 
 def offsets(depthMm=DEPTH_MM, stepMm=STEP_MM):
@@ -54,36 +50,6 @@ def offsets(depthMm=DEPTH_MM, stepMm=STEP_MM):
     if values[-1] < depthMm - 1e-6:
         values.append(depthMm)
     return np.array(values, dtype=np.float64)
-
-
-def viewPart(key):
-    return VIEW_PARTS.get(key, PART_BRAIN)
-
-
-def hemispheres(shape, ijkToRas, midlineX=0.0):
-    """(left, right) boolean arrays (k, j, i) of a grid: the voxels with RAS x below / above midlineX."""
-    m = np.asarray(ijkToRas, dtype=np.float64)
-    k, j, i = (np.arange(n, dtype=np.float64) for n in shape)
-    x = (m[0, 0] * i[None, None, :] + m[0, 1] * j[None, :, None] + m[0, 2] * k[:, None, None] + m[0, 3])
-    x = np.broadcast_to(x, tuple(shape))
-    return x < midlineX, x >= midlineX
-
-
-def combine(brain, left=None, right=None):
-    """One surface of the brain's and the hemispheres' surfaces (vertices after one another, "parts" per vertex)."""
-    pieces = [(PART_BRAIN, brain)] + [(part, s) for part, s in ((PART_LEFT, left), (PART_RIGHT, right))
-                                      if s is not None and len(s["points"])]
-    points, normals, triangles, parts = [], [], [], []
-    offset = 0
-    for part, s in pieces:
-        count = len(s["points"])
-        points.append(np.asarray(s["points"], np.float64))
-        normals.append(np.asarray(s["normals"], np.float64))
-        triangles.append(np.asarray(s["triangles"], np.int64) + offset)
-        parts.append(np.full(count, part, dtype=np.int8))
-        offset += count
-    return {"points": np.concatenate(points), "normals": np.concatenate(normals),
-            "triangles": np.concatenate(triangles), "parts": np.concatenate(parts)}
 
 
 def parts(surface):
@@ -105,6 +71,13 @@ def piece(surface, part):
     keep = np.all(renumber[triangles] >= 0, axis=1) if len(triangles) else np.zeros(0, bool)
     return ({"points": np.asarray(surface["points"])[index], "normals": np.asarray(surface["normals"])[index],
              "triangles": renumber[triangles[keep]]}, index)
+
+
+def brainPart(surface):
+    """(the brain's surface, its vertex indices): the whole surface, or its brain part when it has parts."""
+    if surface.get("parts") is None:
+        return surface, np.arange(len(surface["points"]))
+    return piece(surface, PART_BRAIN)
 
 
 def rasToIjk(points, ijkToRas):

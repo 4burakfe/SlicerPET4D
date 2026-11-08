@@ -119,15 +119,14 @@ def test_score_color_tables():
 def test_layout_xml():
     document = xml.dom.minidom.parseString(nr.layoutXml())
     tags = [v.getAttribute("singletontag") for v in document.getElementsByTagName("view")]
-    assert len(tags) == 15 and nr.TABLE_VIEW in tags
+    assert len(tags) == 13 and nr.TABLE_VIEW in tags
     assert nr.sliceViewName(nr.SCORE_ROW, "Sagittal") in tags and nr.sspViewName("Right") in tags
-    assert nr.sspViewName("LeftMedial") in tags and nr.sspViewName("RightMedial") in tags
     dual = xml.dom.minidom.parseString(nr.layoutXml(nr.LAYOUT_DUAL, ' name="main"'))
     layouts = dual.documentElement.getElementsByTagName("layout")
     assert dual.documentElement.tagName == "viewports"
     assert layouts[0].getAttribute("name") == "main"
     floating = [l for l in layouts if l.getAttribute("dockable") == "true"]
-    assert len(floating) == 1 and len(floating[0].getElementsByTagName("view")) == 8
+    assert len(floating) == 1 and len(floating[0].getElementsByTagName("view")) == 6
     assert len(xml.dom.minidom.parseString(nr.layoutXml(nr.LAYOUT_SLICES)).getElementsByTagName("view")) == 7
-    assert len(xml.dom.minidom.parseString(nr.layoutXml(nr.LAYOUT_SSP)).getElementsByTagName("view")) == 8
+    assert len(xml.dom.minidom.parseString(nr.layoutXml(nr.LAYOUT_SSP)).getElementsByTagName("view")) == 6
     assert nr.defaultLayout(2) == nr.LAYOUT_DUAL and nr.defaultLayout(1) == nr.LAYOUT_SINGLE

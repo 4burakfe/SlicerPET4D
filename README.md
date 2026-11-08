@@ -655,8 +655,8 @@ steps, on the toolbar like the Dynamic Neuro Receptor PET:
 5. **Review**: the patient compared with the normal database. Entering the step compares automatically (once per
    image, regions and database; **Compare with the database** again by hand, or *Compute the regional values*
    without a database: SUV and SUVR to the reference region). **Layout** (left): *Single monitor* (the normalized
-   PET axial / coronal / sagittal with the region outlines, below it the **voxel score map**, then the eight **3D-SSP**
-   views (superior, anterior, left, left medial / inferior, posterior, right, right medial), the **region table** on the right), *Dual monitor* (the default with two screens: the slices and the table
+   PET axial / coronal / sagittal with the region outlines, below it the **voxel score map**, then the six **3D-SSP**
+   views (superior, anterior, left / inferior, posterior, right), the **region table** on the right), *Dual monitor* (the default with two screens: the slices and the table
    in the main window, the 3D-SSP views in a window maximized on the second screen), *Slices and table* or
    *3D-SSP only*. The slice views are linked and have no title bars. Settings on the left:
    - **Normals**: automatically the patient's age group (the master when the age is not known or its group has no
@@ -679,10 +679,7 @@ steps, on the toolbar like the Dynamic Neuro Receptor PET:
    - **Region table**: the region color, SUVmean, the value of the database's map type (SUVR / ratio), the normals'
      mean, SD and n, and the score; as wide as its content. Click a column header to sort (by name or by value);
      click a region to show it alone on the slices for 5 s.
-   - **3D-SSP** (Minoshima et al. 1995): the surface of all the regions together, and for the medial views each
-     hemisphere's (the regions cut at the midline, x = 0 in MNI space, stored with the brain's in `ssp.npz`; an older
-     `ssp.npz` without them gives no medial views, or for a user defined database the projections are made from its
-     subjects); each vertex takes the maximum of
+   - **3D-SSP** (Minoshima et al. 1995): the surface of all the regions together; each vertex takes the maximum of
      the patient's smoothed map along its inward normal (0-13.5 mm, 1 mm steps). **Map**: the score (default) or the
      patient's projected values (SUVR for an SUVR database, else SUV; smoothed). **Score from**: *Minoshima*
      (default; against the same projection of every normal: the database's `stats/ssp.npz` when the regions are the
