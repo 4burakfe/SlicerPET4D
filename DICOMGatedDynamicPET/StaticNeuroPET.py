@@ -8,14 +8,14 @@ Receptor PET module (same normalization and regions) and the Neuro PET normal da
                             file (BIDS PET: sub-<id>_ses-<session>_pet.nii.gz with its .json sidecar and the
                             participants.tsv), the patient's CT / MR, the age and sex (read from the tags, editable)
     2. CT/MR registration   optional: the image registered to the CT / MR (rigid by default) and hardened
-    3. Normalization        to the MNI ICBM 152 2009c space: the PET/SPECT to the T1 template, the CT/MR to the MR
-                            template with the same transform applied to the image, or the PET/SPECT to a PET template
-                            (the master mean map of a normal database)
-    4. Regions/Template     the normal database the patient is compared with (those of the image's modality, nuclide
-                            and tracer first) and the CerebrA regions: with a database its region settings (atlas,
-                            growth, white matter, reference region and its mask) are used, locked unless unlocked
-    5. Review               placeholder: the comparison with the database comes here (without a database: the
-                            regional SUVs)
+    3. Normalization        the normal database (those of the image's modality, nuclide and tracer first; its
+                            normalization settings are the defaults, others warn) and the normalization to the MNI
+                            ICBM 152 2009c space: the PET/SPECT to an MR template, the CT/MR to the MR template with the
+                            same transform applied to the image, or the PET/SPECT to the database's master mean map
+    4. Regions              the CerebrA regions: with a database its region settings (atlas, growth, white matter,
+                            reference region and its mask) are used, locked unless unlocked
+    5. Review               the comparison with the database comes here; adding the patient to a user defined
+                            database (SUV and SUVR maps on the database grid, a row in subjects.csv)
 """
 
 import json
@@ -33,22 +33,22 @@ _MODULE_DIR = os.path.dirname(os.path.abspath(globals().get("__file__", "") or "
 if globals().get("__file__") and _MODULE_DIR not in sys.path:
     sys.path.insert(0, _MODULE_DIR)
 
-from DICOMGatedDynamicPETLib import normaldb  # noqa: E402
+from DICOMGatedDynamicPETLib import neuro, normaldb  # noqa: E402
 from DICOMGatedDynamicPETLib import registration as reg  # noqa: E402
 from DICOMGatedDynamicPETLib import resampling  # noqa: E402
 from DICOMGatedDynamicPETLib import staticneuro as sn  # noqa: E402
 from DICOMGatedDynamicPETLib.hardendialog import hardenDialog  # noqa: E402
 from DynamicNeuroPET import (DynamicNeuroPETLogic, DynamicNeuroPETWidget, _button, _ijkToRas, _percentiles,  # noqa
                              _vtkMatrix, ATLAS_BILATERAL, ATLAS_FILE_ATTRIBUTE, METHOD_ANATOMY, METHOD_PET,
-                             METHOD_PET_TEMPLATE, NEURO_PREFIX, NORMALIZED_SUFFIX, REG_PREFIX, STATE_DONE,
-                             STATE_READY, STATE_WAITING, STEP_DATA, STEP_NORM, STEP_REG, STEP_REGIONS)
+                             METHOD_PET_TEMPLATE, NEURO_PREFIX, NORMALIZED_SUFFIX, REFERENCE_SUFFIX, REG_PREFIX,
+                             STATE_DONE, STATE_READY, STATE_WAITING, STEP_DATA, STEP_NORM, STEP_REG, STEP_REGIONS)
 
 STEP_REVIEW = "review"
 STEPS = (
     (STEP_DATA, None, "Data", "Static PET / SPECT of the brain and the patient's CT / MR"),
     (STEP_REG, None, "CT/MR registration", "Optional: the image registered to the CT / MR"),
-    (STEP_NORM, None, "Normalization", "To the MNI ICBM 152 2009c space"),
-    (STEP_REGIONS, None, "Regions/Template", "Normal database and CerebrA regions"),
+    (STEP_NORM, None, "Normalization", "Normal database and the MNI ICBM 152 2009c space"),
+    (STEP_REGIONS, None, "Regions", "CerebrA regions (as in the normal database)"),
     (STEP_REVIEW, None, "Review", "Comparison with the normal database"),
 )
 METHODS = ((METHOD_PET, "PET/SPECT to MR template (T1)"),
@@ -58,6 +58,7 @@ SETTINGS_DB_ROOT = "DICOMGatedDynamicPET/NeuroDatabase/RootFolder"     # shared 
 SETTINGS_IMPORT_FOLDER = "DICOMGatedDynamicPET/StaticNeuro/ImportFolder"
 AGE_ATTRIBUTE, SEX_ATTRIBUTE = NEURO_PREFIX + "PatientAge", NEURO_PREFIX + "PatientSex"
 DATABASE_PARAMETER = NEURO_PREFIX + "Database"
+NORMALIZATION_ATTRIBUTE = NEURO_PREFIX + "Normalization"    # JSON of the settings the image was normalized with
 REGISTERED_SUFFIX = " registered"
 ICON_PATH = os.path.join(_MODULE_DIR, "Resources", "Icons", "StaticNeuroPET.png")
 WARNING_STYLE = "<span style='color:#c0392b'>{}</span>"
@@ -74,11 +75,21 @@ class StaticNeuroPET(ScriptedLoadableModule):
             "Workflow for a static brain PET or SPECT: <b>1. Data</b> (static PET / SPECT from DICOM or a file, the "
             "CT/MR, age and sex), <b>2. CT/MR registration</b> (optional), <b>3. Normalization</b> to the MNI ICBM "
             "152 2009c space (PET/SPECT to the T1 template, CT/MR to the MR template, or PET/SPECT to the mean map of "
-            "a normal database), <b>4. Regions/Template</b> (the normal database and the CerebrA regions) and "
-            "<b>5. Review</b>. The atlases are not shipped: pick their folder in step 3.")
+            "a normal database; the normal database is picked here and gives its normalization settings), <b>4. "
+            "Regions</b> (the CerebrA regions as in the database) and <b>5. Review</b> (and adding the patient to a "
+            "user defined database). The atlases are not shipped: pick their folder in step 3.")
         parent.acknowledgementText = (
             "Part of the DICOM Gated / Dynamic PET extension. MNI ICBM 152 nonlinear symmetric 2009c template: Fonov "
             "VS et al., NeuroImage 2011;54:313-327. CerebrA: Manera AL et al., Scientific Data 2020;7:237 (CC0).")
+
+
+def _sameRegion(segmentName, title):
+    """A segment name ("Cerebellum Gray Matter (reference)") naming the region title ("Cerebellum Gray Matter")."""
+    def clean(text):
+        text = (text or "").strip().lower()
+        suffix = REFERENCE_SUFFIX.strip().lower()
+        return text[:-len(suffix)].strip() if text.endswith(suffix) else text
+    return clean(segmentName) == clean(title)
 
 
 # ---------------------------------------------------------------------------
@@ -289,6 +300,59 @@ class StaticNeuroPETLogic(DynamicNeuroPETLogic):
                 logging.exception("Static Neuro: could not normalize the CT/MR")
         return undo, node, None, normalized
 
+    # --- adding a patient to a normal database --------------------------------------------------
+    def addSubject(self, folder, header, volume, subjectId, gridPath, age, sex, normalization, replace=False,
+                   segmentation=None, segmentId=None, referenceName=""):
+        """Add a normalized volume to a user defined database: resampled onto the database grid (gridPath: its
+        reference mask, or the MNI brain mask; MNI 2009c 1 mm) and saved as subjects/<id>_SUV.nii.gz and its SUVR
+        map. The reference region (intensity normalization) is the segment segmentId of segmentation (the regions
+        of step 4) or, without it, the mask gridPath. Returns the row written into subjects.csv."""
+        scene = slicer.mrmlScene
+        gridArray, gridNode = self._loadLabels(gridPath)
+        nodes = [gridNode]
+        try:
+            dims = tuple(int(x) for x in gridNode.GetImageData().GetDimensions())
+            image = resampling.Resampler(_ijkToRas(volume), dims, _ijkToRas(gridNode), None, True,
+                                         "Linear").resample(volume.GetImageData())
+            suvNode = scene.AddNewNodeByClass("vtkMRMLScalarVolumeNode", "Neuro subject SUV (temporary)")
+            nodes.append(suvNode)
+            suvNode.SetIJKToRASMatrix(_vtkMatrix(_ijkToRas(gridNode)))
+            suvNode.SetAndObserveImageData(image)
+            values = slicer.util.arrayFromVolume(suvNode).astype(np.float32)
+            if segmentation is not None and segmentId:
+                mask = slicer.util.arrayFromSegmentBinaryLabelmap(segmentation, segmentId, gridNode)
+                if mask is None:
+                    raise ValueError("The reference segment is empty.")
+                mask = np.asarray(mask) > 0
+            else:
+                mask = gridArray > 0
+            ratio, mean = sn.ratioMap(values, mask)
+            slicer.util.updateVolumeFromArray(suvNode, values)
+            suvrNode = scene.AddNewNodeByClass("vtkMRMLScalarVolumeNode", "Neuro subject SUVR (temporary)")
+            nodes.append(suvrNode)
+            suvrNode.SetIJKToRASMatrix(_vtkMatrix(_ijkToRas(gridNode)))
+            slicer.util.updateVolumeFromArray(suvrNode, ratio)
+            suvFile, suvrFile = normaldb.subjectFileNames(subjectId)
+            os.makedirs(os.path.join(folder, normaldb.SUBJECTS_DIR), exist_ok=True)
+            for node, relative in ((suvNode, suvFile), (suvrNode, suvrFile)):
+                if not slicer.util.saveNode(node, os.path.join(folder, relative)):
+                    raise RuntimeError(f"Could not write {relative}")
+        finally:
+            for node in nodes:
+                if node is not None and scene.IsNodePresent(node):
+                    scene.RemoveNode(node)
+        attributes = self.attributes(volume)
+        scanDate = self.dicomValues(volume, ("0008,0020",))["0008,0020"] or ""
+        if len(scanDate) == 8 and scanDate.isdigit():
+            scanDate = f"{scanDate[:4]}-{scanDate[4:6]}-{scanDate[6:]}"
+        row = {"id": subjectId, "age": "" if age is None else f"{age:g}", "sex": sex or "", "scanDate": scanDate,
+               "suvFile": suvFile, "suvrFile": suvrFile, "referenceMean": f"{mean:.6g}",
+               "reference": referenceName or "", "normalization": normaldb.normalizationText(normalization),
+               "source": attributes.get(sn.IMPORTED_ATTRIBUTE) or volume.GetName()}
+        normaldb.addSubject(folder, row, normalization, replace)
+        logging.info(f"Static Neuro: '{subjectId}' added to {folder} (reference mean {mean:.4g})")
+        return row
+
     # --- normal databases ------------------------------------------------------------------------
     @staticmethod
     def databaseRoot():
@@ -311,8 +375,9 @@ class StaticNeuroPETLogic(DynamicNeuroPETLogic):
 # Widget
 # ---------------------------------------------------------------------------
 class StaticNeuroPETWidget(DynamicNeuroPETWidget):
-    """The Dynamic Neuro workflow on a static PET / SPECT: own Data, CT/MR registration, Regions/Template (normal
-    database) and Review pages; the Normalization page of the Dynamic Neuro module with the PET template method."""
+    """The Dynamic Neuro workflow on a static PET / SPECT: own Data, CT/MR registration, Regions (normal
+    database settings) and Review pages; the Normalization page of the Dynamic Neuro module with the normal database
+    and the PET template method."""
 
     MODULE_NAME = "StaticNeuroPET"
     STEPS = STEPS
@@ -764,13 +829,45 @@ class StaticNeuroPETWidget(DynamicNeuroPETWidget):
         self._updateRegButtons()
         self.refresh()
 
-    # --- page 3: normalization (the Dynamic Neuro page, with the PET template) ---------------------------
-    def _addTemplateRows(self, form):
-        self.templateDbCombo = qt.QComboBox()
-        self.templateDbCombo.toolTip = ("Normal database whose master mean map (MNI 2009c, all subjects) is the PET "
-                                        "template. Only databases with computed statistics are listed.")
-        form.addRow("Template database:", self.templateDbCombo)
-        self.templateDbCombo.connect("activated(int)", lambda i: self.onTemplateDatabaseChanged())
+    # --- page 3: normalization (the Dynamic Neuro page with the normal database and the PET template) -----
+    def _buildNormPage(self):
+        page = DynamicNeuroPETWidget._buildNormPage(self)
+        box = qt.QGroupBox("Normal database")
+        form = qt.QFormLayout(box)
+        self.dbRootPath = ctk.ctkPathLineEdit()
+        self.dbRootPath.filters = ctk.ctkPathLineEdit.Dirs
+        self.dbRootPath.settingKey = ""
+        self.dbRootPath.currentPath = self.logic.databaseRoot()
+        self.dbRootPath.toolTip = "Root folder of the normal databases (the same as in the Neuro PET Database Manager)"
+        form.addRow("Database folder:", self.dbRootPath)
+        dbRow = qt.QHBoxLayout()
+        self.dbCombo = qt.QComboBox()
+        self.dbCombo.toolTip = ("The normal database the patient is compared with (and may be added to). Those of the "
+                                "image's modality, nuclide and tracer are listed first (and picked); the others are "
+                                "marked with '!'. Its normalization settings are put on this page as the default.")
+        refreshButton = qt.QPushButton("Refresh")
+        refreshButton.toolTip = "Read the database folder again"
+        dbRow.addWidget(self.dbCombo, 1)
+        dbRow.addWidget(refreshButton)
+        form.addRow("Database:", dbRow)
+        self.dbInfo = qt.QLabel()
+        self.dbInfo.wordWrap = True
+        form.addRow(self.dbInfo)
+        page.layout().insertWidget(0, box)
+        self.dbRootPath.connect("currentPathChanged(QString)", self.onDatabaseRootChanged)
+        refreshButton.connect("clicked()", lambda: self._fillDatabases(force=True))
+        self.dbCombo.connect("activated(int)", lambda i: self._setDatabase(self.dbCombo.currentData or "",
+                                                                           chosen=True))
+        for combo in [self.methodCombo, self.templateCombo, self.normEngineCombo] + list(self.normStepCombos):
+            combo.connect("currentIndexChanged(int)", lambda i: self._updateDatabaseInfo())
+        self.maskCheck.connect("toggled(bool)", lambda on: self._updateDatabaseInfo())
+        for widget in self.normIterative.values():
+            signal = "toggled(bool)" if isinstance(widget, qt.QCheckBox) else "currentIndexChanged(int)"
+            try:
+                widget.connect(signal, lambda *args: self._updateDatabaseInfo())
+            except Exception:
+                pass
+        return page
 
     def _setRowVisible(self, widget, visible):
         widget.visible = visible
@@ -785,31 +882,26 @@ class StaticNeuroPETWidget(DynamicNeuroPETWidget):
         if not hasattr(self, "templateCombo"):
             return
         petTemplate = self.method() == METHOD_PET_TEMPLATE
-        if hasattr(self, "templateDbCombo"):
-            self._setRowVisible(self.templateDbCombo, petTemplate)
-            self._setRowVisible(self.templateCombo, not petTemplate)
+        self._setRowVisible(self.templateCombo, not petTemplate)
         if not petTemplate:
             DynamicNeuroPETWidget._updateTemplateChoice(self)
             return
-        folder = self.templateDbCombo.currentData if hasattr(self, "templateDbCombo") else ""
+        folder = self._database()
         header = self._header(folder)
-        self.templateNote.text = (f"Registered to the master mean map of '{header['name']}' (a "
-                                  f"{header.get('tracer') or header.get('nuclide') or ''} template in the MNI 2009c "
-                                  "space)." if header else
-                                  "Pick a normal database with computed statistics (the root folder is set in step 4).")
-
-    def onTemplateDatabaseChanged(self):
-        folder = self.templateDbCombo.currentData or ""
-        if folder and not self._database():
-            self._setDatabase(folder, chosen=True)
-        self._clearNormalization()
-        self._updateTemplateChoice()
-        self._updateNormButtons()
+        if header is None:
+            self.templateNote.text = "Pick a normal database above: its master mean map is the template."
+        elif not sn.masterMeanPath(folder, header):
+            self.templateNote.text = (f"'{header['name']}' has no master mean map yet (statistics not computed): pick "
+                                      "another method or database.")
+        else:
+            self.templateNote.text = (f"Registered to the master mean map of '{header['name']}' (a "
+                                      f"{header.get('tracer') or header.get('nuclide') or ''} template in the MNI "
+                                      "2009c space).")
 
     def _template(self):
         if self.method() != METHOD_PET_TEMPLATE:
             return DynamicNeuroPETWidget._template(self)
-        folder = self.templateDbCombo.currentData or ""
+        folder = self._database()
         header = self._header(folder)
         path = sn.masterMeanPath(folder, header) if header else None
         if not path:
@@ -820,8 +912,11 @@ class StaticNeuroPETWidget(DynamicNeuroPETWidget):
 
     def _updateNormButtons(self):
         DynamicNeuroPETWidget._updateNormButtons(self)
-        if hasattr(self, "templateDbCombo") and self.method() == METHOD_PET_TEMPLATE:
-            self.normalizeButton.enabled = self.volume() is not None and bool(self.templateDbCombo.currentData)
+        if hasattr(self, "dbCombo") and self.method() == METHOD_PET_TEMPLATE:
+            folder = self._database()
+            header = self._header(folder)
+            self.normalizeButton.enabled = (self.volume() is not None and header is not None
+                                            and bool(sn.masterMeanPath(folder, header)))
 
     @staticmethod
     def _normHardenText(volume, template, method):
@@ -830,42 +925,92 @@ class StaticNeuroPETWidget(DynamicNeuroPETWidget):
                 + ("\nThe CT/MR is normalized too (on the template grid)." if method == METHOD_ANATOMY else "")
                 + "\n\nSave separately (default) keeps the image in the patient space next to the normalized one.")
 
-    # --- page 4: regions / template --------------------------------------------------------------
-    def _buildRegionsPage(self):
-        page = DynamicNeuroPETWidget._buildRegionsPage(self)
-        box = qt.QGroupBox("Normal database")
-        form = qt.QFormLayout(box)
-        self.dbRootPath = ctk.ctkPathLineEdit()
-        self.dbRootPath.filters = ctk.ctkPathLineEdit.Dirs
-        self.dbRootPath.settingKey = ""
-        self.dbRootPath.currentPath = self.logic.databaseRoot()
-        self.dbRootPath.toolTip = "Root folder of the normal databases (the same as in the Neuro PET Database Manager)"
-        form.addRow("Database folder:", self.dbRootPath)
-        dbRow = qt.QHBoxLayout()
-        self.dbCombo = qt.QComboBox()
-        self.dbCombo.toolTip = ("The normal database the patient is compared with. Those of the image's modality, "
-                                "nuclide and tracer are listed first (and picked); the others are marked with '!'.")
-        refreshButton = qt.QPushButton("Refresh")
-        refreshButton.toolTip = "Read the database folder again"
-        dbRow.addWidget(self.dbCombo, 1)
-        dbRow.addWidget(refreshButton)
-        form.addRow("Database:", dbRow)
-        self.dbInfo = qt.QLabel()
-        self.dbInfo.wordWrap = True
-        form.addRow(self.dbInfo)
-        self.unlockCheck = qt.QCheckBox("Unlock the region settings")
-        self.unlockCheck.toolTip = ("The regions are drawn as in the database (atlas, growth, reference region) so the "
-                                    "patient's values compare with the database's. Unlock to change them.")
-        form.addRow(self.unlockCheck)
-        page.layout().insertWidget(0, box)
-        self.dbRootPath.connect("currentPathChanged(QString)", self.onDatabaseRootChanged)
-        refreshButton.connect("clicked()", lambda: self._fillDatabases(force=True))
-        self.dbCombo.connect("activated(int)", lambda i: self._setDatabase(self.dbCombo.currentData or "",
-                                                                           chosen=True))
-        self.unlockCheck.connect("toggled(bool)", self.onUnlockToggled)
-        self.growSpin.connect("valueChanged(double)", lambda v: self._applyLock())
-        return page
+    # --- normalization settings (stored with a database and on the normalized image) ----------------------
+    def normalizationSettings(self):
+        """The normalization settings on the page, in the categories of normaldb.NORM_KEYS."""
+        from DynamicPETRegistration import iterativeSettings
+        method = self.method()
+        engine = self.normEngine()
+        if engine == reg.ENGINE_ITERATIVE:
+            iterative = iterativeSettings(self.normIterative)
+            linear, deformable = iterative["iterativeLinear"], bool(iterative["iterativeDeformable"])
+        else:
+            steps = [c.currentData for c in self.normStepCombos if c.currentData]
+            linear = next((s for s in steps if s != "BSpline"), "")
+            deformable = "BSpline" in steps
+        return {"method": method, "template": "" if method == METHOD_PET_TEMPLATE else
+                (self.templateCombo.currentData or ""), "engine": engine, "linear": linear,
+                "deformable": deformable, "brainMask": bool(self.maskCheck.checked and self.maskCheck.enabled)}
 
+    @staticmethod
+    def usedNormalization(volume):
+        """The normalization settings a volume was normalized with (stored at Harden), None when not known."""
+        text = volume.GetAttribute(NORMALIZATION_ATTRIBUTE) if volume is not None else None
+        try:
+            return json.loads(text) if text else None
+        except ValueError:
+            return None
+
+    def onNormalize(self):
+        settings = self.normalizationSettings()
+        DynamicNeuroPETWidget.onNormalize(self)
+        if self.normResult is not None:
+            self.normResult["settings"] = settings
+        self._updateDatabaseInfo()
+
+    def onNormHarden(self):
+        settings = (self.normResult or {}).get("settings")
+        undo = self.normUndo
+        DynamicNeuroPETWidget.onNormHarden(self)
+        volume = self.volume()
+        if self.normUndo is not undo and volume is not None and settings:
+            volume.SetAttribute(NORMALIZATION_ATTRIBUTE, json.dumps(settings))
+        self._updateDatabaseInfo()
+
+    def _applyNormalizationSettings(self, header):
+        """A database's normalization settings put on the page as the default (not when the image is normalized or
+        a normalization is pending); the user may change them."""
+        norm = header.get("normalization") or {}
+        if not normaldb.isSpecified(norm) or self.normResult is not None:
+            return
+        volume = self.volume()
+        if volume is not None and volume.GetAttribute(NEURO_PREFIX + "Template"):
+            return
+        if norm.get("method"):
+            index = self.methodCombo.findData(norm["method"])
+            if index >= 0:
+                self.methodCombo.setCurrentIndex(index)
+                self._methodChosen = True
+        if norm.get("template") and self.method() == METHOD_PET:
+            index = self.templateCombo.findData(norm["template"])
+            if index >= 0 and (not self.atlas or neuro.canMakeTemplate(self.atlas, norm["template"])):
+                self.templateCombo.setCurrentIndex(index)
+                self._templateChosen = True
+        if norm.get("engine"):
+            index = self.normEngineCombo.findData(norm["engine"])
+            if index >= 0:
+                self.normEngineCombo.setCurrentIndex(index)
+        if self.normEngine() == reg.ENGINE_ITERATIVE:
+            if norm.get("linear"):
+                combo = self.normIterative["linear"]
+                index = combo.findData(norm["linear"])
+                if index >= 0:
+                    combo.setCurrentIndex(index)
+            if norm.get("deformable") is not None:
+                self.normIterative["deformable"].checked = bool(norm["deformable"])
+        else:
+            if norm.get("linear"):
+                index = self.normStepCombos[0].findData(norm["linear"])
+                if index >= 0:
+                    self.normStepCombos[0].setCurrentIndex(index)
+            if norm.get("deformable") is not None and len(self.normStepCombos) > 1:
+                combo = self.normStepCombos[1]
+                combo.setCurrentIndex(max(0, combo.findData("BSpline" if norm["deformable"] else "")))
+        if norm.get("brainMask") is not None and self.maskCheck.enabled:
+            self.maskCheck.checked = bool(norm["brainMask"])
+        self._updateTemplateChoice()
+
+    # --- normal database ---------------------------------------------------------------------------
     def onDatabaseRootChanged(self, folder):
         self.logic.setDatabaseRoot(folder)
         self._fillDatabases(force=True)
@@ -894,34 +1039,32 @@ class StaticNeuroPETWidget(DynamicNeuroPETWidget):
             logging.warning("Static Neuro: could not list the databases", exc_info=True)
             self.databaseRows = []
         current = self._database()
-        for combo, withMaster in ((self.dbCombo, False), (self.templateDbCombo, True)):
-            selected = combo.currentData or ""
-            combo.blockSignals(True)
-            combo.clear()
-            combo.addItem("No database (regional values only)" if not withMaster else "(none)", "")
-            for folder, header, rank, problems in self.databaseRows:
-                if withMaster and not sn.masterMeanPath(folder, header):
-                    continue
-                n = normaldb.subjectCount(folder, header)
-                text = (("! " if rank else "") + f"{header.get('name')} - {header.get('modality', 'PET')} "
-                        f"{header.get('tracer') or header.get('nuclide')}, n = {n}")
-                combo.addItem(text, folder)
-                combo.setItemData(combo.count - 1, "Differs from the image: " + "; ".join(problems) if problems else
-                                  "Fits the image", qt.Qt.ToolTipRole)
-            wanted = current if combo is self.dbCombo else (selected or current)
-            combo.setCurrentIndex(max(0, combo.findData(wanted)))
-            combo.blockSignals(False)
+        self.dbCombo.blockSignals(True)
+        self.dbCombo.clear()
+        self.dbCombo.addItem("No database (regional values only)", "")
+        for folder, header, rank, problems in self.databaseRows:
+            n = normaldb.subjectCount(folder, header)
+            text = (("! " if rank else "") + f"{header.get('name')} - {header.get('modality', 'PET')} "
+                    f"{header.get('tracer') or header.get('nuclide')}, n = {n}"
+                    + (" (predefined)" if header.get("kind") == normaldb.PREDEFINED else ""))
+            self.dbCombo.addItem(text, folder)
+            self.dbCombo.setItemData(self.dbCombo.count - 1, "Differs from the image: " + "; ".join(problems)
+                                     if problems else "Fits the image", qt.Qt.ToolTipRole)
+        self.dbCombo.setCurrentIndex(max(0, self.dbCombo.findData(current)))
+        self.dbCombo.blockSignals(False)
         if not self._databaseChosen and not current:
             best = next((folder for folder, _, rank, _ in self.databaseRows if rank == 0), "")
             if best:
                 self._setDatabase(best, chosen=False)
         elif current and self._header(current) is None:
             self._setDatabase("", chosen=False)
+        self._fillAddDatabases()
         self._updateDatabaseInfo()
         self._updateTemplateChoice()
 
     def _setDatabase(self, folder, chosen=True):
-        """Pick the normal database (the folder, '' for none) and apply its region settings, locked."""
+        """Pick the normal database (the folder, '' for none): its normalization settings become the default of the
+        Normalization page, its region settings are applied (locked)."""
         self._databaseChosen = self._databaseChosen or chosen
         self._parameter().SetParameter(DATABASE_PARAMETER, folder or "")
         if hasattr(self, "dbCombo"):
@@ -934,16 +1077,96 @@ class StaticNeuroPETWidget(DynamicNeuroPETWidget):
             if chosen and rank:
                 slicer.util.warningDisplay(f"'{header['name']}' differs from the image: " + "; ".join(problems) + ".",
                                            windowTitle="Normal database")
+            self._applyNormalizationSettings(header)
             self._applyDatabaseSettings(folder, header)
             self.unlockCheck.blockSignals(True)
             self.unlockCheck.checked = False
             self.unlockCheck.blockSignals(False)
-            if hasattr(self, "templateDbCombo") and not self.templateDbCombo.currentData:
-                index = self.templateDbCombo.findData(folder)
-                if index >= 0:
-                    self.templateDbCombo.setCurrentIndex(index)
         self._applyLock()
+        self._fillAddDatabases()
+        self._updateTemplateChoice()
+        self._updateNormButtons()
         self._updateDatabaseInfo()
+
+    def _normalizationWarnings(self, header):
+        """Lines about the normalization against the database's: its settings, and how the image (normalized) or
+        the page (not yet) differs. Never blocking."""
+        norm = header.get("normalization") or {}
+        if not normaldb.isSpecified(norm):
+            return ["Normalization of the database: not specified (the first subject added sets it)."]
+        lines = [f"Normalization of the database: {normaldb.normalizationText(norm)}."]
+        volume = self.volume()
+        normalized = volume is not None and bool(volume.GetAttribute(NEURO_PREFIX + "Template"))
+        if normalized:
+            used = self.usedNormalization(volume)
+            if used is None:
+                lines.append(WARNING_STYLE.format("The image's normalization settings are not known."))
+                return lines
+            differences = normaldb.normalizationDifferences(norm, used)
+            if differences:
+                lines.append(WARNING_STYLE.format("The image was normalized otherwise: " + "; ".join(differences)
+                                                  + "."))
+        else:
+            differences = normaldb.normalizationDifferences(norm, self.normalizationSettings())
+            if differences:
+                lines.append(WARNING_STYLE.format("The settings on this page differ: " + "; ".join(differences)
+                                                  + " (allowed, but the patient is not normalized like the "
+                                                  "database's subjects)."))
+        return lines
+
+    def _updateDatabaseInfo(self):
+        if not hasattr(self, "dbInfo") or not hasattr(self, "regionsDbInfo"):
+            return
+        root = self.logic.databaseRoot()
+        folder = self._database()
+        header = self._header(folder)
+        info = self.logic.imageInfo(self.volume())
+        if not root:
+            text = "Pick the database folder, or go on without a database (the review gives the regional values only)."
+            regionsText = "No normal database: the region settings below are free."
+        elif header is None:
+            text = (f"{len(self.databaseRows)} static database(s) in the folder. Without a database the review gives "
+                    "the regional values only.")
+            regionsText = "No normal database: the region settings below are free."
+        else:
+            lines = []
+            rank, problems = sn.databaseMatch(header, info)
+            if problems:
+                lines.append(WARNING_STYLE.format("Differs from the image: " + "; ".join(problems)))
+            warnings = sn.unitWarnings(info, header)
+            if warnings:
+                lines.append(WARNING_STYLE.format(" ".join(warnings)))
+            if not sn.masterMeanPath(folder, header):
+                lines.append("Its mean / SD maps are not computed yet.")
+            lines.extend(self._normalizationWarnings(header))
+            text = "<br>".join(lines)
+            settings = sn.regionSettings(folder, header)
+            regionLines = [f"Database '{header['name']}':"] + sn.settingsText(settings)
+            if self._locked() and not settings["referenceMaskPath"] and not settings["referenceAtlasRegion"]:
+                regionLines.append(WARNING_STYLE.format("It has no reference mask copy: unlock to pick the "
+                                                        "reference region."))
+            regionLines.append("Settings of the database (locked)." if self._locked() else
+                               WARNING_STYLE.format("Unlocked: the regions may differ from the database's."))
+            regionsText = "<br>".join(regionLines)
+        self.dbInfo.text = text
+        self.regionsDbInfo.text = regionsText
+
+    # --- page 4: regions (with the database's region settings) ------------------------------------------
+    def _buildRegionsPage(self):
+        page = DynamicNeuroPETWidget._buildRegionsPage(self)
+        box = qt.QGroupBox("Region settings of the normal database")
+        form = qt.QFormLayout(box)
+        self.regionsDbInfo = qt.QLabel()
+        self.regionsDbInfo.wordWrap = True
+        form.addRow(self.regionsDbInfo)
+        self.unlockCheck = qt.QCheckBox("Unlock the region settings")
+        self.unlockCheck.toolTip = ("The regions are drawn as in the database (atlas, growth, reference region) so the "
+                                    "patient's values compare with the database's. Unlock to change them.")
+        form.addRow(self.unlockCheck)
+        page.layout().insertWidget(0, box)
+        self.unlockCheck.connect("toggled(bool)", self.onUnlockToggled)
+        self.growSpin.connect("valueChanged(double)", lambda v: self._applyLock())
+        return page
 
     def _applyDatabaseSettings(self, folder, header):
         settings = sn.regionSettings(folder, header)
@@ -988,37 +1211,6 @@ class StaticNeuroPETWidget(DynamicNeuroPETWidget):
         self._applyLock()
         self._updateDatabaseInfo()
 
-    def _updateDatabaseInfo(self):
-        if not hasattr(self, "dbInfo"):
-            return
-        root = self.logic.databaseRoot()
-        folder = self._database()
-        header = self._header(folder)
-        info = self.logic.imageInfo(self.volume())
-        if not root:
-            text = "Pick the database folder, or go on without a database (the review gives the regional values only)."
-        elif header is None:
-            text = (f"{len(self.databaseRows)} static database(s) in the folder. Without a database the review gives "
-                    "the regional values only.")
-        else:
-            settings = sn.regionSettings(folder, header)
-            lines = sn.settingsText(settings)
-            rank, problems = sn.databaseMatch(header, info)
-            if problems:
-                lines.insert(0, WARNING_STYLE.format("Differs from the image: " + "; ".join(problems)))
-            warnings = sn.unitWarnings(info, header)
-            if warnings:
-                lines.append(WARNING_STYLE.format(" ".join(warnings)))
-            if header.get("kind") == normaldb.USER_DEFINED and not sn.masterMeanPath(folder, header):
-                lines.append("Its statistics are not computed yet.")
-            if self._locked() and not settings["referenceMaskPath"] and not settings["referenceAtlasRegion"]:
-                lines.append(WARNING_STYLE.format("It has no reference mask copy: unlock to pick the reference "
-                                                  "region."))
-            lines.append("Settings of the database (locked)." if self._locked() else
-                         WARNING_STYLE.format("Unlocked: the regions may differ from the database's."))
-            text = "<br>".join(lines)
-        self.dbInfo.text = text
-
     def _regionsArguments(self):
         arguments = DynamicNeuroPETWidget._regionsArguments(self)
         folder = self._database()
@@ -1043,7 +1235,7 @@ class StaticNeuroPETWidget(DynamicNeuroPETWidget):
             self._fillDatabases()
             self._applyLock()
 
-    # --- page 5: review (placeholder) ---------------------------------------------------------------
+    # --- page 5: review (placeholder) and adding the patient to a database ------------------------------
     def _buildReviewPage(self):
         page = qt.QWidget()
         layout = qt.QVBoxLayout(page)
@@ -1054,8 +1246,96 @@ class StaticNeuroPETWidget(DynamicNeuroPETWidget):
         self.reviewLabel.wordWrap = True
         boxLayout.addWidget(self.reviewLabel)
         layout.addWidget(box)
+
+        addBox = qt.QGroupBox("Add this patient to a normal database")
+        addBox.toolTip = ("For building a user defined database from normal subjects: the normalized image is "
+                          "resampled onto the database grid (MNI 2009c, 1 mm) and saved as its SUV map and its SUVR "
+                          "map (divided by the mean in the database's reference mask) in subjects/; a row is added "
+                          "to subjects.csv. The mean / SD maps are then out of date.")
+        form = qt.QFormLayout(addBox)
+        self.addDbCombo = qt.QComboBox()
+        self.addDbCombo.toolTip = "User defined databases of the database folder (step 3)"
+        form.addRow("Database:", self.addDbCombo)
+        self.addReferenceCombo = qt.QComboBox()
+        self.addReferenceCombo.toolTip = ("Reference region of the SUVR map (intensity normalization): a segment of "
+                                          "the regions (step 4; by default their reference region) or the database's "
+                                          "reference mask. Warns when it is not the database's reference.")
+        form.addRow("Reference region:", self.addReferenceCombo)
+        self.subjectIdEdit = qt.QLineEdit()
+        self.subjectIdEdit.toolTip = "ID of the subject in the database (file names and subjects.csv)"
+        form.addRow("Subject ID:", self.subjectIdEdit)
+        self.addSubjectButton = _button("Add to database")
+        form.addRow(self.addSubjectButton)
+        self.addLabel = qt.QLabel()
+        self.addLabel.wordWrap = True
+        self.addLabel.setTextInteractionFlags(qt.Qt.TextSelectableByMouse)
+        form.addRow(self.addLabel)
+        layout.addWidget(addBox)
         layout.addStretch(1)
+        self.addSubjectButton.connect("clicked()", self.onAddToDatabase)
+        self.addDbCombo.connect("activated(int)", lambda i: self._onAddDatabasePicked())
+        self.addReferenceCombo.connect("activated(int)", lambda i: setattr(self, "_addReferenceChosen", True))
         return page
+
+    def _fillAddDatabases(self):
+        if not hasattr(self, "addDbCombo"):
+            return
+        current = self.addDbCombo.currentData or ""
+        chosen = getattr(self, "_addDbChosen", False)
+        self.addDbCombo.blockSignals(True)
+        self.addDbCombo.clear()
+        for folder, header, rank, _ in self.databaseRows:
+            if header.get("kind") != normaldb.USER_DEFINED:
+                continue
+            self.addDbCombo.addItem(("! " if rank else "") + f"{header.get('name')} (n = "
+                                    f"{normaldb.subjectCount(folder, header)})", folder)
+        wanted = current if chosen and current else self._database()
+        self.addDbCombo.setCurrentIndex(max(0, self.addDbCombo.findData(wanted)))
+        self.addDbCombo.blockSignals(False)
+
+    def _onAddDatabasePicked(self):
+        self._addDbChosen = True
+        self._fillAddReferences()
+
+    def _fillAddReferences(self):
+        """The reference regions to pick from: the segments of the regions (their reference region first) and the
+        reference mask of the database picked for adding."""
+        if not hasattr(self, "addReferenceCombo"):
+            return
+        segmentation = self.node("Segmentation")
+        folder = self.addDbCombo.currentData or ""
+        header = self._header(folder)
+        referenceId = self._parameter().GetParameter(NEURO_PREFIX + "ReferenceSegment") or ""
+        ids = self.logic.segmentIds(segmentation) if segmentation is not None else []
+        key = (segmentation.GetID() if segmentation else "", tuple(ids), referenceId, folder)
+        if getattr(self, "_addReferencesFor", None) == key:
+            return
+        self._addReferencesFor = key
+        current = self.addReferenceCombo.currentData
+        chosen = getattr(self, "_addReferenceChosen", False)
+        self.addReferenceCombo.blockSignals(True)
+        self.addReferenceCombo.clear()
+        if referenceId in ids:
+            ids.remove(referenceId)
+            ids.insert(0, referenceId)
+        for segmentId in ids:
+            self.addReferenceCombo.addItem(segmentation.GetSegmentation().GetSegment(segmentId).GetName(), segmentId)
+        if header is not None and sn.referenceMaskPath(folder, header):
+            title = sn.regionSettings(folder, header)["referenceTitle"] or "reference"
+            self.addReferenceCombo.addItem(f"Database reference mask ({title})", "")
+        index = self.addReferenceCombo.findData(current) if chosen and current is not None else -1
+        self.addReferenceCombo.setCurrentIndex(index if index >= 0 else 0)
+        self.addReferenceCombo.blockSignals(False)
+
+    def _addReference(self, folder, header):
+        """(segmentation, segment ID, name) of the reference region picked for adding; (None, None, name) for the
+        database's reference mask."""
+        segmentId = self.addReferenceCombo.currentData if self.addReferenceCombo.count else None
+        segmentation = self.node("Segmentation")
+        if segmentId and segmentation is not None:
+            name = segmentation.GetSegmentation().GetSegment(segmentId).GetName()
+            return segmentation, segmentId, name
+        return None, None, sn.regionSettings(folder, header)["referenceTitle"] or "Database reference mask"
 
     def _updateReviewPage(self):
         if not hasattr(self, "reviewLabel"):
@@ -1078,6 +1358,85 @@ class StaticNeuroPETWidget(DynamicNeuroPETWidget):
         else:
             lines.append("No database: the review will give the regional values (SUV) only.")
         self.reviewLabel.text = "<br>".join(lines)
+        if hasattr(self, "subjectIdEdit"):
+            key = volume.GetID() if volume is not None else ""
+            if getattr(self, "_subjectIdFor", None) != key:
+                self._subjectIdFor = key
+                self.subjectIdEdit.text = (sn.suggestedSubjectId(self.logic.attributes(volume), volume.GetName())
+                                           if volume is not None else "")
+            self._fillAddReferences()
+            normalized = volume is not None and bool(volume.GetAttribute(NEURO_PREFIX + "Template"))
+            self.addSubjectButton.enabled = (normalized and self.addDbCombo.count > 0
+                                             and self.addReferenceCombo.count > 0)
+            if volume is not None and not normalized:
+                self.addLabel.text = "Normalize the image (step 3) to add it to a database."
+            elif self.addDbCombo.count == 0 and not self.addLabel.text:
+                self.addLabel.text = ("No user defined database in the database folder (create one in the Neuro PET "
+                                      "Database Manager).")
+
+    def onAddToDatabase(self):
+        volume = self.volume()
+        folder = self.addDbCombo.currentData or ""
+        header = self._header(folder)
+        if volume is None or header is None:
+            return
+        subjectId = self.subjectIdEdit.text.strip()
+        if not subjectId:
+            slicer.util.warningDisplay("Type the subject ID.", windowTitle="Add to database")
+            return
+        segmentation, segmentId, referenceName = self._addReference(folder, header)
+        gridPath = sn.referenceMaskPath(folder, header) or (self.atlas or {}).get(neuro.BRAIN_MASK)
+        if not gridPath:
+            slicer.util.errorDisplay(f"'{header['name']}' has no reference mask and the MNI brain mask is not in the "
+                                     "atlas folder: no database grid.", windowTitle="Add to database")
+            return
+        if segmentId is None and not sn.referenceMaskPath(folder, header):
+            slicer.util.errorDisplay("Pick the reference region (load the regions in step 4).",
+                                     windowTitle="Add to database")
+            return
+        age, sex = self.logic.ageAndSex(volume)
+        info = self.logic.imageInfo(volume)
+        notes = []
+        rank, problems = sn.databaseMatch(header, info)
+        if problems:
+            notes.append("The database differs from the image: " + "; ".join(problems) + ".")
+        notes.extend(sn.unitWarnings(info, header))
+        used = self.usedNormalization(volume)
+        if used is None:
+            notes.append("The image's normalization settings are not known.")
+        else:
+            differences = normaldb.normalizationDifferences(header.get("normalization"), used)
+            if differences:
+                notes.append("Normalized otherwise than the database: " + "; ".join(differences) + ".")
+        expected = sn.regionSettings(folder, header)["referenceTitle"]
+        if segmentId and expected and not _sameRegion(referenceName, expected):
+            notes.append(f"The reference region '{referenceName}' is not the database's ({expected}).")
+        if age is None:
+            notes.append("The age is not known" + (" (the database has age groups)." if header.get("ageStratified")
+                                                   else "."))
+        replace = normaldb.hasSubject(folder, subjectId)
+        if replace:
+            notes.append(f"Subject '{subjectId}' is already in the database: it will be replaced.")
+        text = f"Add '{volume.GetName()}' to '{header['name']}' as '{subjectId}'?"
+        if notes:
+            text += "\n\n" + "\n".join("- " + n for n in notes)
+        if not slicer.util.confirmOkCancelDisplay(text, windowTitle="Add to database"):
+            return
+        qt.QApplication.setOverrideCursor(qt.Qt.WaitCursor)
+        try:
+            row = self.logic.addSubject(folder, header, volume, subjectId, gridPath, age, sex, used, replace,
+                                        segmentation, segmentId, referenceName)
+        except Exception as error:
+            logging.exception("Static Neuro: could not add the subject")
+            slicer.util.errorDisplay(f"Could not add the patient to the database:\n{error}")
+            return
+        finally:
+            qt.QApplication.restoreOverrideCursor()
+        self._fillDatabases(force=True)
+        count = normaldb.subjectCount(folder, normaldb.readHeader(folder))
+        self.addLabel.text = (f"'{subjectId}' added to '{header['name']}' (now {count} subjects; reference mean "
+                              f"{float(row['referenceMean']):.4g}). Its mean / SD maps are out of date: compute them "
+                              "again in the Neuro PET Database Manager.")
 
     # --- workflow --------------------------------------------------------------------------------
     def _callStep(self, key, method):
@@ -1206,5 +1565,10 @@ class StaticNeuroPETTest(ScriptedLoadableModuleTest):
             self.assertEqual(widget.current, key)
         self.assertEqual(widget.stepStates()[STEP_DATA], STATE_DONE)
         self.assertEqual(widget.stepStates()[STEP_REVIEW], STATE_WAITING)
+        self.assertTrue(hasattr(widget, "dbCombo") and hasattr(widget, "addReferenceCombo"))
+        self.assertFalse(widget.addSubjectButton.enabled)        # not normalized
+        settings = widget.normalizationSettings()
+        self.assertIn(settings["method"], [m for m, _ in METHODS])
+        self.assertTrue(_sameRegion("Cerebellum Gray Matter" + REFERENCE_SUFFIX, "cerebellum gray matter"))
         widget.showStep(STEP_DATA)
         self.delayDisplay("Widget passed")

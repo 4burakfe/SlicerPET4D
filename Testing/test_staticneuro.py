@@ -110,3 +110,22 @@ def test_age_and_sex():
     assert sn.parseSex("") == ""
     assert sn.taggedAgeSex({"StaticPET.PatientAge": "070Y", "StaticPET.PatientSex": "M"}) == (70, "M")
     assert sn.taggedAgeSex({"SPECTRecon.PatientSex": "F"}) == (None, "F")
+
+
+def test_subject_maps():
+    import numpy as np
+    import pytest
+    assert sn.suggestedSubjectId({"StaticPET.SubjectID": "00000016"}, "x") == "sub-00000016"
+    assert sn.suggestedSubjectId({}, "PET / brain") == "PET _ brain"
+    values = np.full((4, 4, 4), 2.0, dtype=np.float32)
+    values[0] = 8.0
+    mask = np.zeros((4, 4, 4), dtype=np.uint8)
+    mask[0] = 1
+    ratio, mean = sn.ratioMap(values, mask)
+    assert mean == 8.0 and np.isclose(ratio[1, 1, 1], 0.25) and ratio.dtype == np.float32
+    with pytest.raises(ValueError, match="grid"):
+        sn.ratioMap(values, mask[:-1])
+    with pytest.raises(ValueError, match="no image"):
+        sn.ratioMap(values, np.zeros_like(mask))
+    with pytest.raises(ValueError, match="mean"):
+        sn.ratioMap(np.zeros_like(values), mask)

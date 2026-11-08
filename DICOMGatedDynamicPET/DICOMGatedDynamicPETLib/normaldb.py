@@ -122,7 +122,21 @@ DEFAULT_REGION_ATLAS = "lateral"
 MASTER = "master"
 MASTER_TITLE = "Master (all subjects)"
 IMAGE_EXTENSIONS = (".nii.gz", ".nii", ".nrrd", ".nhdr", ".mha", ".mhd")
-SUBJECT_COLUMNS = ("id", "age", "scanDate", "added", "suvFile", "suvrFile")
+SUBJECT_COLUMNS = ("id", "age", "sex", "scanDate", "added", "suvFile", "suvrFile", "referenceMean", "reference",
+                   "normalization", "source")
+
+# Normalization of the subjects to the MNI space, stored categorically (the Neuro workflows offer it as the default and
+# warn when a patient is normalized otherwise; "" / None: not specified, anything goes)
+NORM_PET, NORM_ANATOMY, NORM_PET_TEMPLATE = "pet", "anatomy", "petTemplate"      # the Neuro modules' method keys
+NORM_METHODS = (("", "Not specified"), (NORM_PET, "PET/SPECT to MR template"),
+                (NORM_ANATOMY, "CT/MR to MR template, same transform to the PET/SPECT"),
+                (NORM_PET_TEMPLATE, "PET/SPECT to PET template (the database's mean)"))
+NORM_TEMPLATES = (("", "Not specified"), ("T1", "T1"), ("GM", "Grey matter probability"),
+                  ("pseudoPET", "Synthetic PET (GM + 0.3 WM)"), ("T2", "T2"), ("PD", "PD"))
+NORM_ENGINES = (("", "Not specified"), ("brainsfit", "BRAINSFit"), ("iterative", "Iterative multi-resolution"))
+NORM_LINEAR = (("", "Not specified"), ("Rigid", "Rigid"), ("ScaleSkewVersor3D", "Rigid + scale + skew"),
+               ("Affine", "Affine"))
+NORM_KEYS = ("method", "template", "engine", "linear", "deformable", "brainMask")
 
 
 # ---------------------------------------------------------------------------
@@ -236,6 +250,70 @@ def ageSummary(ages):
 
 
 # ---------------------------------------------------------------------------
+# Normalization settings
+# ---------------------------------------------------------------------------
+def emptyNormalization():
+    return {"method": "", "template": "", "engine": "", "linear": "", "deformable": None, "brainMask": None}
+
+
+def isSpecified(normalization):
+    return any(v not in ("", None) for v in (normalization or {}).values())
+
+
+def _yesNo(value, yes, no):
+    return yes if value else no
+
+
+def normalizationText(normalization):
+    """One line of the specified normalization settings ('Not specified' when none)."""
+    n = dict(emptyNormalization(), **(normalization or {}))
+    parts = []
+    if n["method"]:
+        method = dict(NORM_METHODS).get(n["method"], n["method"])
+        if n["method"] == NORM_PET and n["template"]:
+            method += f" ({dict(NORM_TEMPLATES).get(n['template'], n['template'])})"
+        parts.append(method)
+    elif n["template"]:
+        parts.append(f"template {dict(NORM_TEMPLATES).get(n['template'], n['template'])}")
+    if n["engine"]:
+        parts.append(dict(NORM_ENGINES).get(n["engine"], n["engine"]))
+    if n["linear"]:
+        parts.append(dict(NORM_LINEAR).get(n["linear"], n["linear"]))
+    if n["deformable"] is not None:
+        parts.append(_yesNo(n["deformable"], "then deformable", "no deformable"))
+    if n["brainMask"] is not None:
+        parts.append(_yesNo(n["brainMask"], "skull-stripped template", "whole template"))
+    return ", ".join(parts) if parts else "Not specified"
+
+
+def normalizationDifferences(expected, used):
+    """How used (the settings a patient was normalized with) differs from expected (a database's): ["engine
+    BRAINSFit (database: Iterative multi-resolution)", ...], only for the settings the database specifies. The
+    template counts only for the PET/SPECT to MR template method."""
+    expected = dict(emptyNormalization(), **(expected or {}))
+    used = dict(emptyNormalization(), **(used or {}))
+    titles = {"method": dict(NORM_METHODS), "template": dict(NORM_TEMPLATES), "engine": dict(NORM_ENGINES),
+              "linear": dict(NORM_LINEAR)}
+    out = []
+    for key in NORM_KEYS:
+        want, got = expected[key], used[key]
+        if want in ("", None):
+            continue
+        if key == "template" and (expected["method"] or used["method"]) not in ("", NORM_PET):
+            continue
+        if want != got:
+            if key in titles:
+                text = (f"{key} {titles[key].get(got, got) if got not in ('', None) else 'not known'} (database: "
+                        f"{titles[key].get(want, want)})")
+            else:
+                text = (f"{'deformable stage' if key == 'deformable' else 'skull-stripped template'} "
+                        f"{'not known' if got is None else _yesNo(got, 'on', 'off')} (database: "
+                        f"{_yesNo(want, 'on', 'off')})")
+            out.append(text)
+    return out
+
+
+# ---------------------------------------------------------------------------
 # Header
 # ---------------------------------------------------------------------------
 def newHeader(name, mode=STATIC, kind=USER_DEFINED, **fields):
@@ -263,6 +341,7 @@ def newHeader(name, mode=STATIC, kind=USER_DEFINED, **fields):
         "regionAtlas": DEFAULT_REGION_ATLAS,
         "regionGrowMm": 0.0,
         "growIntoWhiteMatter": False,
+        "normalization": emptyNormalization(),
         "ageStratified": False,
         "ageGroups": [],
         "scanner": "",
@@ -311,6 +390,8 @@ def validateHeader(header):
         errors.append("The region growth cannot be negative")
     if header.get("regionAtlas") not in dict(REGION_ATLASES):
         errors.append("Unknown region atlas")
+    if (header.get("normalization") or {}).get("method", "") not in dict(NORM_METHODS):
+        errors.append("Unknown normalization method")
     if header.get("ageStratified"):
         errors.extend(validateAgeGroups(header.get("ageGroups")))
     return errors
@@ -328,6 +409,7 @@ def readHeader(folder):
     defaults = newHeader(header.get("name", ""), header.get("mode", STATIC), header.get("kind", USER_DEFINED))
     for key, value in defaults.items():
         header.setdefault(key, value)
+    header["normalization"] = dict(emptyNormalization(), **(header.get("normalization") or {}))
     return header
 
 
@@ -366,6 +448,48 @@ def writeSubjects(folder, subjects):
         writer.writerow({k: "" if subject.get(k) is None else subject.get(k) for k in SUBJECT_COLUMNS})
     with open(os.path.join(folder, SUBJECTS_CSV), "w", encoding="utf-8", newline="") as f:
         f.write(out.getvalue())
+
+
+def subjectFileNames(subjectId, extension=".nii.gz"):
+    """(SUV file, SUVR file) of a subject, relative to the database folder."""
+    name = safeName(subjectId) or "subject"
+    return f"{SUBJECTS_DIR}/{name}_SUV{extension}", f"{SUBJECTS_DIR}/{name}_SUVR{extension}"
+
+
+def hasSubject(folder, subjectId):
+    wanted = str(subjectId).strip().lower()
+    return any(str(s.get("id", "")).strip().lower() == wanted for s in readSubjects(folder))
+
+
+def addSubject(folder, subject, normalization=None, replace=False):
+    """Add a subject row (SUBJECT_COLUMNS; its files already written into subjects/) to a user defined database:
+    the statistics become out of date, and a database whose normalization is not specified takes the subject's.
+    A subject ID already there: ValueError unless replace. Returns the header written."""
+    header = readHeader(folder)
+    if header.get("kind") != USER_DEFINED:
+        raise ValueError("Subjects can be added to user defined databases only.")
+    subjectId = str(subject.get("id", "")).strip()
+    if not subjectId:
+        raise ValueError("The subject needs an ID.")
+    subjects = readSubjects(folder)
+    same = [i for i, s in enumerate(subjects) if str(s.get("id", "")).strip().lower() == subjectId.lower()]
+    if same and not replace:
+        raise ValueError(f"Subject '{subjectId}' is already in the database.")
+    row = dict(subject, id=subjectId)
+    row.setdefault("added", now())
+    if same:
+        subjects[same[0]] = row
+    else:
+        subjects.append(row)
+    os.makedirs(os.path.join(folder, SUBJECTS_DIR), exist_ok=True)
+    writeSubjects(folder, subjects)
+    stats = header.setdefault("statistics", {"computed": None, "stale": False, "groups": {}})
+    if stats.get("computed"):
+        stats["stale"] = True
+    if normalization and not isSpecified(header.get("normalization")):
+        header["normalization"] = dict(emptyNormalization(), **normalization)
+    writeHeader(folder, header)
+    return header
 
 
 def subjectCount(folder, header):
