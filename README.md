@@ -673,8 +673,8 @@ steps, on the toolbar like the Dynamic Neuro Receptor PET:
      normals cold, above them hot, 0 in the middle) over a window symmetric about 0 (default +/- 5); *Below the
      normals only* greys the positive side. **Scores where normal uptake >** (default 50 % of the normal mean's
      maximum): the score slices show only where the normals' uptake is high (cortex, deep grey matter); white matter
-     and CSF are black. **Show the region outlines** (1 px, on the PET and the score slices; the name of the
-     region under the mouse is shown on its left). **Show the color
+     and CSF are black. **Show the region outlines** (1 px, on the PET and the score slices). The name of the
+     region under the mouse is shown on its left, also with the outlines hidden. **Show the color
      legends**: one on the left of each row.
    - **Region table**: the region color, SUVmean, the value of the database's map type (SUVR / ratio), the normals'
      mean, SD and n, and the score; as wide as its content. Click a column header to sort (by name or by value);
