@@ -40,9 +40,9 @@ def test_project_max_and_extreme():
 
 def test_scores():
     z = ssp.scores([3.0, 5.0], [5.0, 5.0], [1.0, 1.0], kind=nr.SCORE_Z)
-    assert z.tolist() == pytest.approx([2.0, 0.0])
+    assert z.tolist() == pytest.approx([-2.0, 0.0])
     t = ssp.scores([3.0], [5.0], [1.0], n=4, kind=nr.SCORE_T)
-    assert t[0] == pytest.approx(2.0 / np.sqrt(1.25))
+    assert t[0] == pytest.approx(-2.0 / np.sqrt(1.25))
 
 
 def test_write_read_and_signature(tmp_path):
@@ -65,9 +65,4 @@ def test_write_read_and_signature(tmp_path):
 
 def test_surface_colors():
     red = np.tile([[1.0, 0.0, 0.0]], (256, 1))
-    blue = np.tile([[0.0, 0.0, 1.0]], (256, 1))
-    rgba = ssp.scoreSurfaceColors(red, blue, 2.0, 6.0, count=13)
-    assert rgba[:, 3].min() == 1.0
-    assert rgba[6, :3].tolist() == pytest.approx(list(ssp.SURFACE_GREY))
-    assert rgba[12, :3].tolist() == [1, 0, 0]
     assert ssp.surfaceColors(red, 0, 1, 4).shape == (4, 4)

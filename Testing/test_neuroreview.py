@@ -29,13 +29,13 @@ def test_voxel_scores_sign_and_t():
     patient = np.array([6.0, 10.0, 14.0, 6.0], np.float32)
     mask = np.array([1, 1, 1, 0], bool)
     z = nr.scoreMap(patient, mean, sd, mask, nr.SCORE_Z)
-    assert z.tolist() == pytest.approx([2.0, 0.0, -2.0, 0.0])        # below the mean: positive
+    assert z.tolist() == pytest.approx([-2.0, 0.0, 2.0, 0.0])        # below the mean: negative
     t = nr.scoreMap(patient, mean, sd, mask, nr.SCORE_T, n=4)
-    assert t[0] == pytest.approx(2.0 / math.sqrt(1.25))
+    assert t[0] == pytest.approx(-2.0 / math.sqrt(1.25))
     with pytest.raises(ValueError):
         nr.scoreMap(patient[:3], mean, sd, mask)
-    assert nr.regionScore(6, 10, 2, kind=nr.SCORE_Z) == pytest.approx(2.0)
-    assert nr.regionScore(6, 10, 2, 4, nr.SCORE_T) == pytest.approx(2.0 / math.sqrt(1.25))
+    assert nr.regionScore(6, 10, 2, kind=nr.SCORE_Z) == pytest.approx(-2.0)
+    assert nr.regionScore(6, 10, 2, 4, nr.SCORE_T) == pytest.approx(-2.0 / math.sqrt(1.25))
     assert nr.regionScore(6, 10, 0) is None and nr.regionScore(None, 10, 1) is None
 
 
@@ -70,7 +70,7 @@ def test_regions():
     assert nr.masksSignature(masks) == nr.masksSignature(dict(reversed(list(masks.items()))))
     assert nr.masksSignature(masks) != nr.masksSignature(masks, extra=(2,))
     rows = nr.tableRows({"A": 6.0, "X": 1.0}, {"A": 7.0}, {"A": [10.0, 2.0, 4]}, nr.SCORE_Z)
-    assert rows[0] == ("A", 7.0, 6.0, 10.0, 2.0, 4, pytest.approx(2.0))
+    assert rows[0] == ("A", 7.0, 6.0, 10.0, 2.0, 4, pytest.approx(-2.0))
     assert rows[1][-1] is None
     assert nr.isDroppedSegment("Optic Chiasm") and not nr.isDroppedSegment("Putamen R")
 
@@ -86,12 +86,15 @@ def test_json_roundtrip(tmp_path):
 
 
 def test_score_colors():
-    red = np.tile([[1.0, 0.0, 0.0]], (256, 1))
-    blue = np.tile([[0.0, 0.0, 1.0]], (256, 1))
-    rgba = nr.scoreColors(red, blue, 2.0, 6.0, hypoOnly=False, count=13)   # values -6..6 by 1
-    assert rgba[:, 3].tolist() == [1, 1, 1, 1, 1, 0, 0, 0, 1, 1, 1, 1, 1]
-    assert rgba[12, :3].tolist() == [1, 0, 0] and rgba[0, :3].tolist() == [0, 0, 1]
-    assert nr.scoreColors(red, blue, 2.0, 6.0, hypoOnly=True, count=13)[0, 3] == 0
+    ramp = np.linspace(0, 1, 256)[:, None] * np.ones((1, 3))
+    rgba = nr.divergingColors(ramp, count=5)               # window -m, -m/2, 0, m/2, m
+    assert rgba[:, 3].tolist() == [1, 1, 1, 1, 1]
+    assert rgba[0, :3].tolist() == [0, 0, 0] and rgba[4, :3].tolist() == [1, 1, 1]
+    hypo = nr.divergingColors(ramp, hypoOnly=True, count=5)
+    assert hypo[3, :3].tolist() == list(nr.GREY) and hypo[4, :3].tolist() == list(nr.GREY)
+    assert hypo[2, :3].tolist() == pytest.approx([0.5, 0.5, 0.5], abs=0.01)    # 0 keeps its colour
+    masked = nr.maskedScores(np.array([2.0, -4.0]), np.array([True, False]), 2.0)
+    assert masked.tolist() == [1.0, nr.OUTSIDE]
 
 
 def test_layout_xml():

@@ -71,8 +71,7 @@ REGISTERED_SUFFIX = " registered"
 ICON_PATH = os.path.join(_MODULE_DIR, "Resources", "Icons", "StaticNeuroPET.png")
 WARNING_STYLE = "<span style='color:#c0392b'>{}</span>"
 REVIEW_PET_COLORMAP = "PET-DICOM"
-REVIEW_SCORE_COLORMAP = "PET-HotIron"   # scores below the normals (hypometabolism)
-SCORE_HYPER_COLORMAP = "Jotun"          # scores above the normals (blue)
+REVIEW_SCORE_COLORMAP = nr.SCORE_COLORMAPS[0]     # diverging: below the normals cold, above hot
 SCORE_COLOR_NODE = "Neuro review score colors"
 REVIEW_FUSION_OPACITY = 0.6
 SSP_TARGET_POINTS = 60000               # vertices of the 3D-SSP surface
@@ -494,7 +493,7 @@ class StaticNeuroPETLogic(DynamicNeuroPETLogic):
     def reviewData(self, volume, segmentation, folder=None, header=None, groupKey=normaldb.MASTER, atlas=None,
                    referenceSegmentId=None, locked=True, progress=None):
         """The patient (a normalized volume and its regions) compared with a normal database:
-        {"grid": the grid node (the group's mean map; without a database the volume), "z": voxel z map (positive
+        {"grid": the grid node (the group's mean map; without a database the volume), "z": voxel z map (negative
         below the mean; t = z / tFactor(n)) or None, "n", "names", "suv" {region: SUV mean}, "values" {region:
         value of the database's map type}, "reference" {region: [mean, SD, n]}, "source", "ratio" (map type SUVR /
         Ratio), "referenceMean", "fwhm", "notes"}. None when stopped."""
@@ -568,6 +567,7 @@ class StaticNeuroPETLogic(DynamicNeuroPETLogic):
         smoothed = normaldb.smoothMap(values, fwhm, spacing)
         result.update(smoothed=smoothed, union=nr.unionMask(masks, mean.shape))
         result["z"] = nr.scoreMap(smoothed, mean, sd, mask, nr.SCORE_Z)
+        result["mask"] = mask
         # regional normal values
         reference = self.regionReference(folder, header, masks, groupKey, locked, progress)
         if reference is None:
@@ -1834,8 +1834,8 @@ class StaticNeuroPETWidget(DynamicNeuroPETWidget):
         self.scoreCombo = qt.QComboBox()
         for key, title in nr.SCORES:
             self.scoreCombo.addItem(title, key)
-        self.scoreCombo.toolTip = ("z = (normal mean - patient) / SD; Crawford-Howell t = z / sqrt(1 + 1/n), for a "
-                                   "small number of normals n. Positive: the patient below the normals "
+        self.scoreCombo.toolTip = ("z = (patient - normal mean) / SD; Crawford-Howell t = z / sqrt(1 + 1/n), for a "
+                                   "small number of normals n. Negative: the patient below the normals "
                                    "(hypometabolism / hypoperfusion). Shown in the score row and the region table.")
         form.addRow("Score:", self.scoreCombo)
         self.compareButton = _button("Compare with the database")
@@ -1850,34 +1850,30 @@ class StaticNeuroPETWidget(DynamicNeuroPETWidget):
         view = qt.QFormLayout(viewBox)
         self.petColorCombo = qt.QComboBox()
         self.scoreColorCombo = qt.QComboBox()
-        for combo, default in ((self.petColorCombo, REVIEW_PET_COLORMAP), (self.scoreColorCombo, REVIEW_SCORE_COLORMAP)):
-            for label in colormaps.LABELS:
-                combo.addItem(label)
-            combo.setCurrentIndex(max(0, combo.findText(default)))
+        for label in colormaps.LABELS:
+            self.petColorCombo.addItem(label)
+        self.petColorCombo.setCurrentIndex(max(0, self.petColorCombo.findText(REVIEW_PET_COLORMAP)))
+        for label in nr.SCORE_COLORMAPS:
+            self.scoreColorCombo.addItem(label)
         view.addRow("PET colors:", self.petColorCombo)
         self.petWindowRange = ctk.ctkRangeWidget()
         self.petWindowRange.decimals = 2
         self.petWindowRange.toolTip = "Display range of the normalized PET / SPECT (top row)"
         view.addRow("PET window:", self.petWindowRange)
-        self.scoreColorCombo.toolTip = ("Colors of the scores above the threshold (below the normals); scores below "
-                                        "minus the threshold (above the normals) are blue")
+        self.scoreColorCombo.toolTip = ("Diverging colors over the score window, 0 in the middle: below the normals "
+                                        "(negative) cold, above them hot. Outside the brain mask black.")
         view.addRow("Score colors:", self.scoreColorCombo)
-        self.scoreThresholdSpin = qt.QDoubleSpinBox()
-        self.scoreThresholdSpin.setRange(0.0, 20.0)
-        self.scoreThresholdSpin.decimals = 1
-        self.scoreThresholdSpin.singleStep = 0.5
-        self.scoreThresholdSpin.value = nr.DEFAULT_THRESHOLD
-        self.scoreThresholdSpin.toolTip = "Scores between minus and plus this value are not shown"
-        view.addRow("Score threshold:", self.scoreThresholdSpin)
         self.scoreMaximumSpin = qt.QDoubleSpinBox()
         self.scoreMaximumSpin.setRange(0.5, 50.0)
         self.scoreMaximumSpin.decimals = 1
         self.scoreMaximumSpin.singleStep = 0.5
         self.scoreMaximumSpin.value = nr.DEFAULT_MAXIMUM
-        self.scoreMaximumSpin.toolTip = "Score at the top of the colors"
-        view.addRow("Score maximum:", self.scoreMaximumSpin)
-        self.hypoOnlyCheck = qt.QCheckBox("Below the normals only (hypometabolism)")
-        self.hypoOnlyCheck.toolTip = "Hide the scores above the normals (negative)"
+        self.scoreMaximumSpin.prefix = "\u00b1 "
+        self.scoreMaximumSpin.toolTip = "Score window, symmetric about 0: from minus to plus this value"
+        view.addRow("Score window:", self.scoreMaximumSpin)
+        self.hypoOnlyCheck = qt.QCheckBox("Below the normals only (above them grey)")
+        self.hypoOnlyCheck.toolTip = ("Show only the scores below the normals (negative: hypometabolism / "
+                                      "hypoperfusion); the positive ones grey (score slices and 3D-SSP)")
         view.addRow(self.hypoOnlyCheck)
         layout.addWidget(viewBox)
         self._buildSspBox(layout)
@@ -1909,8 +1905,7 @@ class StaticNeuroPETWidget(DynamicNeuroPETWidget):
         self.petWindowRange.connect("valuesChanged(double,double)", lambda a, b: self._applyPetDisplay())
         for widget in (self.scoreColorCombo,):
             widget.connect("currentIndexChanged(int)", lambda i: self._applyScoreDisplay())
-        for widget in (self.scoreThresholdSpin, self.scoreMaximumSpin):
-            widget.connect("valueChanged(double)", lambda v: self._applyScoreDisplay())
+        self.scoreMaximumSpin.connect("valueChanged(double)", lambda v: self._applyScoreDisplay())
         self.hypoOnlyCheck.connect("toggled(bool)", lambda on: self._applyScoreDisplay())
         self.fusionCheck.connect("toggled(bool)", lambda on: self._onFusionChanged())
         self.fusionSourceCombo.connect("currentIndexChanged(int)", lambda i: self._onFusionChanged())
@@ -2099,7 +2094,7 @@ class StaticNeuroPETWidget(DynamicNeuroPETWidget):
         kind = self._scoreKind()
         if self.scoreNode is not None and result.get("z") is not None:
             factor = nr.tFactor(result.get("n")) if kind == nr.SCORE_T else 1.0
-            slicer.util.updateVolumeFromArray(self.scoreNode, (result["z"] / np.float32(factor)).astype(np.float32))
+            slicer.util.updateVolumeFromArray(self.scoreNode, nr.maskedScores(result["z"], result["mask"], factor))
             self.scoreNode.SetName(f"{result['volume'].GetName()} {kind} map")
             self._applyScoreDisplay()
         self._updateReviewTable(kind)
@@ -2154,11 +2149,11 @@ class StaticNeuroPETWidget(DynamicNeuroPETWidget):
     # display
     @staticmethod
     def _rgbOf(label):
-        """256 x 3 RGB (0..1) of a color map of colormaps.LABELS."""
+        """256 x 3 RGB (0..1) of a color map of colormaps.LABELS or a Slicer color table (by name)."""
         colors = colortables.table(label)
         if colors is not None:
             return colors
-        node = colormaps.colorNodeForLabel(label)
+        node = colormaps.colorNodeForLabel(label) if label in colormaps.LABELS else colormaps._builtInNode(label)
         lookup = node.GetScalarsToColors() if node is not None else None
         if lookup is None:
             return np.tile(np.linspace(0, 1, 256)[:, None], (1, 3))
@@ -2176,8 +2171,7 @@ class StaticNeuroPETWidget(DynamicNeuroPETWidget):
             node.SetNumberOfColors(256)
             node.SetHideFromEditors(False)
             scene.AddNode(node)
-        rgba = nr.scoreColors(self._rgbOf(self.scoreColorCombo.currentText), self._rgbOf(SCORE_HYPER_COLORMAP),
-                              self.scoreThresholdSpin.value, self.scoreMaximumSpin.value, self.hypoOnlyCheck.checked)
+        rgba = nr.divergingColors(self._rgbOf(self.scoreColorCombo.currentText), self.hypoOnlyCheck.checked)
         for i, (r, g, b, a) in enumerate(rgba):
             node.SetColor(i, f"{i}", float(r), float(g), float(b), float(a))
         return node
@@ -2193,6 +2187,9 @@ class StaticNeuroPETWidget(DynamicNeuroPETWidget):
         display.SetAndObserveColorNodeID(self._scoreColorNode().GetID())
         display.SetAutoWindowLevel(False)
         display.SetWindowLevelMinMax(-maximum, maximum)
+        display.SetApplyThreshold(True)         # outside the brain mask (OUTSIDE) transparent: black
+        display.SetLowerThreshold(nr.OUTSIDE / 2.0)
+        display.SetUpperThreshold(-nr.OUTSIDE)
 
     def _initPetWindow(self):
         volume = self.volume()
@@ -2272,25 +2269,20 @@ class StaticNeuroPETWidget(DynamicNeuroPETWidget):
         form.addRow("Score from:", self.sspSourceCombo)
         self.sspColorCombo = qt.QComboBox()
         self.sspPatientColorCombo = qt.QComboBox()
-        for combo, default in ((self.sspColorCombo, REVIEW_SCORE_COLORMAP),
-                               (self.sspPatientColorCombo, REVIEW_PET_COLORMAP)):
-            for label in colormaps.LABELS:
-                combo.addItem(label)
-            combo.setCurrentIndex(max(0, combo.findText(default)))
+        for label in nr.SCORE_COLORMAPS:
+            self.sspColorCombo.addItem(label)
+        for label in colormaps.LABELS:
+            self.sspPatientColorCombo.addItem(label)
+        self.sspPatientColorCombo.setCurrentIndex(max(0, self.sspPatientColorCombo.findText(REVIEW_PET_COLORMAP)))
         form.addRow("Score colors:", self.sspColorCombo)
-        self.sspThresholdSpin = qt.QDoubleSpinBox()
-        self.sspThresholdSpin.setRange(0.0, 20.0)
-        self.sspThresholdSpin.decimals = 1
-        self.sspThresholdSpin.singleStep = 0.5
-        self.sspThresholdSpin.value = nr.DEFAULT_THRESHOLD
-        self.sspThresholdSpin.toolTip = "Scores between minus and plus this value stay grey"
-        form.addRow("Score threshold:", self.sspThresholdSpin)
         self.sspMaximumSpin = qt.QDoubleSpinBox()
         self.sspMaximumSpin.setRange(0.5, 50.0)
         self.sspMaximumSpin.decimals = 1
         self.sspMaximumSpin.singleStep = 0.5
         self.sspMaximumSpin.value = nr.DEFAULT_MAXIMUM
-        form.addRow("Score maximum:", self.sspMaximumSpin)
+        self.sspMaximumSpin.prefix = "\u00b1 "
+        self.sspMaximumSpin.toolTip = "Score window of the surface, symmetric about 0"
+        form.addRow("Score window:", self.sspMaximumSpin)
         form.addRow("Patient colors:", self.sspPatientColorCombo)
         self.sspWindowRange = ctk.ctkRangeWidget()
         self.sspWindowRange.decimals = 2
@@ -2299,8 +2291,7 @@ class StaticNeuroPETWidget(DynamicNeuroPETWidget):
         layout.addWidget(box)
         for combo in (self.sspMapCombo, self.sspSourceCombo, self.sspColorCombo, self.sspPatientColorCombo):
             combo.connect("currentIndexChanged(int)", lambda i: self._showSsp())
-        for spin in (self.sspThresholdSpin, self.sspMaximumSpin):
-            spin.connect("valueChanged(double)", lambda v: self._showSsp())
+        self.sspMaximumSpin.connect("valueChanged(double)", lambda v: self._showSsp())
         self.sspWindowRange.connect("valuesChanged(double,double)", lambda a, b: self._showSsp())
         self.hypoOnlyCheck.connect("toggled(bool)", lambda on: self._showSsp())
 
@@ -2333,9 +2324,7 @@ class StaticNeuroPETWidget(DynamicNeuroPETWidget):
                 score, what = np.asarray(data["voxel"], np.float32) / np.float32(factor), f"{kind} (voxel map)"
         if score is not None:
             maximum = float(self.sspMaximumSpin.value)
-            colors = ssp.scoreSurfaceColors(self._rgbOf(self.sspColorCombo.currentText),
-                                            self._rgbOf(SCORE_HYPER_COLORMAP), self.sspThresholdSpin.value, maximum,
-                                            self.hypoOnlyCheck.checked)
+            colors = nr.divergingColors(self._rgbOf(self.sspColorCombo.currentText), self.hypoOnlyCheck.checked)
             return score, colors, (-maximum, maximum), what
         low, high = self.sspWindowRange.minimumValue, self.sspWindowRange.maximumValue
         colors = ssp.surfaceColors(self._rgbOf(self.sspPatientColorCombo.currentText), low, high)
@@ -2406,6 +2395,7 @@ class StaticNeuroPETWidget(DynamicNeuroPETWidget):
         self._showSsp()
         center = np.asarray(data["surface"]["points"]).mean(axis=0) if data else np.zeros(3)
         for key, (widget, viewNode) in views.items():
+            widget.threeDController().setVisible(False)
             viewNode.SetBoxVisible(False)
             viewNode.SetAxisLabelsVisible(False)
             viewNode.SetBackgroundColor(0.0, 0.0, 0.0)
@@ -2478,7 +2468,6 @@ class StaticNeuroPETWidget(DynamicNeuroPETWidget):
         petViews = []
         for row, widget in self._reviewSliceWidgets():
             composite = widget.mrmlSliceCompositeNode()
-            linked = composite.GetLinkedControl()
             composite.SetLinkedControl(False)
             top = pet if row == nr.PET_ROW else score
             if anatomy is not None:
@@ -2490,7 +2479,8 @@ class StaticNeuroPETWidget(DynamicNeuroPETWidget):
             composite.SetForegroundVolumeID(foreground.GetID() if foreground is not None else None)
             composite.SetForegroundOpacity(opacity)
             composite.SetLabelVolumeID(None)
-            composite.SetLinkedControl(linked)
+            composite.SetLinkedControl(True)        # all the review's slice views linked
+            widget.sliceController().setVisible(False)
             if row == nr.PET_ROW:
                 petViews.append(widget.mrmlSliceNode().GetID())
             if fit:
@@ -2800,17 +2790,17 @@ class StaticNeuroPETTest(ScriptedLoadableModuleTest):
         normaldb.writeHeader(folder, header)
         result = logic.reviewData(volume, segmentation, folder, normaldb.readHeader(folder))
         z = result["z"]
-        self.assertAlmostEqual(float(z[5, 5, 2]), 2.0, places=3)        # (5 - 3) / 1
+        self.assertAlmostEqual(float(z[5, 5, 2]), -2.0, places=3)       # (3 - 5) / 1
         self.assertAlmostEqual(float(z[5, 5, 7]), 0.0, places=3)
         self.assertAlmostEqual(result["reference"]["A"][0], 5.0, places=4)
         self.assertTrue(any("approximated" in note for note in result["notes"]))
         rows = nr.tableRows(result["values"], result["suv"], result["reference"], nr.SCORE_Z)
-        self.assertAlmostEqual(dict((r[0], r[-1]) for r in rows)["A"], 2.0, places=3)
+        self.assertAlmostEqual(dict((r[0], r[-1]) for r in rows)["A"], -2.0, places=3)
         # 3D-SSP: the surface of the regions, the voxel scores projected (no normals' projections: predefined)
         data = logic.reviewSsp(result, folder, normaldb.readHeader(folder))
         self.assertGreater(len(data["surface"]["points"]), 10)
         self.assertIsNone(data["mean"])
-        self.assertGreater(float(np.max(data["voxel"])), 1.5)
+        self.assertLess(float(np.min(data["voxel"])), -1.5)
         self.assertAlmostEqual(float(np.max(data["patient"])), 5.0, places=2)
         poly = logic.surfacePolyData(data["surface"], data["voxel"])
         self.assertEqual(poly.GetNumberOfPoints(), len(data["surface"]["points"]))

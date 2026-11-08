@@ -1,7 +1,7 @@
 """Static Neuro PET/SPECT Review: the patient compared with a normal database (numpy only, no Slicer).
 
-    voxel scores    z = (mean - patient) / SD and the Crawford-Howell t = (mean - patient) / (SD * sqrt(1 + 1/n))
-                    (df n - 1), both positive where the patient is below the normals (hypometabolism / hypoperfusion);
+    voxel scores    z = (patient - mean) / SD and the Crawford-Howell t = (patient - mean) / (SD * sqrt(1 + 1/n))
+                    (df n - 1), both negative where the patient is below the normals (hypometabolism / hypoperfusion);
                     computed in a mask (the brain mask and the database mean above a fraction of its maximum) with
                     an SD floor (a fraction of the median SD in the mask), so the edge of the brain and the
                     near-constant voxels do not blow up
@@ -10,7 +10,8 @@
                     maps for another segmentation (cached in the database's cache/ folder); for a predefined
                     database without them, an approximation from the mean / SD maps (the mean of the voxel SDs
                     over-estimates the SD of the regional mean, so that score is conservative)
-    display         the colours of the score map (hypo / hyper sides, threshold, transparent below it) and the
+    display         the colours of the score maps (a diverging colour map over a window symmetric about 0; the
+                    side above the normals grey when only the side below is wanted) and the
                     Review layout (4 x 4: PET, score map, 3D-SSP views and the region table)
 """
 
@@ -28,8 +29,10 @@ SCORES = ((SCORE_T, "t (Crawford-Howell)"), (SCORE_Z, "z"))
 DEFAULT_SCORE = SCORE_T
 MASK_FRACTION = 0.3             # voxels scored: the database mean above 30 % of its maximum (and in the brain mask)
 SD_FLOOR_FRACTION = 0.2         # SD floor: 20 % of the median SD in the mask
-DEFAULT_THRESHOLD = 2.0
-DEFAULT_MAXIMUM = 6.0
+DEFAULT_MAXIMUM = 5.0           # score window: -5 ... +5, 0 in the middle
+SCORE_COLORMAPS = ("ColdToHotRainbow", "DivergingBlueRed")     # Slicer's colour tables; the first is the default
+GREY = (0.62, 0.62, 0.62)       # the side above the normals with "below the normals only"
+OUTSIDE = -1.0e6                # score map voxels outside the scored mask (shown black: below the display threshold)
 REGIONS_FILE = normaldb.STATS_DIR + "/regions.json"
 CACHE_DIR = "cache"
 DROPPED_SEGMENT_WORDS = ("optic chiasm",)       # left out of the review (overlay, surface, table)
@@ -74,7 +77,7 @@ def tFactor(n):
 
 
 def scoreMap(patient, mean, sd, mask, kind=DEFAULT_SCORE, n=None, floorFraction=SD_FLOOR_FRACTION):
-    """Voxel z or t map (positive: the patient below the mean), 0 outside the mask."""
+    """Voxel z or t map (negative: the patient below the mean), 0 outside the mask."""
     patient = np.asarray(patient, dtype=np.float32)
     mean = np.asarray(mean, dtype=np.float32)
     if patient.shape != mean.shape or np.shape(sd) != mean.shape:
@@ -84,19 +87,19 @@ def scoreMap(patient, mean, sd, mask, kind=DEFAULT_SCORE, n=None, floorFraction=
     if kind == SCORE_T:
         denominator = denominator * np.float32(tFactor(n))
     out = np.zeros(mean.shape, dtype=np.float32)
-    out[mask] = (mean[mask] - patient[mask]) / denominator[mask]
+    out[mask] = (patient[mask] - mean[mask]) / denominator[mask]
     return out
 
 
 def regionScore(value, mean, sd, n=None, kind=DEFAULT_SCORE):
-    """z or t of one regional value (positive: below the mean); None when it cannot be computed."""
+    """z or t of one regional value (negative: below the mean); None when it cannot be computed."""
     try:
         value, mean, sd = float(value), float(mean), float(sd)
     except (TypeError, ValueError):
         return None
     if not (math.isfinite(value) and math.isfinite(mean) and math.isfinite(sd)) or sd <= 0:
         return None
-    return (mean - value) / (sd * (tFactor(n) if kind == SCORE_T else 1.0))
+    return (value - mean) / (sd * (tFactor(n) if kind == SCORE_T else 1.0))
 
 
 # ---------------------------------------------------------------------------
@@ -271,32 +274,24 @@ def tableRows(patientValues, patientSuv, reference, kind=DEFAULT_SCORE):
 # ---------------------------------------------------------------------------
 # Display
 # ---------------------------------------------------------------------------
-def scoreColors(hypoTable, hyperTable, threshold=DEFAULT_THRESHOLD, maximum=DEFAULT_MAXIMUM, hypoOnly=False,
-                count=256):
-    """count x 4 RGBA (0..1) of a score map shown with the window [-maximum, maximum]: below -threshold the hyper
-    table (reversed, so the strongest is the brightest), above +threshold the hypo table, transparent between (and
-    on the hyper side with hypoOnly). The tables are n x 3 RGB 0..1; their dark lower half is skipped so the
-    threshold is visible."""
-    maximum = max(float(maximum), 1e-3)
-    threshold = min(max(float(threshold), 0.0), maximum)
-    values = np.linspace(-maximum, maximum, count)
-    rgba = np.zeros((count, 4), dtype=float)
-
-    def ramp(table, strength):
-        table = np.asarray(table, dtype=float)
-        position = 0.35 + 0.65 * np.clip(strength, 0.0, 1.0)
-        index = np.clip(np.rint(position * (len(table) - 1)).astype(int), 0, len(table) - 1)
-        return table[index]
-
-    span = max(maximum - threshold, 1e-6)
-    hypo = values >= threshold
-    rgba[hypo, :3] = ramp(hypoTable, (values[hypo] - threshold) / span)
-    rgba[hypo, 3] = 1.0
-    if not hypoOnly:
-        hyper = values <= -threshold
-        rgba[hyper, :3] = ramp(hyperTable, (-values[hyper] - threshold) / span)
-        rgba[hyper, 3] = 1.0
+def divergingColors(table, hypoOnly=False, count=256, grey=GREY):
+    """count x 4 RGBA (0..1) of a score map shown over a window symmetric about 0 ([-maximum, maximum]): the colour
+    table (n x 3 RGB 0..1) across it, 0 in the middle; with hypoOnly the side above 0 (above the normals) grey."""
+    table = np.asarray(table, dtype=float)
+    index = np.clip(np.rint(np.linspace(0, len(table) - 1, count)).astype(int), 0, len(table) - 1)
+    rgba = np.ones((count, 4), dtype=float)
+    rgba[:, :3] = table[index]
+    if hypoOnly:
+        rgba[np.linspace(-1.0, 1.0, count) > 0, :3] = grey
     return rgba
+
+
+def maskedScores(scores, mask, factor=1.0):
+    """The score map divided by factor (t from z) with OUTSIDE where the mask is not (shown black)."""
+    out = np.full(np.shape(scores), OUTSIDE, dtype=np.float32)
+    mask = np.asarray(mask, dtype=bool)
+    out[mask] = np.asarray(scores, dtype=np.float32)[mask] / np.float32(factor)
+    return out
 
 
 # Layout: rows 1-2 slice views (PET with the region outlines; the score map), rows 3-4 the 3D-SSP views, the
