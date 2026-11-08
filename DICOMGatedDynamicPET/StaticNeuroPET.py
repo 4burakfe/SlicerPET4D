@@ -2464,6 +2464,34 @@ class StaticNeuroPETWidget(DynamicNeuroPETWidget):
         display.SetVisibility2DOutline(True)        # also with the outlines hidden
         display.EndModify(wasModifying)
         qt.QTimer.singleShot(REVIEW_FLASH_MS, lambda: self._endFlash(token))
+        self._jumpToRegion(segmentation, segmentId)
+
+    def _regionPoint(self, segmentation, segmentId):
+        """RAS of a point inside a region: the voxel of the compared regions nearest to its centroid, else the
+        segment's center."""
+        result = self.reviewResult or {}
+        name = segmentation.GetSegmentation().GetSegment(segmentId).GetName()
+        if result.get("labels") is not None and result.get("segmentation") is segmentation:
+            labels, names = result["labels"]
+            if name in names:
+                point = nr.insidePoint(labels, names.index(name) + 1)
+                if point is not None:
+                    ijk = np.array([point[2], point[1], point[0], 1.0])
+                    return (_ijkToRas(result["grid"]) @ ijk)[:3]
+        if hasattr(segmentation, "GetSegmentCenterRAS"):
+            return np.asarray(segmentation.GetSegmentCenterRAS(segmentId), dtype=float)
+        return None
+
+    def _jumpToRegion(self, segmentation, segmentId):
+        """The review's slice views moved through a point inside the region (zoom and pan kept)."""
+        try:
+            ras = self._regionPoint(segmentation, segmentId)
+            if ras is None:
+                return
+            for _, widget in self._reviewSliceWidgets():
+                widget.mrmlSliceNode().JumpSliceByOffsetting(*(float(v) for v in ras))
+        except Exception:
+            logging.debug("Static Neuro: could not move the slices to the region", exc_info=True)
 
     def _endFlash(self, token=None):
         flash = self._flash
