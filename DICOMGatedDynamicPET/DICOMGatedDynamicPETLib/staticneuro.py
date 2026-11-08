@@ -1,0 +1,434 @@
+"""Static Neuro PET/SPECT helpers without Slicer: what a static brain image is (PET / SPECT, units, nuclide,
+tracer, read from the tags the loaders put on the volume) and which normal databases fit it.
+
+Tags read (node attributes, {name: value}):
+    PET4D DICOM plugin (static PET)       StaticPET.Kind ("static"), StaticPET.Units ("Bq/ml", "SUVbw", ...),
+                                          StaticPET.Radiopharmaceutical, StaticPET.Radionuclide ("^18^Fluorine")
+    DICOM SPECT Recon module (SPECT)      SPECTRecon.Units ("counts", "Bq/ml", "SUVbw", "SUL"),
+                                          SPECTRecon.Isotope ("Tc-99m"), SPECTRecon.IsotopeDicomText (radionuclide
+                                          code meaning, else the radiopharmaceutical text)
+"""
+
+import os
+import re
+
+from DICOMGatedDynamicPETLib import normaldb
+
+STATIC_PREFIX = "StaticPET."
+SPECT_PREFIX = "SPECTRecon."
+
+UNITS_SUV, UNITS_BQML, UNITS_COUNTS, UNITS_UNKNOWN = "SUV", "Bq/ml", "counts", ""
+
+# nuclide: (element name, symbol, mass number) - PET and SPECT nuclides of brain imaging
+NUCLIDES = {
+    "F-18": ("fluorine", "f", "18"), "C-11": ("carbon", "c", "11"), "O-15": ("oxygen", "o", "15"),
+    "N-13": ("nitrogen", "n", "13"), "Ga-68": ("gallium", "ga", "68"), "Cu-64": ("copper", "cu", "64"),
+    "Zr-89": ("zirconium", "zr", "89"), "Tc-99m": ("technetium", "tc", "99"), "I-123": ("iodine", "i", "123"),
+    "I-131": ("iodine", "i", "131"), "In-111": ("indium", "in", "111"), "Tl-201": ("thallium", "tl", "201"),
+}
+
+# tracer name as in normaldb.NUCLIDE_TRACERS: words that name it in DICOM texts (lower case)
+TRACER_WORDS = (
+    ("FDG", ("fdg", "fluorodeoxyglucose", "fludeoxyglucose", "deoxyglucose")),
+    ("FDOPA", ("fdopa", "f-dopa", "fluorodopa", "dopa")),
+    ("Florbetapir", ("florbetapir", "amyvid", "av-45", "av45")),
+    ("Florbetaben", ("florbetaben", "neuraceq", "bay94-9172", "bay 94-9172")),
+    ("Flutemetamol", ("flutemetamol", "vizamyl")),
+    ("Flortaucipir", ("flortaucipir", "tauvid", "av-1451", "av1451", "t807")),
+    ("MK-6240", ("mk-6240", "mk6240", "florquinitau")),
+    ("PI-2620", ("pi-2620", "pi2620")),
+    ("Fallypride", ("fallypride",)),
+    ("FE-PE2I", ("pe2i",)),
+    ("FET", ("fet", "fluoroethyl")),
+    ("Flumazenil", ("flumazenil", "fmz")),
+    ("UCB-H", ("ucb-h", "ucbh")),
+    ("UCB-J", ("ucb-j", "ucbj")),
+    ("FMISO", ("fmiso", "misonidazole")),
+    ("PiB", ("pib", "pittsburgh")),
+    ("Raclopride", ("raclopride",)),
+    ("Methionine", ("methionine", "met")),
+    ("DASB", ("dasb",)),
+    ("PBR28", ("pbr28", "pbr-28")),
+    ("PK11195", ("pk11195", "pk-11195")),
+    ("Water", ("water", "h2o")),
+    ("Ammonia", ("ammonia", "nh3")),
+    ("HMPAO", ("hmpao", "exametazime", "ceretec")),
+    ("ECD", ("ecd", "bicisate", "neurolite")),
+    ("TRODAT-1", ("trodat",)),
+    ("Ioflupane (DaTscan)", ("ioflupane", "datscan", "fp-cit", "fpcit")),
+    ("IBZM", ("ibzm", "iodobenzamide")),
+    ("Iomazenil", ("iomazenil",)),
+    ("Thallium chloride", ("thallium chloride", "thallous")),
+)
+
+
+def identifyNuclide(text):
+    """Nuclide name ('F-18', 'Tc-99m', ...) from free text such as '^18^Fluorine', 'F18', '99mTc', 'Tc-99m' or
+    'Iodine-123'. None when not recognised."""
+    if not text:
+        return None
+    lowered = str(text).lower()
+    words = set(re.sub(r"[^a-z]", " ", lowered).split())
+    numbers = set(re.findall(r"\d+", lowered))
+    for name, (element, symbol, mass) in NUCLIDES.items():
+        if mass not in numbers:
+            continue
+        if element in lowered or symbol in words or (symbol + "m") in words or ("m" + symbol) in words:
+            return name
+    return None
+
+
+def identifyTracer(text):
+    """Tracer name of normaldb.NUCLIDE_TRACERS from a radiopharmaceutical text ('Fluorodeoxyglucose', 'FDG',
+    'Tc99m HMPAO', ...). None when not recognised."""
+    if not text:
+        return None
+    lowered = str(text).lower()
+    words = set(re.split(r"[^a-z0-9]+", lowered))
+    compact = re.sub(r"[^a-z0-9]", "", lowered)
+    for name, names in TRACER_WORDS:
+        for word in names:
+            joined = re.sub(r"[^a-z0-9]", "", word)
+            if " " in word:
+                if word in lowered:
+                    return name
+            elif joined in words or ("-" in word and word in lowered) or (len(joined) > 4 and joined in compact):
+                return name
+    return None
+
+
+def unitsKind(units):
+    """UNITS_SUV / UNITS_BQML / UNITS_COUNTS / UNITS_UNKNOWN of a units text."""
+    text = str(units or "").strip().lower()
+    if not text:
+        return UNITS_UNKNOWN
+    if text.startswith("suv") or text in ("sul", "g/ml"):
+        return UNITS_SUV
+    if text.replace(" ", "") in ("bq/ml", "bqml", "bqperml", "kbq/ml", "kbqml"):
+        return UNITS_BQML
+    if text in ("counts", "cnts", "count"):
+        return UNITS_COUNTS
+    return UNITS_UNKNOWN
+
+
+def imageInfo(attributes, dicomModality=""):
+    """What a static brain image is, from its node attributes ({name: value}) and the DICOM modality ('PT', 'NM',
+    ... when known): {"modality": "PET" / "SPECT" / "", "units": text, "unitsKind": UNITS_*, "nuclide": text,
+    "tracer": text, "source": text, "static": bool}."""
+    attributes = {k: v for k, v in (attributes or {}).items() if v not in (None, "")}
+    info = {"modality": "", "units": "", "unitsKind": UNITS_UNKNOWN, "nuclide": "", "tracer": "", "source": "",
+            "static": False}
+    if attributes.get(SPECT_PREFIX + "Units") is not None or any(k.startswith(SPECT_PREFIX) for k in attributes):
+        text = attributes.get(SPECT_PREFIX + "IsotopeDicomText", "")
+        info.update(modality=normaldb.SPECT, source="DICOM SPECT reconstruction", static=True,
+                    units=attributes.get(SPECT_PREFIX + "Units", UNITS_COUNTS),
+                    nuclide=identifyNuclide(attributes.get(SPECT_PREFIX + "Isotope")) or identifyNuclide(text) or "",
+                    tracer=identifyTracer(text) or "")
+    elif any(k.startswith(STATIC_PREFIX) for k in attributes):
+        radiopharmaceutical = attributes.get(STATIC_PREFIX + "Radiopharmaceutical", "")
+        info.update(modality=normaldb.PET, source="PET4D DICOM (static PET)",
+                    static=attributes.get(STATIC_PREFIX + "Kind", "static") == "static",
+                    units=attributes.get(STATIC_PREFIX + "Units", ""),
+                    nuclide=(identifyNuclide(attributes.get(STATIC_PREFIX + "Radionuclide"))
+                             or identifyNuclide(radiopharmaceutical) or ""),
+                    tracer=identifyTracer(radiopharmaceutical) or "")
+    else:
+        modality = str(dicomModality or "").strip().upper()
+        if modality == "PT":
+            info.update(modality=normaldb.PET, source="DICOM", static=True)
+        elif modality == "NM":
+            info.update(modality=normaldb.SPECT, source="DICOM", static=True)
+    info["unitsKind"] = unitsKind(info["units"])
+    if not info["nuclide"] and info["tracer"]:
+        info["nuclide"] = next((n for mod in normaldb.MODALITIES for n, names in normaldb.NUCLIDE_TRACERS[mod]
+                                if info["tracer"] in names), "")
+    return info
+
+
+def unitWarnings(info, header=None):
+    """Warnings (list of str) about the image's units: a PET is expected in SUV (Bq/ml is fine for ratio maps, the
+    scale cancels, not for SUV maps); a SPECT in counts, Bq/ml or SUV."""
+    warnings = []
+    kind, modality = info.get("unitsKind"), info.get("modality")
+    mapType = (header or {}).get("mapType")
+    if modality == normaldb.PET:
+        if kind == UNITS_BQML:
+            text = "The PET is in Bq/ml, not SUV."
+            if mapType == normaldb.MAP_SUV:
+                text += " The database holds SUV maps: load the PET as SUV to compare it."
+            else:
+                text += " Ratio (SUVR) comparisons are not affected (the scale cancels); SUV values are not shown."
+            warnings.append(text)
+        elif kind == UNITS_UNKNOWN:
+            warnings.append("The units of the PET are not known (SUV expected).")
+    elif modality == normaldb.SPECT:
+        if kind == UNITS_UNKNOWN:
+            warnings.append("The units of the SPECT are not known (counts, Bq/ml or SUV expected).")
+        if mapType == normaldb.MAP_COUNTS and kind != UNITS_COUNTS:
+            warnings.append("The database holds count maps but the SPECT is not in counts.")
+    elif not modality:
+        warnings.append("Not recognised as a PET or SPECT (no PET4D or DICOM SPECT tags): check the modality.")
+    return warnings
+
+
+def _same(a, b):
+    return str(a or "").strip().lower() == str(b or "").strip().lower()
+
+
+def databaseMatch(header, info):
+    """(rank, problems) of a normal database for the image: rank 0 when modality, nuclide and tracer fit (a tracer
+    that is not known on either side counts as fitting), higher the worse; problems lists the differences."""
+    problems = []
+    rank = 0
+    if info.get("modality") and not _same(header.get("modality", normaldb.PET), info["modality"]):
+        problems.append(f"modality {header.get('modality', normaldb.PET)} (image {info['modality']})")
+        rank += 4
+    nuclide = identifyNuclide(header.get("nuclide")) or header.get("nuclide", "")
+    if info.get("nuclide") and nuclide and not _same(nuclide, info["nuclide"]):
+        problems.append(f"nuclide {header.get('nuclide')} (image {info['nuclide']})")
+        rank += 2
+    tracer = header.get("tracer", "")
+    tracerKnown = tracer and not _same(tracer, header.get("nuclide"))
+    if info.get("tracer") and tracerKnown and not _same(identifyTracer(tracer) or tracer, info["tracer"]):
+        problems.append(f"tracer {tracer} (image {info['tracer']})")
+        rank += 1
+    return rank, problems
+
+
+def sortDatabases(databases, info):
+    """[(folder, header, rank, problems)] of [(folder, header)], the fitting ones first (then by name)."""
+    rows = [(folder, header) + databaseMatch(header, info) for folder, header in databases]
+    return sorted(rows, key=lambda row: (row[2], str(row[1].get("name", "")).lower()))
+
+
+def masterMeanPath(folder, header):
+    """Absolute path of a database's master mean map (the template of the PET to PET normalization), None when the
+    statistics are not there."""
+    master = ((header.get("statistics") or {}).get("groups") or {}).get(normaldb.MASTER) or {}
+    relative = master.get("mean")
+    if not relative:
+        return None
+    path = os.path.join(folder, relative)
+    return path if os.path.isfile(path) else None
+
+
+def referenceMaskPath(folder, header):
+    """Absolute path of a database's reference mask copy, None when it has none."""
+    relative = header.get("referenceMask")
+    if not relative:
+        return None
+    path = os.path.join(folder, relative)
+    return path if os.path.isfile(path) else None
+
+
+# the Neuro region atlas the reference region of a database is read from when it has no mask copy: the bilateral
+# CerebrA (one region of both sides); None: cannot be taken from one atlas region
+REFERENCE_ATLAS_REGION = {normaldb.REF_CEREBELLUM_GM: "Cerebellum Gray Matter", normaldb.REF_PONS: "Pons",
+                          normaldb.REF_BRAINSTEM: "Brainstem"}
+
+
+def regionSettings(folder, header):
+    """The region settings of a database, as the Regions/Template step applies them: {"regionAtlas", "growMm",
+    "growIntoWhiteMatter", "erodeReferenceMm", "referenceRegion", "referenceTitle", "referenceMaskPath",
+    "referenceAtlasRegion", "smoothingFwhmMm", "mapType"}."""
+    reference = header.get("referenceRegion") or ""
+    return {
+        "regionAtlas": header.get("regionAtlas") or normaldb.DEFAULT_REGION_ATLAS,
+        "growMm": float(header.get("regionGrowMm") or 0.0),
+        "growIntoWhiteMatter": bool(header.get("growIntoWhiteMatter")),
+        "erodeReferenceMm": float(header.get("referenceErosionMm") or 0.0),
+        "referenceRegion": reference,
+        "referenceTitle": normaldb.referenceTitle(reference),
+        "referenceMaskPath": referenceMaskPath(folder, header),
+        "referenceAtlasRegion": REFERENCE_ATLAS_REGION.get(reference),
+        "smoothingFwhmMm": float(header.get("smoothingFwhmMm") or 0.0),
+        "mapType": header.get("mapType", ""),
+    }
+
+
+def settingsText(settings):
+    """One line per setting of regionSettings(), for the page."""
+    grow = settings["growMm"]
+    lines = [f"Regions: {normaldb.regionAtlasTitle(settings['regionAtlas'])}",
+             "Grow regions: " + (f"{grow:g} mm" + (" (into the white matter too)" if settings["growIntoWhiteMatter"]
+                                                    else "") if grow > 0 else "off"),
+             f"Reference: {settings['referenceTitle'] or 'none'}"
+             + (" (the database's mask)" if settings["referenceMaskPath"] else "")
+             + (f", eroded {settings['erodeReferenceMm']:g} mm" if settings["erodeReferenceMm"] > 0 else ""),
+             "Smoothing: " + (f"{settings['smoothingFwhmMm']:g} mm FWHM" if settings["smoothingFwhmMm"] > 0
+                              else "off"),
+             f"Maps: {settings['mapType'] or '?'}"]
+    return lines
+
+
+# ---------------------------------------------------------------------------
+# Import from file (BIDS PET: sub-<id>_ses-<session>_pet.nii.gz with its .json sidecar)
+# ---------------------------------------------------------------------------
+IMAGE_EXTENSIONS = (".nii.gz", ".nii", ".nrrd", ".nhdr", ".mha", ".mhd")
+IMPORTED_ATTRIBUTE = STATIC_PREFIX + "ImportedFrom"
+
+
+def splitImageName(path):
+    """(stem, extension) of an image file name ('sub-1_pet', '.nii.gz')."""
+    name = os.path.basename(path)
+    for extension in IMAGE_EXTENSIONS:
+        if name.lower().endswith(extension):
+            return name[:-len(extension)], extension
+    stem, extension = os.path.splitext(name)
+    return stem, extension
+
+
+def parseBidsName(path):
+    """BIDS entities of a file name: {"sub": "00000016", "ses": "SUV", ..., "suffix": "pet"}; {} when the name is not
+    BIDS-like (no 'sub-')."""
+    stem = splitImageName(path)[0]
+    parts = stem.split("_")
+    entities = {}
+    for part in parts:
+        if "-" in part:
+            key, value = part.split("-", 1)
+            if key and value:
+                entities[key.lower()] = value
+        else:
+            entities["suffix"] = part.lower()
+    return entities if "sub" in entities else {}
+
+
+def sidecarPath(path):
+    """The .json next to an image (same stem), None when there is none."""
+    stem, _ = splitImageName(path)
+    candidate = os.path.join(os.path.dirname(path), stem + ".json")
+    return candidate if os.path.isfile(candidate) else None
+
+
+def findParticipants(path, levels=4):
+    """participants.tsv of the BIDS folder the image lies in (searched up to levels folders up), None when absent."""
+    folder = os.path.dirname(os.path.abspath(path))
+    for _ in range(levels + 1):
+        candidate = os.path.join(folder, "participants.tsv")
+        if os.path.isfile(candidate):
+            return candidate
+        parent = os.path.dirname(folder)
+        if parent == folder:
+            break
+        folder = parent
+    return None
+
+
+def readParticipant(tsvPath, subject):
+    """The participants.tsv row of a subject ('sub-<id>' or '<id>') as {column: value}, {} when not found."""
+    import csv
+    if not tsvPath or not subject:
+        return {}
+    wanted = {str(subject).lower(), ("sub-" + str(subject)).lower()}
+    with open(tsvPath, newline="", encoding="utf-8-sig") as f:
+        for row in csv.DictReader(f, delimiter="\t"):
+            if str(row.get("participant_id", "")).strip().lower() in wanted:
+                return {k: (v or "").strip() for k, v in row.items() if k}
+    return {}
+
+
+def _bidsUnits(entities, sidecar):
+    """Units of an imported image: SUV when the file name says so (a session, acquisition or reconstruction
+    'SUV...', as in the cnpet SUV set, whose sidecars still say Bq/mL), else the sidecar's Units."""
+    for key in ("ses", "acq", "rec", "desc"):
+        if str(entities.get(key, "")).lower().startswith("suv"):
+            return "SUVbw", "file name"
+    units = str(sidecar.get("Units", "") or "")
+    return ({"bq/ml": "Bq/ml", "kbq/ml": "kBq/ml"}.get(units.lower(), units), "sidecar") if units else ("", "")
+
+
+def importAttributes(path, sidecar=None, participant=None):
+    """Node attributes ({name: text}) of an image imported from a file, so it reads as a static PET (or a SPECT,
+    when the BIDS suffix is 'spect' / the sidecar says so): units, nuclide, tracer, timing, age and sex."""
+    entities = parseBidsName(path)
+    sidecar = sidecar or {}
+    participant = participant or {}
+    spect = entities.get("suffix") in ("spect", "nm") or str(sidecar.get("Modality", "")).upper() in ("NM", "SPECT")
+    units, unitsSource = _bidsUnits(entities, sidecar)
+    prefix = SPECT_PREFIX if spect else STATIC_PREFIX
+    out = {IMPORTED_ATTRIBUTE: os.path.abspath(path)}
+    if spect:
+        out[SPECT_PREFIX + "Units"] = units or UNITS_COUNTS
+        nuclide = identifyNuclide(sidecar.get("TracerRadionuclide"))
+        if nuclide:
+            out[SPECT_PREFIX + "Isotope"] = nuclide
+        if sidecar.get("TracerName"):
+            out[SPECT_PREFIX + "IsotopeDicomText"] = str(sidecar["TracerName"])
+    else:
+        out[STATIC_PREFIX + "Kind"] = "static"
+        if units:
+            out[STATIC_PREFIX + "Units"] = units
+        if sidecar.get("TracerName"):
+            out[STATIC_PREFIX + "Radiopharmaceutical"] = str(sidecar["TracerName"])
+        if sidecar.get("TracerRadionuclide"):
+            out[STATIC_PREFIX + "Radionuclide"] = str(sidecar["TracerRadionuclide"])
+    if unitsSource:
+        out[prefix + "UnitsSource"] = unitsSource
+    starts, durations = sidecar.get("FrameTimesStart") or [], sidecar.get("FrameDuration") or []
+    if isinstance(starts, list) and len(starts) == 1 and isinstance(durations, list) and len(durations) == 1:
+        out[prefix + "StartFromInjectionS"] = f"{float(starts[0]):g}"
+        out[prefix + "DurationS"] = f"{float(durations[0]):g}"
+    elif isinstance(starts, list) and len(starts) > 1:
+        out[prefix + "Frames"] = str(len(starts))
+    for key, attribute in (("Manufacturer", "Manufacturer"), ("ManufacturersModelName", "ScannerModel"),
+                           ("ReconMethodName", "ReconstructionMethod")):
+        if sidecar.get(key) not in (None, "", "n/a"):
+            out[prefix + attribute] = str(sidecar[key])
+    if entities.get("sub"):
+        out[prefix + "SubjectID"] = entities["sub"]
+    if entities.get("ses"):
+        out[prefix + "Session"] = entities["ses"]
+    age = participant.get("age") or participant.get("Age")
+    if age not in (None, "", "n/a"):
+        out[prefix + "PatientAge"] = age
+    sex = participant.get("sex") or participant.get("Sex") or participant.get("gender")
+    if sex not in (None, "", "n/a"):
+        out[prefix + "PatientSex"] = sex[:1].upper()
+    return out
+
+
+def importName(path):
+    """Node name of an imported image: the file name without its extension."""
+    return splitImageName(path)[0]
+
+
+# ---------------------------------------------------------------------------
+# Age and sex of the patient (read from the tags, editable on the Data page)
+# ---------------------------------------------------------------------------
+SEXES = (("", "Unknown"), ("F", "Female"), ("M", "Male"), ("O", "Other"))
+
+
+def parseAge(text):
+    """Age in years from a DICOM Patient's Age ('052Y', '006M', '003W', '010D') or a number; None when not given."""
+    text = str(text or "").strip().upper()
+    if not text or text == "N/A":
+        return None
+    match = re.fullmatch(r"(\d+(?:\.\d+)?)\s*([YMWD]?)", text)
+    if not match:
+        return None
+    value, unit = float(match.group(1)), match.group(2) or "Y"
+    return round(value / {"Y": 1.0, "M": 12.0, "W": 52.1775, "D": 365.25}[unit], 2)
+
+
+def parseSex(text):
+    """'F' / 'M' / 'O' / '' from a DICOM Patient's Sex or a word."""
+    text = str(text or "").strip().upper()
+    if text.startswith(("F", "K", "W")):        # female, kadın, woman
+        return "F"
+    if text.startswith(("M", "E")):             # male, erkek
+        return "M"
+    if text.startswith("O"):
+        return "O"
+    return ""
+
+
+def taggedAgeSex(attributes):
+    """(age in years or None, sex '' / 'F' / 'M' / 'O') from the loaders' tags of a volume."""
+    age = sex = None
+    for prefix in (STATIC_PREFIX, SPECT_PREFIX):
+        if age is None:
+            age = parseAge(attributes.get(prefix + "PatientAge"))
+        if not sex:
+            sex = parseSex(attributes.get(prefix + "PatientSex"))
+    return age, sex or ""

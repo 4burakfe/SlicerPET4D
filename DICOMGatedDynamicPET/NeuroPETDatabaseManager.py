@@ -339,6 +339,24 @@ class HeaderForm:
         self.erosionSpin.toolTip = ("Erode the reference mask made from the atlas (not a custom mask file), so "
                                     "spill-over from the neighbouring tissue does not reach it.")
         refForm.addRow("Erode reference:", self.erosionSpin)
+        self.regionAtlasCombo = qt.QComboBox()
+        for key, title in normaldb.REGION_ATLASES:
+            self.regionAtlasCombo.addItem(title, key)
+        self.regionAtlasCombo.toolTip = "Regions the patients are reported in (the Neuro workflows use the same)."
+        refForm.addRow("Region atlas:", self.regionAtlasCombo)
+        self.growSpin = qt.QDoubleSpinBox()
+        self.growSpin.setRange(0, 10)
+        self.growSpin.setDecimals(1)
+        self.growSpin.singleStep = 0.5
+        self.growSpin.suffix = " mm"
+        self.growSpin.specialValueText = "Off"
+        self.growSpin.toolTip = ("Grow the regions into the unlabelled voxels around them (each voxel to the nearest "
+                                 "region, inside the brain mask), for the PET / SPECT resolution.")
+        refForm.addRow("Grow regions:", self.growSpin)
+        self.growWhiteMatterCheck = qt.QCheckBox("Grow into the white matter too")
+        self.growWhiteMatterCheck.enabled = False
+        self.growSpin.connect("valueChanged(double)", lambda v: setattr(self.growWhiteMatterCheck, "enabled", v > 0))
+        refForm.addRow("", self.growWhiteMatterCheck)
         if predefined:
             self.mapTypeCombo = qt.QComboBox()
             self.mapTypeCombo.toolTip = ("What the mean / SD maps hold: PET SUVR (divided by the reference) or SUV, "
@@ -501,6 +519,9 @@ class HeaderForm:
             referenceRegion=self.referenceKey(),
             smoothingFwhmMm=float(self.smoothingSpin.value),
             referenceErosionMm=float(self.erosionSpin.value),
+            regionAtlas=self.regionAtlasCombo.itemData(self.regionAtlasCombo.currentIndex),
+            regionGrowMm=float(self.growSpin.value),
+            growIntoWhiteMatter=bool(self.growWhiteMatterCheck.checked) and self.growSpin.value > 0,
             ageStratified=stratified,
             ageGroups=self.ageGroups() if stratified else [],
             scanner=self.scannerEdit.text.strip(),
@@ -682,6 +703,9 @@ class NeuroPETDatabaseManagerWidget(ScriptedLoadableModuleWidget):
             ("Reference", normaldb.referenceTitle(header.get("referenceRegion"))
              + (f" (mask {header.get('referenceMask')})" if header.get("referenceMask") else " (no mask)")),
             ("Reference erosion", f"{header.get('referenceErosionMm') or 0:g} mm"),
+            ("Regions", f"{normaldb.regionAtlasTitle(header.get('regionAtlas'))}, grown "
+                        f"{header.get('regionGrowMm') or 0:g} mm"
+                        + (" (into the white matter too)" if header.get("growIntoWhiteMatter") else "")),
             ("Maps", f"{header.get('mapType')}, smoothing {header.get('smoothingFwhmMm') or 0:g} mm FWHM"),
             ("Scanner", header.get("scanner")),
             ("Description", header.get("description")),

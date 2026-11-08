@@ -24,6 +24,7 @@ set(MODULE_PYTHON_SCRIPTS
   ${MODULE_NAME}Lib/tacplot.py
   ${MODULE_NAME}Lib/neuro.py
   ${MODULE_NAME}Lib/normaldb.py
+  ${MODULE_NAME}Lib/staticneuro.py
   )
 
 set(MODULE_PYTHON_RESOURCES
@@ -153,4 +154,20 @@ slicerMacroBuildScriptedModule(
 
 if(BUILD_TESTING)
   slicer_add_python_unittest(SCRIPT ${NDB_MODULE_NAME}.py)
+endif()
+
+#-----------------------------------------------------------------------------
+# Static Neuro PET/SPECT (visible, Nuclear Medicine): workflow app for a static brain PET / SPECT (data, optional
+# CT/MR registration, normalization, regions with the normal database, review)
+set(STATIC_NEURO_MODULE_NAME StaticNeuroPET)
+
+slicerMacroBuildScriptedModule(
+  NAME ${STATIC_NEURO_MODULE_NAME}
+  SCRIPTS ${STATIC_NEURO_MODULE_NAME}.py
+  RESOURCES Resources/Icons/${STATIC_NEURO_MODULE_NAME}.png
+  WITH_GENERIC_TESTS
+  )
+
+if(BUILD_TESTING)
+  slicer_add_python_unittest(SCRIPT ${STATIC_NEURO_MODULE_NAME}.py)
 endif()

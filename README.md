@@ -583,6 +583,33 @@ database:
 - **Export as predefined...**: a user defined database as a .zip without its subject images (the number of
   subjects and an age summary are kept).
 - **Delete database** removes the folder from disk after a warning.
+- Every database also stores how its regions are drawn: the **region atlas** (CerebrA left / right, bilateral, or
+  the broad regions), **grow regions** (mm, optionally into the white matter) and the reference erosion. The Neuro
+  workflows use the same settings when a patient is compared with the database.
+
+## Static Neuro PET/SPECT (workflow)
+
+The **Static Neuro PET/SPECT** module (Nuclear Medicine > PET4D) is the workflow for a static brain PET or SPECT. Its
+steps, on the toolbar like the Dynamic Neuro Receptor PET:
+
+1. **Data**: the static PET (loaded by the PET4D DICOM plugin, SUV expected; Bq/ml gives a warning, ratio values are
+   not affected) or SPECT (from the DICOM SPECT reconstruction module: counts, Bq/ml or SUV), and optionally the
+   patient's CT / MR. Modality, units, nuclide and tracer are read from the tags of the loaders. **Import from
+   file...** loads an image file; BIDS names such as `sub-00000016_ses-SUV_pet.nii.gz` are read with their `.json`
+   sidecar (tracer, nuclide, units, timing) and the `participants.tsv` of the dataset (age, sex); a session or
+   acquisition named `SUV...` means SUV units. **Age and sex** come from the tags and can be typed.
+2. **CT/MR registration** (optional): the image registered to the CT / MR (BRAINSFit rigid by default, or the
+   iterative engine), checked in the registration layout, corrected by hand, then hardened (saved separately or
+   overwritten; Revert).
+3. **Normalization** to the MNI ICBM 152 2009c space, three ways: the PET/SPECT to the T1 template, the CT/MR to the
+   MR template with the same transform applied to the image, or the PET/SPECT to a **PET template**: the master mean
+   map of a normal database (only databases with computed statistics are listed).
+4. **Regions/Template**: the **normal database** the patient is compared with, from the database folder of the
+   Database Manager. Databases of the image's modality, nuclide and tracer are listed first and the best one is
+   picked; the others are marked with `!` and warn when picked. A database sets the region settings (atlas, growth,
+   white matter, reference region from its own reference mask): they are locked; **Unlock** (with a warning) changes
+   them. Without a database the workflow goes on and the review gives the regional values only.
+5. **Review**: a placeholder for now (the comparison with the database comes next).
 
 ## What is stored on the volumes
 
