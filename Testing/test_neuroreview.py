@@ -142,4 +142,6 @@ def test_layout_xml():
     assert len(floating) == 1 and len(floating[0].getElementsByTagName("view")) == 6
     assert len(xml.dom.minidom.parseString(nr.layoutXml(nr.LAYOUT_SLICES)).getElementsByTagName("view")) == 7
     assert len(xml.dom.minidom.parseString(nr.layoutXml(nr.LAYOUT_SSP)).getElementsByTagName("view")) == 6
+    for layoutId in nr.LAYOUT_IDS:          # only the table's splitter: the views keep equal sizes
+        assert nr.layoutXml(layoutId).count('split="true"') == (0 if layoutId == nr.LAYOUT_SSP else 1)
     assert nr.defaultLayout(2) == nr.LAYOUT_DUAL and nr.defaultLayout(1) == nr.LAYOUT_SINGLE
