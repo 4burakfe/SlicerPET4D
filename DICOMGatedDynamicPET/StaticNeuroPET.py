@@ -75,7 +75,7 @@ REVIEW_SCORE_COLORMAP = nr.SCORE_COLORMAPS[0]     # diverging: below the normals
 SCORE_COLOR_NODE = "Neuro review score colors"
 REVIEW_FUSION_OPACITY = 0.6
 REVIEW_SCORE_OPACITY = 0.5              # the score map over the MR (fusion): semi-transparent
-REVIEW_OUTLINE_THICKNESS = 2            # px, the region outlines on the slices
+REVIEW_OUTLINE_THICKNESS = 1            # px, the region outlines on the slices
 REVIEW_FLASH_MS = 5000                  # a region clicked in the table: shown alone for 5 s
 MONITOR2_PLACE_DELAY_MS = 300           # the Monitor 2 window placed once the layout manager made its views
 SSP_TARGET_POINTS = 60000               # vertices of the 3D-SSP surface
@@ -2982,6 +2982,7 @@ class StaticNeuroPETWidget(DynamicNeuroPETWidget):
             self._initPetWindow()
         self._assignReviewViews(fit=True)
         self._showTable()
+        self._hoverNames(True)
         if wanted == nr.LAYOUT_DUAL:
             qt.QTimer.singleShot(MONITOR2_PLACE_DELAY_MS, self._placeMonitor2)
 
@@ -3009,7 +3010,90 @@ class StaticNeuroPETWidget(DynamicNeuroPETWidget):
         except Exception:
             logging.exception("Static Neuro: could not place the 3D-SSP window; drag it to the second screen")
 
+    # the name of the region under the mouse, on its left
+    def _hoverNames(self, enable):
+        crosshair = slicer.mrmlScene.GetFirstNodeByClass("vtkMRMLCrosshairNode")
+        old = getattr(self, "_hoverObserver", None)
+        if old is not None:
+            try:
+                old[0].RemoveObserver(old[1])
+            except Exception:
+                pass
+        self._hoverObserver = None
+        self._hideHoverName()
+        if enable and crosshair is not None:
+            tag = crosshair.AddObserver(slicer.vtkMRMLCrosshairNode.CursorPositionModifiedEvent,
+                                        lambda caller, event: self._onCursorMoved(caller))
+            self._hoverObserver = (crosshair, tag)
+
+    def _hoverLabel(self, parent):
+        label = getattr(self, "_hoverNameLabel", None)
+        try:
+            if label is not None and label.parent() is not parent:
+                label.setParent(parent)
+        except Exception:       # deleted with its view
+            label = None
+        if label is None:
+            label = qt.QLabel(parent)
+            label.setStyleSheet("QLabel { color: white; background-color: rgba(0, 0, 0, 170); padding: 1px 4px; "
+                                "border-radius: 3px; }")
+            label.setAttribute(qt.Qt.WA_TransparentForMouseEvents)
+            self._hoverNameLabel = label
+        return label
+
+    def _hideHoverName(self):
+        label = getattr(self, "_hoverNameLabel", None)
+        try:
+            if label is not None:
+                label.hide()
+        except Exception:
+            self._hoverNameLabel = None
+
+    def _onCursorMoved(self, crosshair):
+        """The visible regions at the mouse on a review slice view, named left of the mouse."""
+        try:
+            xyz = [0.0, 0.0, 0.0]
+            sliceNode = crosshair.GetCursorPositionXYZ(xyz)
+            segmentation = self.node("Segmentation")
+            display = segmentation.GetDisplayNode() if segmentation is not None else None
+            names = []
+            widget = None
+            if (sliceNode is not None and display is not None and display.GetVisibility()
+                    and display.GetVisibility2DOutline() and display.IsDisplayableInView(sliceNode.GetID())):
+                layoutManager = slicer.app.layoutManager()
+                widget = layoutManager.sliceWidget(sliceNode.GetLayoutName()) if layoutManager else None
+            if widget is not None and any(w is widget for _, w in self._reviewSliceWidgets()):
+                ras = [0.0, 0.0, 0.0]
+                crosshair.GetCursorPositionRAS(ras)
+                manager = widget.sliceView().displayableManagerByClassName("vtkMRMLSegmentationsDisplayableManager2D")
+                ids = vtk.vtkStringArray()
+                if manager is not None:
+                    manager.GetVisibleSegmentsForPosition(ras, display, ids)
+                seg = segmentation.GetSegmentation()
+                for i in range(ids.GetNumberOfValues()):
+                    segment = seg.GetSegment(ids.GetValue(i))
+                    if segment is not None:
+                        names.append(segment.GetName())
+            if not names:
+                self._hideHoverName()
+                return
+            view = widget.sliceView()
+            label = self._hoverLabel(view)
+            label.text = ", ".join(names)
+            label.adjustSize()
+            point = view.mapFromGlobal(qt.QCursor.pos())
+            x = point.x() - label.width - 12
+            if x < 2:           # no room on the left: on the right
+                x = point.x() + 16
+            label.move(x, max(2, point.y() - label.height // 2))
+            label.show()
+            label.raise_()
+        except Exception:
+            logging.debug("Static Neuro: no region name at the mouse", exc_info=True)
+            self._hideHoverName()
+
     def _exitReviewViews(self):
+        self._hoverNames(False)
         self._endFlash()
         self._syncCameras(False)
         self._restoreSegmentationDisplay()
@@ -3076,7 +3160,8 @@ class StaticNeuroPETWidget(DynamicNeuroPETWidget):
         display.SetVisibility(True)
         display.SetVisibility2DFill(False)
         display.SetVisibility2DOutline(bool(self.outlineCheck.checked) or self._flash is not None)
-        display.SetSliceIntersectionThickness(REVIEW_OUTLINE_THICKNESS)
+        if hasattr(display, "SetSliceIntersectionThickness"):
+            display.SetSliceIntersectionThickness(REVIEW_OUTLINE_THICKNESS)
         display.RemoveAllViewNodeIDs()
         for viewId in viewIds:
             display.AddViewNodeID(viewId)
