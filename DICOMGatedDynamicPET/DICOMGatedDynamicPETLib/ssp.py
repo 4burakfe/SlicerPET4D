@@ -2,7 +2,8 @@
 (numpy + scipy, no Slicer).
 
     surface     the brain surface (the union of the regions, made in Slicer with VTK): its vertices (RAS mm), outward
-                normals and triangles
+                normals and triangles; with the medial views, the surfaces of the two hemispheres (the union cut at
+                the midline, x = 0 in MNI space) after it, each vertex's part in "parts" (0 brain, 1 left, 2 right)
     projection  each vertex takes the maximum of a map along its inward normal, from the surface to DEPTH_MM (13.5 mm,
                 six 2.25 mm voxels as in the original), sampled every STEP_MM with trilinear interpolation
     scores      Minoshima: every normal's map (smoothed as the voxel maps) is projected, and the patient's projection
@@ -30,7 +31,9 @@ MAP_SCORE, MAP_PATIENT = "score", "patient"
 MAPS = ((MAP_SCORE, "Score (z / t)"), (MAP_PATIENT, "Patient (projected values)"))
 SSP_FILE = "stats/ssp.npz"
 
-# camera of each view: (direction from the brain centre to the camera, view up), RAS
+PART_BRAIN, PART_LEFT, PART_RIGHT = 0, 1, 2
+# camera of each view: (direction from the brain centre to the camera, view up), RAS; the medial views look at one
+# hemisphere from the other side
 CAMERAS = {
     "Top": ((0.0, 0.0, 1.0), (0.0, 1.0, 0.0)),
     "Bottom": ((0.0, 0.0, -1.0), (0.0, 1.0, 0.0)),
@@ -38,7 +41,10 @@ CAMERAS = {
     "Post": ((0.0, -1.0, 0.0), (0.0, 0.0, 1.0)),
     "Left": ((-1.0, 0.0, 0.0), (0.0, 0.0, 1.0)),
     "Right": ((1.0, 0.0, 0.0), (0.0, 0.0, 1.0)),
+    "LeftMedial": ((1.0, 0.0, 0.0), (0.0, 0.0, 1.0)),
+    "RightMedial": ((-1.0, 0.0, 0.0), (0.0, 0.0, 1.0)),
 }
+VIEW_PARTS = {"LeftMedial": PART_LEFT, "RightMedial": PART_RIGHT}       # the other views: PART_BRAIN
 
 
 def offsets(depthMm=DEPTH_MM, stepMm=STEP_MM):
@@ -48,6 +54,57 @@ def offsets(depthMm=DEPTH_MM, stepMm=STEP_MM):
     if values[-1] < depthMm - 1e-6:
         values.append(depthMm)
     return np.array(values, dtype=np.float64)
+
+
+def viewPart(key):
+    return VIEW_PARTS.get(key, PART_BRAIN)
+
+
+def hemispheres(shape, ijkToRas, midlineX=0.0):
+    """(left, right) boolean arrays (k, j, i) of a grid: the voxels with RAS x below / above midlineX."""
+    m = np.asarray(ijkToRas, dtype=np.float64)
+    k, j, i = (np.arange(n, dtype=np.float64) for n in shape)
+    x = (m[0, 0] * i[None, None, :] + m[0, 1] * j[None, :, None] + m[0, 2] * k[:, None, None] + m[0, 3])
+    x = np.broadcast_to(x, tuple(shape))
+    return x < midlineX, x >= midlineX
+
+
+def combine(brain, left=None, right=None):
+    """One surface of the brain's and the hemispheres' surfaces (vertices after one another, "parts" per vertex)."""
+    pieces = [(PART_BRAIN, brain)] + [(part, s) for part, s in ((PART_LEFT, left), (PART_RIGHT, right))
+                                      if s is not None and len(s["points"])]
+    points, normals, triangles, parts = [], [], [], []
+    offset = 0
+    for part, s in pieces:
+        count = len(s["points"])
+        points.append(np.asarray(s["points"], np.float64))
+        normals.append(np.asarray(s["normals"], np.float64))
+        triangles.append(np.asarray(s["triangles"], np.int64) + offset)
+        parts.append(np.full(count, part, dtype=np.int8))
+        offset += count
+    return {"points": np.concatenate(points), "normals": np.concatenate(normals),
+            "triangles": np.concatenate(triangles), "parts": np.concatenate(parts)}
+
+
+def parts(surface):
+    """The part of each vertex (all PART_BRAIN for a surface without hemispheres)."""
+    found = surface.get("parts")
+    return np.asarray(found, np.int8) if found is not None else np.zeros(len(surface["points"]), np.int8)
+
+
+def hasPart(surface, part):
+    return bool(np.any(parts(surface) == part))
+
+
+def piece(surface, part):
+    """(surface of one part, its vertex indices in the whole): the triangles of that part, renumbered."""
+    index = np.flatnonzero(parts(surface) == part)
+    renumber = np.full(len(surface["points"]), -1, dtype=np.int64)
+    renumber[index] = np.arange(len(index))
+    triangles = np.asarray(surface["triangles"], np.int64)
+    keep = np.all(renumber[triangles] >= 0, axis=1) if len(triangles) else np.zeros(0, bool)
+    return ({"points": np.asarray(surface["points"])[index], "normals": np.asarray(surface["normals"])[index],
+             "triangles": renumber[triangles[keep]]}, index)
 
 
 def rasToIjk(points, ijkToRas):
@@ -100,6 +157,7 @@ def signature(points, normals, depthMm, stepMm, extra=()):
     """Short hash of a surface (vertices, normals rounded to 0.01 mm) and the projection, the key of the cached
     projections."""
     digest = hashlib.sha1()
+    digest.update(str(len(points)).encode())
     for values in (points, normals):
         digest.update(np.round(np.asarray(values, dtype=np.float64), 2).astype(np.float32).tobytes())
     digest.update(f"{depthMm:g}/{stepMm:g}".encode())
@@ -114,6 +172,8 @@ def write(path, surface, groups, meta):
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     arrays = {"points": np.asarray(surface["points"], np.float32), "normals": np.asarray(surface["normals"], np.float32),
               "triangles": np.asarray(surface["triangles"], np.int32)}
+    if surface.get("parts") is not None:
+        arrays["parts"] = np.asarray(surface["parts"], np.int8)
     names = {}
     for key, group in groups.items():
         arrays[f"mean__{key}"] = np.asarray(group["mean"], np.float32)
@@ -132,6 +192,8 @@ def read(path):
             meta = json.loads(bytes(data["meta"]).decode("utf-8"))
             surface = {"points": data["points"].astype(np.float64), "normals": data["normals"].astype(np.float64),
                        "triangles": data["triangles"].astype(np.int64)}
+            if "parts" in data.files:
+                surface["parts"] = data["parts"].astype(np.int8)
             groups = {}
             for key, info in (meta.get("groups") or {}).items():
                 groups[key] = {"mean": data[f"mean__{key}"], "sd": data[f"sd__{key}"], "n": info.get("n"),
@@ -165,3 +227,31 @@ def surfaceColors(table, low, high, count=256):
     rgba = np.ones((count, 4))
     rgba[:, :3] = table[index]
     return rgba
+
+
+def _frame(focal, position, viewUp):
+    """(direction of projection, up, right) unit vectors of a camera."""
+    direction = np.asarray(focal, np.float64) - np.asarray(position, np.float64)
+    direction /= np.linalg.norm(direction) or 1.0
+    up = np.asarray(viewUp, np.float64)
+    up = up - np.dot(up, direction) * direction
+    up /= np.linalg.norm(up) or 1.0
+    return direction, up, np.cross(direction, up)
+
+
+def panOffset(center, focal, position, viewUp):
+    """(right, up) mm of a camera's focal point from the centre, on its screen: its pan."""
+    _, up, right = _frame(focal, position, viewUp)
+    offset = np.asarray(focal, np.float64) - np.asarray(center, np.float64)
+    return float(np.dot(offset, right)), float(np.dot(offset, up))
+
+
+def pannedCamera(center, pan, focal, position, viewUp):
+    """(focal point, position) of a camera moved to the screen pan (right, up) of another view, its own direction,
+    up and distance kept (the views share zoom and pan, not rotation)."""
+    direction, up, right = _frame(focal, position, viewUp)
+    focal = np.asarray(focal, np.float64)
+    distance = float(np.linalg.norm(focal - np.asarray(position, np.float64)))
+    depth = float(np.dot(focal - np.asarray(center, np.float64), direction))
+    newFocal = np.asarray(center, np.float64) + pan[0] * right + pan[1] * up + depth * direction
+    return newFocal, newFocal - distance * direction
