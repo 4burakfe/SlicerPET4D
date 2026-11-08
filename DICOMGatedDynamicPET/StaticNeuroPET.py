@@ -14,8 +14,10 @@ Receptor PET module (same normalization and regions) and the Neuro PET normal da
                             same transform applied to the image, or the PET/SPECT to the database's master mean map
     4. Regions              the CerebrA regions: with a database its region settings (atlas, growth, white matter,
                             reference region and its mask) are used, locked unless unlocked
-    5. Review               the comparison with the database comes here; adding the patient to a user defined
-                            database (SUV and SUVR maps on the database grid, a row in subjects.csv)
+    5. Review               the comparison with the database (4 x 4 layout: PET with region outlines, voxel z / t
+                            map, 3D-SSP views, region table with SUVmean and regional scores; MR fusion); adding
+                            the patient to a user defined database (SUV and SUVR maps on the database grid, a row
+                            in subjects.csv)
 """
 
 import json
@@ -35,7 +37,8 @@ _MODULE_DIR = os.path.dirname(os.path.abspath(globals().get("__file__", "") or "
 if globals().get("__file__") and _MODULE_DIR not in sys.path:
     sys.path.insert(0, _MODULE_DIR)
 
-from DICOMGatedDynamicPETLib import neuro, normaldb  # noqa: E402
+from DICOMGatedDynamicPETLib import colormaps, colortables, neuro, normaldb  # noqa: E402
+from DICOMGatedDynamicPETLib import neuroreview as nr  # noqa: E402
 from DICOMGatedDynamicPETLib import registration as reg  # noqa: E402
 from DICOMGatedDynamicPETLib import resampling  # noqa: E402
 from DICOMGatedDynamicPETLib import staticneuro as sn  # noqa: E402
@@ -66,6 +69,11 @@ NORMALIZATION_ATTRIBUTE = NEURO_PREFIX + "Normalization"    # JSON of the settin
 REGISTERED_SUFFIX = " registered"
 ICON_PATH = os.path.join(_MODULE_DIR, "Resources", "Icons", "StaticNeuroPET.png")
 WARNING_STYLE = "<span style='color:#c0392b'>{}</span>"
+REVIEW_PET_COLORMAP = "PET-DICOM"
+REVIEW_SCORE_COLORMAP = "PET-HotIron"   # scores below the normals (hypometabolism)
+SCORE_HYPER_COLORMAP = "Jotun"          # scores above the normals (blue)
+SCORE_COLOR_NODE = "Neuro review score colors"
+REVIEW_FUSION_OPACITY = 0.6
 
 
 class StaticNeuroPET(ScriptedLoadableModule):
@@ -356,6 +364,212 @@ class StaticNeuroPETLogic(DynamicNeuroPETLogic):
         normaldb.addSubject(folder, row, normalization, replace)
         logging.info(f"Static Neuro: '{subjectId}' added to {folder} (reference mean {mean:.4g})")
         return row
+
+    # --- the regions of a normal database and their values ----------------------------------------
+    @staticmethod
+    def databaseRegionArguments(folder, header):
+        """Keyword arguments of loadAtlasRegions() for the region settings of a database (as the Regions step uses
+        them when locked)."""
+        settings = sn.regionSettings(folder, header)
+        arguments = {"targetKind": settings["regionAtlas"], "referenceKind": ATLAS_BILATERAL, "referenceName": None,
+                     "growMm": settings["growMm"], "erodeReferenceMm": settings["erodeReferenceMm"],
+                     "growInto": settings["growInto"]}
+        if settings["referenceMaskPath"]:
+            arguments["referenceMaskPath"] = settings["referenceMaskPath"]
+            arguments["referenceName"] = settings["referenceTitle"] or "Reference"
+        elif settings["referenceAtlasRegion"]:
+            arguments["referenceName"] = settings["referenceAtlasRegion"]
+        return arguments
+
+    def segmentMasks(self, segmentation, gridNode, dropped=True):
+        """{segment name: boolean array on the grid of gridNode} of a segmentation (the optic chiasm left out with
+        dropped)."""
+        masks = {}
+        shape = tuple(reversed(gridNode.GetImageData().GetDimensions()))
+        for segmentId in self.segmentIds(segmentation):
+            name = segmentation.GetSegmentation().GetSegment(segmentId).GetName()
+            if dropped and nr.isDroppedSegment(name):
+                continue
+            array = slicer.util.arrayFromSegmentBinaryLabelmap(segmentation, segmentId, gridNode)
+            masks[name] = np.asarray(array) > 0 if array is not None else np.zeros(shape, dtype=bool)
+        return masks
+
+    def databaseRegionMasks(self, atlas, folder, header, gridNode):
+        """The regions of a database's region settings (CerebrA of the atlas folder) as masks on gridNode's grid."""
+        segmentation, _ = self.loadAtlasRegions(atlas, **self.databaseRegionArguments(folder, header))
+        try:
+            return self.segmentMasks(segmentation, gridNode)
+        finally:
+            slicer.mrmlScene.RemoveNode(segmentation)
+
+    @staticmethod
+    def subjectRegionValues(folder, header, masks, progress=None):
+        """{subject ID: {region: mean}} of the subjects' maps (SUVR or SUV by the map type; not smoothed) of a user
+        defined database. progress(index, total, text) returns False to stop (None returned)."""
+        subjects = normaldb.readSubjects(folder)
+        mapKey = normaldb.subjectMapKey(header)
+        values = {}
+        for index, subject in enumerate(subjects):
+            if progress is not None and not progress(index, len(subjects), f"{subject['id']} ({index + 1} / "
+                                                                           f"{len(subjects)})"):
+                return None
+            relative = subject.get(mapKey)
+            path = os.path.join(folder, relative) if relative else ""
+            if not path or not os.path.isfile(path):
+                continue
+            node = slicer.util.loadVolume(path, {"show": False})
+            try:
+                values[subject["id"]] = nr.regionMeans(slicer.util.arrayFromVolume(node), masks)
+            finally:
+                slicer.mrmlScene.RemoveNode(node)
+        return values
+
+    def regionReference(self, folder, header, masks, groupKey, locked, progress=None):
+        """({region: [mean, SD, n]}, source text) of the normal regional values of a group: the database's own
+        (stats/regions.json, made with the mean / SD maps) when the regions are the database's (locked); else, for a
+        user defined database, from its subjects on the fly (cached in <database>/cache/); else the approximation from
+        the mean / SD maps. None when stopped."""
+        names = list(masks)
+        version = header.get("version", 1)
+        mapKey = normaldb.subjectMapKey(header)
+        path = nr.regionsPath(folder, header)
+        if locked and path:
+            document = nr.readJson(path)
+            if document and document.get("maps") == mapKey:
+                found, missing = nr.matchRegions(document.get("groups"), groupKey, names)
+                if found and len(missing) <= len(names) // 10:
+                    return found, "database regional statistics"
+        if header.get("kind") == normaldb.USER_DEFINED and normaldb.readSubjects(folder):
+            ids = sorted(s.get("id", "") for s in normaldb.readSubjects(folder))
+            signature = nr.masksSignature(masks, extra=ids)
+            cache = nr.cachePath(folder, signature, mapKey, version)
+            document = nr.readJson(cache)
+            if document is None:
+                values = self.subjectRegionValues(folder, header, masks, progress)
+                if values is None:
+                    return None
+                groups = normaldb.statisticsGroups(header, normaldb.readSubjects(folder))
+                document = nr.regionsDocument(nr.regionStatistics(values, groups), mapKey, version,
+                                              signature=signature)
+                try:
+                    nr.writeJson(cache, document)
+                except OSError:
+                    logging.warning(f"Static Neuro: could not write {cache}", exc_info=True)
+            found, _ = nr.matchRegions(document.get("groups"), groupKey, names)
+            if found:
+                return found, "the database's subjects (these regions)"
+        return None, "approximate (from the mean / SD maps)"
+
+    # --- review: the patient compared with the database ------------------------------------------
+    @staticmethod
+    def resampledArray(volume, gridNode):
+        """The volume's voxels resampled (linear) onto the grid of gridNode, as a float32 array (k, j, i)."""
+        dims = tuple(int(x) for x in gridNode.GetImageData().GetDimensions())
+        image = resampling.Resampler(_ijkToRas(volume), dims, _ijkToRas(gridNode), None, True,
+                                     "Linear").resample(volume.GetImageData())
+        node = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLScalarVolumeNode", "Neuro review (temporary)")
+        try:
+            node.SetIJKToRASMatrix(_vtkMatrix(_ijkToRas(gridNode)))
+            node.SetAndObserveImageData(image)
+            return np.array(slicer.util.arrayFromVolume(node), dtype=np.float32)
+        finally:
+            slicer.mrmlScene.RemoveNode(node)
+
+    @staticmethod
+    def dropSegments(segmentation):
+        """Remove the segments the review leaves out (the optic chiasm). Returns their names."""
+        removed = []
+        seg = segmentation.GetSegmentation()
+        for segmentId in DynamicNeuroPETLogic.segmentIds(segmentation):
+            name = seg.GetSegment(segmentId).GetName()
+            if nr.isDroppedSegment(name):
+                seg.RemoveSegment(segmentId)
+                removed.append(name)
+        return removed
+
+    def reviewData(self, volume, segmentation, folder=None, header=None, groupKey=normaldb.MASTER, atlas=None,
+                   referenceSegmentId=None, locked=True, progress=None):
+        """The patient (a normalized volume and its regions) compared with a normal database:
+        {"grid": the grid node (the group's mean map; without a database the volume), "z": voxel z map (positive
+        below the mean; t = z / tFactor(n)) or None, "n", "names", "suv" {region: SUV mean}, "values" {region:
+        value of the database's map type}, "reference" {region: [mean, SD, n]}, "source", "ratio" (map type SUVR /
+        Ratio), "referenceMean", "fwhm", "notes"}. None when stopped."""
+        notes = []
+        result = {"z": None, "n": None, "reference": {}, "source": "", "ratio": False, "referenceMean": None,
+                  "fwhm": 0.0, "notes": notes}
+        groups = ((header or {}).get("statistics") or {}).get("groups") or {}
+        group = groups.get(groupKey) if header is not None else None
+        if header is not None and not group:
+            raise ValueError(f"The database '{header.get('name')}' has no mean / SD maps"
+                             + (f" of the group '{groupKey}'." if groups else ": compute them in the Neuro PET "
+                                "Database Manager."))
+        if header is None:
+            grid = volume
+            values = suv = np.array(slicer.util.arrayFromVolume(volume), dtype=np.float32)
+            masks = self.segmentMasks(segmentation, grid)
+            result.update(grid=grid, names=list(masks), suv=nr.regionMeans(suv, masks))
+            if referenceSegmentId:
+                mask = slicer.util.arrayFromSegmentBinaryLabelmap(segmentation, referenceSegmentId, grid)
+                if mask is not None and np.any(mask):
+                    ratio, mean = sn.ratioMap(values, np.asarray(mask) > 0)
+                    result.update(ratio=True, referenceMean=mean, values=nr.regionMeans(ratio, masks))
+            result.setdefault("values", result["suv"])
+            return result
+        grid = self.loadAtlasVolume(os.path.join(folder, group["mean"]), name=f"{header['name']} mean ({groupKey})")
+        sdNode = self.loadAtlasVolume(os.path.join(folder, group["sd"]), name=f"{header['name']} SD ({groupKey})")
+        mean = np.array(slicer.util.arrayFromVolume(grid), dtype=np.float32)
+        sd = np.array(slicer.util.arrayFromVolume(sdNode), dtype=np.float32)
+        if sd.shape != mean.shape:
+            raise ValueError("The mean and SD maps of the database are not on the same grid.")
+        suv = self.resampledArray(volume, grid)
+        values = suv
+        ratio = header.get("mapType") in (normaldb.MAP_SUVR, normaldb.MAP_RATIO)
+        if ratio:
+            maskPath = sn.referenceMaskPath(folder, header)
+            if maskPath:
+                maskArray, maskNode = self._loadLabels(maskPath)
+                slicer.mrmlScene.RemoveNode(maskNode)
+                if maskArray.shape != mean.shape:
+                    raise ValueError("The database's reference mask is not on the grid of its mean map.")
+                referenceMask = maskArray > 0
+            elif referenceSegmentId:
+                referenceMask = np.asarray(slicer.util.arrayFromSegmentBinaryLabelmap(
+                    segmentation, referenceSegmentId, grid)) > 0
+                notes.append("The database has no reference mask: the regions' reference region is used.")
+            else:
+                raise ValueError("The database compares ratio maps but has no reference mask, and the regions have "
+                                 "no reference region.")
+            values, referenceMean = sn.ratioMap(suv, referenceMask)
+            result["referenceMean"] = referenceMean
+        masks = self.segmentMasks(segmentation, grid)
+        result.update(grid=grid, names=list(masks), suv=nr.regionMeans(suv, masks),
+                      values=nr.regionMeans(values, masks), ratio=ratio, n=group.get("n"))
+        # voxel scores: the patient smoothed like the normals, in the mask, with the SD floor
+        fwhm = float((header.get("statistics") or {}).get("smoothingFwhmMm", header.get("smoothingFwhmMm")) or 0)
+        result["fwhm"] = fwhm
+        spacing = tuple(float(x) for x in grid.GetSpacing())[::-1]
+        brain = None
+        if atlas and neuro.BRAIN_MASK in atlas:
+            brainArray, brainNode = self._loadLabels(atlas[neuro.BRAIN_MASK])
+            slicer.mrmlScene.RemoveNode(brainNode)
+            if brainArray.shape == mean.shape:
+                brain = brainArray > 0
+            else:
+                notes.append("The MNI brain mask is not on the database grid: the score mask is the mean map's.")
+        mask = nr.scoreMask(mean, brain)
+        smoothed = normaldb.smoothMap(values, fwhm, spacing)
+        result["z"] = nr.scoreMap(smoothed, mean, sd, mask, nr.SCORE_Z)
+        # regional normal values
+        reference = self.regionReference(folder, header, masks, groupKey, locked, progress)
+        if reference is None:
+            return None
+        found, source = reference
+        if found is None:
+            found = nr.approximateRegions(mean, sd, masks)
+            notes.append("Regional normal values approximated from the mean / SD maps (the mean voxel SD is larger "
+                         "than the SD of a regional mean: these scores are conservative).")
+        result.update(reference=found, source=source)
+        return result
 
     # --- batch: many normal subjects into a database ----------------------------------------------
     BATCH_COLUMNS = ("file", "id", "status", "message", "referenceMean", "seconds")
@@ -1411,12 +1625,7 @@ class StaticNeuroPETWidget(DynamicNeuroPETWidget):
         page = qt.QWidget()
         layout = qt.QVBoxLayout(page)
         layout.setContentsMargins(0, 0, 0, 0)
-        box = qt.QGroupBox("Review")
-        boxLayout = qt.QVBoxLayout(box)
-        self.reviewLabel = qt.QLabel()
-        self.reviewLabel.wordWrap = True
-        boxLayout.addWidget(self.reviewLabel)
-        layout.addWidget(box)
+        self._buildReviewBoxes(layout)
 
         addBox = qt.QGroupBox("Add this patient to a normal database")
         addBox.toolTip = ("For building a user defined database from normal subjects: the normalized image is "
@@ -1447,6 +1656,523 @@ class StaticNeuroPETWidget(DynamicNeuroPETWidget):
         self.addDbCombo.connect("activated(int)", lambda i: self._onAddDatabasePicked())
         self.addReferenceCombo.connect("activated(int)", lambda i: setattr(self, "_addReferenceChosen", True))
         return page
+
+    # --- review: comparison, views and the region table -------------------------------------------
+    def _buildReviewBoxes(self, layout):
+        box = qt.QGroupBox("Comparison with the normal database")
+        form = qt.QFormLayout(box)
+        self.reviewLabel = qt.QLabel()
+        self.reviewLabel.wordWrap = True
+        form.addRow(self.reviewLabel)
+        self.groupCombo = qt.QComboBox()
+        self.groupCombo.toolTip = ("Mean / SD maps the patient is compared with: automatically the patient's age group "
+                                   "(the master, all normals, when the age is not known or the group has no maps)")
+        form.addRow("Normals:", self.groupCombo)
+        self.scoreCombo = qt.QComboBox()
+        for key, title in nr.SCORES:
+            self.scoreCombo.addItem(title, key)
+        self.scoreCombo.toolTip = ("z = (normal mean - patient) / SD; Crawford-Howell t = z / sqrt(1 + 1/n), for a "
+                                   "small number of normals n. Positive: the patient below the normals "
+                                   "(hypometabolism / hypoperfusion). Shown in the score row and the region table.")
+        form.addRow("Score:", self.scoreCombo)
+        self.compareButton = _button("Compare with the database")
+        form.addRow(self.compareButton)
+        self.compareLabel = qt.QLabel()
+        self.compareLabel.wordWrap = True
+        self.compareLabel.setTextInteractionFlags(qt.Qt.TextSelectableByMouse)
+        form.addRow(self.compareLabel)
+        layout.addWidget(box)
+
+        viewBox = qt.QGroupBox("Display")
+        view = qt.QFormLayout(viewBox)
+        self.petColorCombo = qt.QComboBox()
+        self.scoreColorCombo = qt.QComboBox()
+        for combo, default in ((self.petColorCombo, REVIEW_PET_COLORMAP), (self.scoreColorCombo, REVIEW_SCORE_COLORMAP)):
+            for label in colormaps.LABELS:
+                combo.addItem(label)
+            combo.setCurrentIndex(max(0, combo.findText(default)))
+        view.addRow("PET colors:", self.petColorCombo)
+        self.petWindowRange = ctk.ctkRangeWidget()
+        self.petWindowRange.decimals = 2
+        self.petWindowRange.toolTip = "Display range of the normalized PET / SPECT (top row)"
+        view.addRow("PET window:", self.petWindowRange)
+        self.scoreColorCombo.toolTip = ("Colors of the scores above the threshold (below the normals); scores below "
+                                        "minus the threshold (above the normals) are blue")
+        view.addRow("Score colors:", self.scoreColorCombo)
+        self.scoreThresholdSpin = qt.QDoubleSpinBox()
+        self.scoreThresholdSpin.setRange(0.0, 20.0)
+        self.scoreThresholdSpin.decimals = 1
+        self.scoreThresholdSpin.singleStep = 0.5
+        self.scoreThresholdSpin.value = nr.DEFAULT_THRESHOLD
+        self.scoreThresholdSpin.toolTip = "Scores between minus and plus this value are not shown"
+        view.addRow("Score threshold:", self.scoreThresholdSpin)
+        self.scoreMaximumSpin = qt.QDoubleSpinBox()
+        self.scoreMaximumSpin.setRange(0.5, 50.0)
+        self.scoreMaximumSpin.decimals = 1
+        self.scoreMaximumSpin.singleStep = 0.5
+        self.scoreMaximumSpin.value = nr.DEFAULT_MAXIMUM
+        self.scoreMaximumSpin.toolTip = "Score at the top of the colors"
+        view.addRow("Score maximum:", self.scoreMaximumSpin)
+        self.hypoOnlyCheck = qt.QCheckBox("Below the normals only (hypometabolism)")
+        self.hypoOnlyCheck.toolTip = "Hide the scores above the normals (negative)"
+        view.addRow(self.hypoOnlyCheck)
+        layout.addWidget(viewBox)
+
+        fusionBox = qt.QGroupBox("MR fusion")
+        fusion = qt.QFormLayout(fusionBox)
+        self.fusionCheck = qt.QCheckBox("Show the PET and the scores over an MR")
+        fusion.addRow(self.fusionCheck)
+        self.fusionSourceCombo = qt.QComboBox()
+        self.fusionSourceCombo.toolTip = ("The MNI template T1, or the patient's own CT / MR when the normalization went "
+                                          "through it (normalized with the same transform)")
+        fusion.addRow("MR:", self.fusionSourceCombo)
+        self.fusionOpacity = ctk.ctkSliderWidget()
+        self.fusionOpacity.minimum, self.fusionOpacity.maximum = 0.0, 1.0
+        self.fusionOpacity.singleStep, self.fusionOpacity.decimals = 0.05, 2
+        self.fusionOpacity.value = REVIEW_FUSION_OPACITY
+        self.fusionOpacity.toolTip = "Opacity of the PET over the MR (the scores stay opaque)"
+        fusion.addRow("PET opacity:", self.fusionOpacity)
+        self.anatomyWindowRange = ctk.ctkRangeWidget()
+        self.anatomyWindowRange.decimals = 1
+        self.anatomyWindowRange.toolTip = "Display range of the MR / CT (grey)"
+        fusion.addRow("MR window:", self.anatomyWindowRange)
+        layout.addWidget(fusionBox)
+
+        self.compareButton.connect("clicked()", self.onCompare)
+        self.groupCombo.connect("activated(int)", lambda i: setattr(self, "_groupChosen", True))
+        self.scoreCombo.connect("currentIndexChanged(int)", lambda i: self._showScores())
+        self.petColorCombo.connect("currentIndexChanged(int)", lambda i: self._applyPetDisplay())
+        self.petWindowRange.connect("valuesChanged(double,double)", lambda a, b: self._applyPetDisplay())
+        for widget in (self.scoreColorCombo,):
+            widget.connect("currentIndexChanged(int)", lambda i: self._applyScoreDisplay())
+        for widget in (self.scoreThresholdSpin, self.scoreMaximumSpin):
+            widget.connect("valueChanged(double)", lambda v: self._applyScoreDisplay())
+        self.hypoOnlyCheck.connect("toggled(bool)", lambda on: self._applyScoreDisplay())
+        self.fusionCheck.connect("toggled(bool)", lambda on: self._onFusionChanged())
+        self.fusionSourceCombo.connect("currentIndexChanged(int)", lambda i: self._onFusionChanged())
+        self.fusionOpacity.connect("valueChanged(double)", lambda v: self._assignReviewViews())
+        self.anatomyWindowRange.connect("valuesChanged(double,double)", lambda a, b: self._applyAnatomyDisplay())
+        self.reviewResult = None
+        self.scoreNode = None
+        self.reviewTable = None
+        self._reviewPreviousLayout = None
+        self._segmentationDisplay = None
+
+    def _updateReviewInfo(self, volume, segmentation, header, age, sex):
+        lines = [f"Image: {volume.GetName() if volume else 'none'}"
+                 + (" (normalized)" if volume is not None and volume.GetAttribute(NEURO_PREFIX + "Template") else ""),
+                 "Age: " + (f"{age:g}" if age is not None else "unknown") + ", sex: "
+                 + (dict(sn.SEXES).get(sex) if sex else "unknown"),
+                 f"Regions: {segmentation.GetName() if segmentation else 'not loaded (step 4)'}"]
+        if header is not None:
+            stats = header.get("statistics") or {}
+            lines.append(f"Database: {header['name']} ({header.get('mapType', '')} maps"
+                         + (f", smoothing {float(stats.get('smoothingFwhmMm', header.get('smoothingFwhmMm')) or 0):g} "
+                            "mm" if stats.get("groups") else "") + ")")
+            if not stats.get("groups"):
+                lines.append(WARNING_STYLE.format("The database has no mean / SD maps: compute them in the Neuro PET "
+                                                  "Database Manager."))
+            elif stats.get("stale"):
+                lines.append(WARNING_STYLE.format("Subjects were added after the mean / SD maps were computed."))
+        else:
+            lines.append("No database: the regional values (SUV, SUVR to the reference region) only.")
+        result = self.reviewResult
+        if result is not None and (result.get("volume") is not volume or result.get("header") != header):
+            lines.append(WARNING_STYLE.format("The image or the database changed: compare again."))
+        self.reviewLabel.text = "<br>".join(lines)
+        self._fillGroups(header, age)
+        self.groupCombo.enabled = header is not None and self.groupCombo.count > 1
+        self.compareButton.text = "Compare with the database" if header is not None else "Compute the regional values"
+        normalized = volume is not None and bool(volume.GetAttribute(NEURO_PREFIX + "Template"))
+        self.compareButton.enabled = normalized and segmentation is not None and (
+            header is None or bool((header.get("statistics") or {}).get("groups")))
+        self._fillFusionSources()
+
+    def _fillGroups(self, header, age):
+        key = (json.dumps((header or {}).get("statistics"), sort_keys=True, default=str), age)
+        if getattr(self, "_groupsFor", None) == key:
+            return
+        self._groupsFor = key
+        current = self.groupCombo.currentData
+        chosen = getattr(self, "_groupChosen", False)
+        self.groupCombo.blockSignals(True)
+        self.groupCombo.clear()
+        if header is not None:
+            automatic, why = nr.patientGroup(header, age)
+            names = {k: (name, n) for k, name, n in nr.statisticsGroups(header)}
+            title = names.get(automatic, (automatic, None))[0]
+            title = normaldb.MASTER_TITLE if automatic == normaldb.MASTER else title
+            self.groupCombo.addItem(f"Automatic: {title} ({why})", "")
+            for k, (name, n) in names.items():
+                self.groupCombo.addItem((normaldb.MASTER_TITLE if k == normaldb.MASTER else f"Age group {name}")
+                                        + (f" (n = {n})" if n else ""), k)
+        index = self.groupCombo.findData(current) if chosen and current else -1
+        self.groupCombo.setCurrentIndex(max(0, index))
+        self.groupCombo.blockSignals(False)
+
+    def _groupKey(self, header, age):
+        key = self.groupCombo.currentData if self.groupCombo.count else ""
+        return key or nr.patientGroup(header, age)[0]
+
+    def _fillFusionSources(self):
+        anatomy = self.node("NormalizedAnatomy")
+        wanted = [("template", "MNI template T1")] if "T1" in (self.atlas or {}) else []
+        if anatomy is not None:
+            wanted.append(("patient", f"Patient's CT / MR ({anatomy.GetName()})"))
+        if [self.fusionSourceCombo.itemData(i) for i in range(self.fusionSourceCombo.count)] == [k for k, _ in wanted]:
+            return
+        current = self.fusionSourceCombo.currentData
+        self.fusionSourceCombo.blockSignals(True)
+        self.fusionSourceCombo.clear()
+        for key, title in wanted:
+            self.fusionSourceCombo.addItem(title, key)
+        self.fusionSourceCombo.setCurrentIndex(max(0, self.fusionSourceCombo.findData(current)))
+        self.fusionSourceCombo.blockSignals(False)
+        self.fusionCheck.enabled = bool(wanted)
+
+    def _fusionVolume(self):
+        if not self.fusionCheck.checked or not self.fusionCheck.enabled:
+            return None
+        key = self.fusionSourceCombo.currentData
+        if key == "patient":
+            return self.node("NormalizedAnatomy")
+        if key == "template" and "T1" in (self.atlas or {}):
+            return self.logic.loadAtlasVolume(self.atlas["T1"], name="MNI ICBM152 2009c T1")
+        return None
+
+    def onCompare(self):
+        volume, segmentation = self.volume(), self.node("Segmentation")
+        if volume is None or segmentation is None:
+            return
+        folder = self._database()
+        header = self._header(folder)
+        removed = self.logic.dropSegments(segmentation)
+        age, _ = self.logic.ageAndSex(volume)
+        groupKey = self._groupKey(header, age) if header is not None else normaldb.MASTER
+        referenceId = self._parameter().GetParameter(NEURO_PREFIX + "ReferenceSegment") or None
+        if referenceId and segmentation.GetSegmentation().GetSegment(referenceId) is None:
+            referenceId = None
+        dialog = slicer.util.createProgressDialog(windowTitle="Review", labelText="Comparing...", maximum=0)
+
+        def progress(index, total, text):
+            dialog.maximum = total
+            dialog.setValue(index)
+            dialog.setLabelText(f"Regional values of the normals: {text}")
+            slicer.app.processEvents()
+            return not dialog.wasCanceled
+
+        slicer.app.processEvents()
+        qt.QApplication.setOverrideCursor(qt.Qt.WaitCursor)
+        try:
+            result = self.logic.reviewData(volume, segmentation, folder if header is not None else None, header,
+                                           groupKey, self.atlas, referenceId, self._locked(), progress)
+        except Exception as error:
+            logging.exception("Static Neuro: the review failed")
+            slicer.util.errorDisplay(f"Could not compare the patient:\n{error}", windowTitle="Review")
+            return
+        finally:
+            qt.QApplication.restoreOverrideCursor()
+            dialog.close()
+        if result is None:
+            self.compareLabel.text = "Stopped."
+            return
+        result.update(volume=volume, header=header, groupKey=groupKey)
+        self.reviewResult = result
+        self._makeScoreNode()
+        self._initPetWindow()
+        self._showScores()
+        self._enterReviewViews()
+        lines = []
+        if header is not None:
+            group = next((name for k, name, _ in nr.statisticsGroups(header) if k == groupKey), groupKey)
+            lines.append(f"Compared with {normaldb.MASTER_TITLE if groupKey == normaldb.MASTER else group} "
+                         f"(n = {result.get('n')}); patient smoothed {result['fwhm']:g} mm FWHM like the normals.")
+            lines.append(f"Regional normal values: {result['source']}.")
+        if result.get("referenceMean"):
+            lines.append(f"Reference region mean: {result['referenceMean']:.4g}.")
+        if removed:
+            lines.append("Left out: " + ", ".join(removed) + ".")
+        lines.extend(result["notes"])
+        self.compareLabel.text = " ".join(lines)
+        self.refresh()
+
+    def _makeScoreNode(self):
+        result = self.reviewResult
+        scene = slicer.mrmlScene
+        if result is None or result.get("z") is None:
+            if self.scoreNode is not None and scene.IsNodePresent(self.scoreNode):
+                scene.RemoveNode(self.scoreNode)
+            self.scoreNode = None
+            return
+        if self.scoreNode is None or not scene.IsNodePresent(self.scoreNode):
+            self.scoreNode = scene.AddNewNodeByClass("vtkMRMLScalarVolumeNode",
+                                                     scene.GenerateUniqueName(f"{result['volume'].GetName()} score"))
+            self.scoreNode.CreateDefaultDisplayNodes()
+        self.scoreNode.SetIJKToRASMatrix(_vtkMatrix(_ijkToRas(result["grid"])))
+        slicer.util.updateVolumeFromArray(self.scoreNode, result["z"])
+
+    def _scoreKind(self):
+        return self.scoreCombo.currentData or nr.DEFAULT_SCORE
+
+    def _showScores(self):
+        """The score map (z, or t = z / sqrt(1 + 1/n)) and the region table of the last comparison."""
+        result = self.reviewResult
+        if result is None:
+            return
+        kind = self._scoreKind()
+        if self.scoreNode is not None and result.get("z") is not None:
+            factor = nr.tFactor(result.get("n")) if kind == nr.SCORE_T else 1.0
+            slicer.util.updateVolumeFromArray(self.scoreNode, (result["z"] / np.float32(factor)).astype(np.float32))
+            self.scoreNode.SetName(f"{result['volume'].GetName()} {kind} map")
+            self._applyScoreDisplay()
+        self._updateReviewTable(kind)
+
+    def _updateReviewTable(self, kind):
+        result = self.reviewResult
+        scene = slicer.mrmlScene
+        n = result.get("n")
+        reference = {k: [v[0], v[1], v[2] if len(v) > 2 and v[2] is not None else n]
+                     for k, v in (result.get("reference") or {}).items()}
+        rows = nr.tableRows(result["values"], result["suv"], reference, kind)
+        units = result["header"].get("mapType") if result.get("header") else "SUVR"
+        compared = result.get("ratio") and units in (normaldb.MAP_SUVR, normaldb.MAP_RATIO, "SUVR")
+        columns = ["Region", "SUVmean"] + ([units or "SUVR"] if compared else [])
+        if result.get("header") is not None:
+            columns += ["Normal mean", "Normal SD", "n", kind]
+        table = vtk.vtkTable()
+        arrays = []
+        for name in columns:
+            array = vtk.vtkStringArray()
+            array.SetName(name)
+            table.AddColumn(array)
+            arrays.append(array)
+
+        def text(value, digits=3):
+            if value is None or (isinstance(value, float) and not np.isfinite(value)):
+                return ""
+            return f"{value:.{digits}g}" if isinstance(value, float) else str(value)
+
+        for name, suv, value, mean, sd, count, score in rows:
+            cells = [name, text(suv)] + ([text(value)] if compared else [])
+            if result.get("header") is not None:
+                cells += [text(mean), text(sd), text(count), "" if score is None else f"{score:.2f}"]
+            for array, cell in zip(arrays, cells):
+                array.InsertNextValue(cell)
+        if self.reviewTable is None or not scene.IsNodePresent(self.reviewTable):
+            self.reviewTable = scene.AddNewNodeByClass("vtkMRMLTableNode", scene.GenerateUniqueName("Neuro review"))
+        self.reviewTable.SetAndObserveTable(table)
+        if hasattr(self.reviewTable, "SetUseColumnNameAsColumnHeader"):
+            self.reviewTable.SetUseColumnNameAsColumnHeader(True)
+        self.reviewTable.SetName(f"{result['volume'].GetName()} regions")
+        self._showTable()
+
+    def _showTable(self):
+        if self.reviewTable is None:
+            return
+        selection = slicer.app.applicationLogic().GetSelectionNode()
+        selection.SetActiveTableID(self.reviewTable.GetID())
+        slicer.app.applicationLogic().PropagateTableSelection()
+
+    # display
+    @staticmethod
+    def _rgbOf(label):
+        """256 x 3 RGB (0..1) of a color map of colormaps.LABELS."""
+        colors = colortables.table(label)
+        if colors is not None:
+            return colors
+        node = colormaps.colorNodeForLabel(label)
+        lookup = node.GetScalarsToColors() if node is not None else None
+        if lookup is None:
+            return np.tile(np.linspace(0, 1, 256)[:, None], (1, 3))
+        low, high = lookup.GetRange()
+        return np.array([lookup.GetColor(low + (high - low) * i / 255.0) for i in range(256)], dtype=float)
+
+    def _scoreColorNode(self):
+        scene = slicer.mrmlScene
+        node = scene.GetFirstNodeByName(SCORE_COLOR_NODE)
+        if node is None or not node.IsA("vtkMRMLColorTableNode"):
+            node = scene.CreateNodeByClass("vtkMRMLColorTableNode")
+            node.UnRegister(None)
+            node.SetName(SCORE_COLOR_NODE)
+            node.SetTypeToUser()
+            node.SetNumberOfColors(256)
+            node.SetHideFromEditors(False)
+            scene.AddNode(node)
+        rgba = nr.scoreColors(self._rgbOf(self.scoreColorCombo.currentText), self._rgbOf(SCORE_HYPER_COLORMAP),
+                              self.scoreThresholdSpin.value, self.scoreMaximumSpin.value, self.hypoOnlyCheck.checked)
+        for i, (r, g, b, a) in enumerate(rgba):
+            node.SetColor(i, f"{i}", float(r), float(g), float(b), float(a))
+        return node
+
+    def _applyScoreDisplay(self):
+        if self.scoreNode is None or not slicer.mrmlScene.IsNodePresent(self.scoreNode):
+            return
+        display = self.scoreNode.GetDisplayNode()
+        if display is None:
+            self.scoreNode.CreateDefaultDisplayNodes()
+            display = self.scoreNode.GetDisplayNode()
+        maximum = float(self.scoreMaximumSpin.value)
+        display.SetAndObserveColorNodeID(self._scoreColorNode().GetID())
+        display.SetAutoWindowLevel(False)
+        display.SetWindowLevelMinMax(-maximum, maximum)
+
+    def _initPetWindow(self):
+        volume = self.volume()
+        if volume is None:
+            return
+        low, high = _percentiles(volume, 0.0, 99.5)
+        top = float(np.nanmax(slicer.util.arrayFromVolume(volume)))
+        self.petWindowRange.blockSignals(True)
+        self.petWindowRange.minimum = min(0.0, low)
+        self.petWindowRange.maximum = max(top, high)
+        self.petWindowRange.singleStep = max(high / 200.0, 0.001)
+        self.petWindowRange.setValues(max(0.0, low), high)
+        self.petWindowRange.blockSignals(False)
+        self._applyPetDisplay()
+
+    def _applyPetDisplay(self):
+        volume = self.volume()
+        if volume is None or self.current != STEP_REVIEW and self.reviewResult is None:
+            return
+        display = volume.GetDisplayNode()
+        if display is None:
+            volume.CreateDefaultDisplayNodes()
+            display = volume.GetDisplayNode()
+        display.SetAndObserveColorNodeID(colormaps.colorNodeForLabel(self.petColorCombo.currentText).GetID())
+        display.SetAutoWindowLevel(False)
+        low, high = self.petWindowRange.minimumValue, self.petWindowRange.maximumValue
+        display.SetWindowLevelMinMax(low, max(high, low + 1e-6))
+        fused = self._fusionVolume() is not None
+        display.SetApplyThreshold(fused)
+        if fused:
+            display.SetLowerThreshold(low + 0.02 * (high - low))
+            display.SetUpperThreshold(float(self.petWindowRange.maximum) * 10.0 + 1.0)
+
+    def _onFusionChanged(self):
+        anatomy = self._fusionVolume()
+        if anatomy is not None and getattr(self, "_anatomyWindowFor", None) is not anatomy:
+            self._anatomyWindowFor = anatomy
+            low, high = _percentiles(anatomy, 1.0, 99.5)
+            self.anatomyWindowRange.blockSignals(True)
+            self.anatomyWindowRange.minimum = min(low, 0.0)
+            self.anatomyWindowRange.maximum = high * 1.5 if high > 0 else high + 1.0
+            self.anatomyWindowRange.setValues(low, high)
+            self.anatomyWindowRange.blockSignals(False)
+            self._applyAnatomyDisplay()
+        self._applyPetDisplay()
+        self._assignReviewViews()
+
+    def _applyAnatomyDisplay(self):
+        anatomy = self._fusionVolume()
+        if anatomy is None:
+            return
+        display = anatomy.GetDisplayNode()
+        if display is None:
+            anatomy.CreateDefaultDisplayNodes()
+            display = anatomy.GetDisplayNode()
+        display.SetAndObserveColorNodeID("vtkMRMLColorTableNodeGrey")
+        display.SetAutoWindowLevel(False)
+        display.SetWindowLevelMinMax(self.anatomyWindowRange.minimumValue, self.anatomyWindowRange.maximumValue)
+
+    # layout and views
+    def _enterReviewViews(self):
+        if self.volume() is None:
+            return
+        layoutManager = slicer.app.layoutManager()
+        if layoutManager is None:
+            return
+        layoutNode = layoutManager.layoutLogic().GetLayoutNode()
+        if layoutNode.IsLayoutDescription(nr.LAYOUT_ID):
+            if layoutManager.layout != nr.LAYOUT_ID:
+                layoutNode.SetLayoutDescription(nr.LAYOUT_ID, nr.layoutXml())
+        else:
+            layoutNode.AddLayoutDescription(nr.LAYOUT_ID, nr.layoutXml())
+        if layoutManager.layout != nr.LAYOUT_ID:
+            self._reviewPreviousLayout = layoutManager.layout
+            layoutManager.setLayout(nr.LAYOUT_ID)
+            slicer.app.processEvents()
+        if self.reviewResult is None:
+            self._initPetWindow()
+        self._assignReviewViews(fit=True)
+        self._showTable()
+
+    def _exitReviewViews(self):
+        self._restoreSegmentationDisplay()
+        layoutManager = slicer.app.layoutManager()
+        if layoutManager is not None and layoutManager.layout == nr.LAYOUT_ID and self._reviewPreviousLayout is not None:
+            layoutManager.setLayout(self._reviewPreviousLayout)
+        self._reviewPreviousLayout = None
+
+    def _reviewSliceWidgets(self):
+        layoutManager = slicer.app.layoutManager()
+        out = []
+        for row in (nr.PET_ROW, nr.SCORE_ROW):
+            for orientation, _ in nr.ORIENTATIONS:
+                widget = layoutManager.sliceWidget(nr.sliceViewName(row, orientation)) if layoutManager else None
+                if widget is not None:
+                    out.append((row, widget))
+        return out
+
+    def _assignReviewViews(self, fit=False):
+        layoutManager = slicer.app.layoutManager()
+        if layoutManager is None or layoutManager.layout != nr.LAYOUT_ID:
+            return
+        pet = self.volume()
+        anatomy = self._fusionVolume()
+        score = self.scoreNode if self.scoreNode is not None and slicer.mrmlScene.IsNodePresent(self.scoreNode) \
+            else None
+        petViews = []
+        for row, widget in self._reviewSliceWidgets():
+            composite = widget.mrmlSliceCompositeNode()
+            linked = composite.GetLinkedControl()
+            composite.SetLinkedControl(False)
+            top = pet if row == nr.PET_ROW else score
+            if anatomy is not None:
+                background, foreground = anatomy, top
+                opacity = float(self.fusionOpacity.value) if row == nr.PET_ROW else 1.0
+            else:
+                background, foreground, opacity = top, None, 0.0
+            composite.SetBackgroundVolumeID(background.GetID() if background is not None else None)
+            composite.SetForegroundVolumeID(foreground.GetID() if foreground is not None else None)
+            composite.SetForegroundOpacity(opacity)
+            composite.SetLabelVolumeID(None)
+            composite.SetLinkedControl(linked)
+            if row == nr.PET_ROW:
+                petViews.append(widget.mrmlSliceNode().GetID())
+            if fit:
+                widget.sliceLogic().FitSliceToAll()
+        self._outlineSegmentation(petViews)
+
+    def _outlineSegmentation(self, viewIds):
+        """The regions as outlines (no fill) in the PET row only; the earlier display restored on leaving."""
+        segmentation = self.node("Segmentation")
+        display = segmentation.GetDisplayNode() if segmentation is not None else None
+        if display is None or not viewIds:
+            return
+        if self._segmentationDisplay is None or self._segmentationDisplay[0] is not display:
+            self._restoreSegmentationDisplay()
+            self._segmentationDisplay = (display, [display.GetNthViewNodeID(i) for i in
+                                                   range(display.GetNumberOfViewNodeIDs())],
+                                         display.GetVisibility2DFill(), display.GetVisibility2DOutline())
+        display.SetVisibility(True)
+        display.SetVisibility2DFill(False)
+        display.SetVisibility2DOutline(True)
+        display.RemoveAllViewNodeIDs()
+        for viewId in viewIds:
+            display.AddViewNodeID(viewId)
+
+    def _restoreSegmentationDisplay(self):
+        saved, self._segmentationDisplay = self._segmentationDisplay, None
+        if saved is None:
+            return
+        display, viewIds, fill, outline = saved
+        if not slicer.mrmlScene.IsNodePresent(display):
+            return
+        display.RemoveAllViewNodeIDs()
+        for viewId in viewIds:
+            display.AddViewNodeID(viewId)
+        display.SetVisibility2DFill(fill)
+        display.SetVisibility2DOutline(outline)
 
     def _fillAddDatabases(self):
         if not hasattr(self, "addDbCombo"):
@@ -1515,20 +2241,7 @@ class StaticNeuroPETWidget(DynamicNeuroPETWidget):
         segmentation = self.node("Segmentation")
         header = self._header(self._database())
         age, sex = self.logic.ageAndSex(volume)
-        lines = ["<b>Coming next</b>: the comparison of the patient with the normal database (regional values and "
-                 "voxel z-scores against the mean and SD maps of the patient's age group).", ""]
-        lines.append(f"Image: {volume.GetName() if volume else 'none'}"
-                     + (" (normalized)" if volume is not None and volume.GetAttribute(NEURO_PREFIX + "Template")
-                        else ""))
-        lines.append("Age: " + (f"{age:g}" if age is not None else "unknown") + ", sex: "
-                     + (dict(sn.SEXES).get(sex) if sex else "unknown"))
-        lines.append(f"Regions: {segmentation.GetName() if segmentation else 'not loaded'}")
-        if header is not None:
-            group = normaldb.ageGroupOf(age, header.get("ageGroups") or []) if header.get("ageStratified") else None
-            lines.append(f"Database: {header['name']}" + (f", age group {group}" if group else ""))
-        else:
-            lines.append("No database: the review will give the regional values (SUV) only.")
-        self.reviewLabel.text = "<br>".join(lines)
+        self._updateReviewInfo(volume, segmentation, header, age, sex)
         if hasattr(self, "subjectIdEdit"):
             key = volume.GetID() if volume is not None else ""
             if getattr(self, "_subjectIdFor", None) != key:
@@ -1617,6 +2330,12 @@ class StaticNeuroPETWidget(DynamicNeuroPETWidget):
             elif method == "enter" and self.regResult is not None:
                 self._openRegSession()
             return
+        if key == STEP_REVIEW:
+            if method == "exit":
+                self._exitReviewViews()
+            elif method == "enter" and self.node("Segmentation") is not None:
+                self._enterReviewViews()
+            return
         DynamicNeuroPETWidget._callStep(self, key, method)
 
     def pendingHarden(self, key):
@@ -1651,6 +2370,8 @@ class StaticNeuroPETWidget(DynamicNeuroPETWidget):
 
     def cleanup(self):
         self._closeRegSession()
+        if getattr(self, "current", None) == STEP_REVIEW:
+            self._exitReviewViews()
         DynamicNeuroPETWidget.cleanup(self)
 
     def onSceneClose(self, caller, event):
@@ -1659,6 +2380,11 @@ class StaticNeuroPETWidget(DynamicNeuroPETWidget):
         self.regResult = None
         self.regUndo = None
         self._databaseKey = None
+        self.reviewResult = self.scoreNode = self.reviewTable = None
+        self._segmentationDisplay = None
+        self._anatomyWindowFor = None
+        if hasattr(self, "compareLabel"):
+            self.compareLabel.text = ""
         if hasattr(self, "regLabel"):
             self.regLabel.text = "Not registered."
 
@@ -1675,6 +2401,57 @@ class StaticNeuroPETTest(ScriptedLoadableModuleTest):
         self.test_ImportAndHarden()
         self.setUp()
         self.test_Widget()
+        self.setUp()
+        self.test_Review()
+
+    def test_Review(self):
+        """The comparison with a (predefined, SUV) database: voxel z, regional values (approximate)."""
+        import tempfile
+        self.delayDisplay("Static Neuro: review")
+        logic = StaticNeuroPETLogic()
+        patient = np.full((10, 10, 10), 5.0, dtype=np.float32)
+        patient[:, :, :5] = 3.0                         # region A below the normals
+        volume = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLScalarVolumeNode", "patient")
+        slicer.util.updateVolumeFromArray(volume, patient)
+        labels = np.zeros((10, 10, 10), dtype=np.int16)
+        labels[2:8, 2:8, 1:5] = 1
+        labels[2:8, 2:8, 5:9] = 2
+        labels[0, 0, 0] = 3
+        labelNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLLabelMapVolumeNode", "labels")
+        slicer.util.updateVolumeFromArray(labelNode, labels)
+        segmentation = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLSegmentationNode", "regions")
+        slicer.modules.segmentations.logic().ImportLabelmapToSegmentationNode(labelNode, segmentation)
+        ids = logic.segmentIds(segmentation)
+        for segmentId, name in zip(ids, ("A", "B", "Optic Chiasm")):
+            segmentation.GetSegmentation().GetSegment(segmentId).SetName(name)
+        self.assertEqual(logic.dropSegments(segmentation), ["Optic Chiasm"])
+        # without a database: the SUV of the regions
+        plain = logic.reviewData(volume, segmentation)
+        self.assertAlmostEqual(plain["suv"]["A"], 3.0, places=4)
+        self.assertIsNone(plain["z"])
+        # a predefined SUV database: mean 5, SD 1
+        root = tempfile.mkdtemp()
+        header = normaldb.newHeader("review test", kind=normaldb.PREDEFINED, nuclide="F-18", tracer="FDG",
+                                    mapType=normaldb.MAP_SUV)
+        folder = normaldb.createDatabase(root, header)
+        mapNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLScalarVolumeNode", "map")
+        for which, value in (("mean", 5.0), ("sd", 1.0)):
+            slicer.util.updateVolumeFromArray(mapNode, np.full((10, 10, 10), value, dtype=np.float32))
+            self.assertTrue(slicer.util.saveNode(mapNode, os.path.join(folder, normaldb.statsFileName(
+                normaldb.MASTER, which, ".nrrd"))))
+        header["statistics"] = {"computed": normaldb.now(), "stale": False, "groups": {normaldb.MASTER: {
+            "name": normaldb.MASTER_TITLE, "n": 10, "mean": normaldb.statsFileName(normaldb.MASTER, "mean", ".nrrd"),
+            "sd": normaldb.statsFileName(normaldb.MASTER, "sd", ".nrrd")}}}
+        normaldb.writeHeader(folder, header)
+        result = logic.reviewData(volume, segmentation, folder, normaldb.readHeader(folder))
+        z = result["z"]
+        self.assertAlmostEqual(float(z[5, 5, 2]), 2.0, places=3)        # (5 - 3) / 1
+        self.assertAlmostEqual(float(z[5, 5, 7]), 0.0, places=3)
+        self.assertAlmostEqual(result["reference"]["A"][0], 5.0, places=4)
+        self.assertTrue(any("approximated" in note for note in result["notes"]))
+        rows = nr.tableRows(result["values"], result["suv"], result["reference"], nr.SCORE_Z)
+        self.assertAlmostEqual(dict((r[0], r[-1]) for r in rows)["A"], 2.0, places=3)
+        self.delayDisplay("Review passed")
 
     def test_ImportAndHarden(self):
         import tempfile

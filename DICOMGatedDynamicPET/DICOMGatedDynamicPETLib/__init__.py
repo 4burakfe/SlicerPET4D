@@ -23,6 +23,9 @@
                 CerebrA labels (left / right and bilateral) (numpy only)
     normaldb    Neuro PET Database Manager: normal database folders (database.json, subjects, mean / SD maps), age
                 groups, predefined databases and their .zip packages (numpy only)
+    neuroreview Static Neuro Review: voxel z / Crawford-Howell t maps in a mask with an SD floor, regional normal
+                statistics (database, on the fly with a cache, approximate), score colours, the review layout
+                (numpy only)
     hardendialog    Harden dialog (grid, voxel size, resample method, overwrite / save separately) (Qt)
     colortables     color tables shared with the Tarvos (MPI) extension (numpy only)
     colormaps       Review/Edit color maps as Slicer color nodes ("MPI <label>", shared with Tarvos)

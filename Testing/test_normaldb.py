@@ -140,6 +140,15 @@ def test_export_import(tmp_path):
     assert ih["name"] == "mine copy" and ih["kind"] == normaldb.PREDEFINED
     assert normaldb.subjectCount(imported, ih) == 2
     assert open(os.path.join(imported, "stats", "master_mean.nii.gz"), "rb").read() == b"mean"
+    # the regional statistics go with the maps; a missing file is dropped from the header
+    h["statistics"]["regions"] = "stats/regions.json"
+    normaldb.writeHeader(folder, h)
+    normaldb.exportPredefined(folder, str(tmp_path / "noregions.zip"))
+    assert "regions" not in normaldb.readPackage(str(tmp_path / "noregions.zip"))["statistics"]
+    (root / "mine" / "stats" / "regions.json").write_text("{}")
+    normaldb.exportPredefined(folder, str(tmp_path / "regions.zip"))
+    with zipfile.ZipFile(str(tmp_path / "regions.zip")) as archive:
+        assert "mine/stats/regions.json" in archive.namelist()
 
 
 def test_import_refuses_unsafe_paths(tmp_path):

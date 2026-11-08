@@ -23,6 +23,7 @@ set(MODULE_PYTHON_SCRIPTS
   ${MODULE_NAME}Lib/kinetics.py
   ${MODULE_NAME}Lib/tacplot.py
   ${MODULE_NAME}Lib/neuro.py
+  ${MODULE_NAME}Lib/neuroreview.py
   ${MODULE_NAME}Lib/normaldb.py
   ${MODULE_NAME}Lib/staticneuro.py
   )

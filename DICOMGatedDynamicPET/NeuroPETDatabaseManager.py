@@ -35,6 +35,8 @@ if globals().get("__file__") and _MODULE_DIR not in sys.path:
     sys.path.insert(0, _MODULE_DIR)
 
 from DICOMGatedDynamicPETLib import dynamicviews, neuro, normaldb  # noqa: E402
+from DICOMGatedDynamicPETLib import neuroreview as nr  # noqa: E402
+from DICOMGatedDynamicPETLib import staticneuro as sn  # noqa: E402
 
 SETTINGS_ROOT = "DICOMGatedDynamicPET/NeuroDatabase/RootFolder"
 SETTINGS_ATLAS_FOLDER = "DICOMGatedDynamicPET/Neuro/AtlasFolder"     # shared with Dynamic Neuro Receptor PET
@@ -307,6 +309,10 @@ class NeuroPETDatabaseManagerLogic(ScriptedLoadableModuleLogic):
             for subjectId in group["ids"]:
                 membership.setdefault(subjectId, []).append(key)
         fwhm = float(header.get("smoothingFwhmMm") or 0)
+        masks, regionNote = self._regionMasks(folder, header)
+        if regionNote:
+            notes.append(regionNote)
+        regionValues = {}
         geometry = None
         for index, subject in enumerate(subjects):
             if progress is not None and not progress(index, len(subjects), f"{subject['id']} ({index + 1} / "
@@ -324,6 +330,12 @@ class NeuroPETDatabaseManagerLogic(ScriptedLoadableModuleLogic):
                 node.GetIJKToRASMatrix(matrix)
                 if geometry is None:
                     geometry = matrix
+                if masks:
+                    try:
+                        regionValues[subject["id"]] = nr.regionMeans(slicer.util.arrayFromVolume(node), masks)
+                    except ValueError as error:
+                        notes.append(f"No regional statistics: {error}")
+                        masks = None
                 smoothed = normaldb.smoothMap(slicer.util.arrayFromVolume(node), fwhm,
                                               tuple(float(x) for x in node.GetSpacing())[::-1])
                 for key in membership.get(subject["id"], []):
@@ -358,10 +370,41 @@ class NeuroPETDatabaseManagerLogic(ScriptedLoadableModuleLogic):
             header["version"] = int(header.get("version") or 1) + 1
         header["statistics"] = {"computed": normaldb.now(), "stale": False, "groups": written,
                                 "smoothingFwhmMm": fwhm, "maps": mapKey}
+        regionsFile = os.path.join(folder, nr.REGIONS_FILE)
+        if masks and regionValues:
+            statistics = nr.regionStatistics(regionValues, groups)
+            settings = {k: v for k, v in sn.regionSettings(folder, header).items() if k != "referenceMaskPath"}
+            nr.writeJson(regionsFile, nr.regionsDocument(statistics, mapKey, header.get("version", 1), settings,
+                                                         nr.masksSignature(masks)))
+            header["statistics"]["regions"] = nr.REGIONS_FILE
+        elif os.path.isfile(regionsFile):
+            os.remove(regionsFile)
         header["subjectAges"] = normaldb.ageSummary(s.get("age") for s in subjects)
         normaldb.writeHeader(folder, header)
         self.forgetLoaded(folder)
         return header, notes
+
+    def _regionMasks(self, folder, header):
+        """(masks {region: boolean array} on the subjects' grid, note) of the database's regions (its region
+        settings, the CerebrA of the atlas folder) for the regional statistics; (None, why) when they cannot be
+        made."""
+        from StaticNeuroPET import StaticNeuroPETLogic
+        atlas = neuro.findAtlasFiles(self.atlasFolder())
+        if neuro.CEREBRA_LABELS not in atlas or neuro.CEREBRA_CSV not in atlas:
+            return None, ("No regional statistics: the CerebrA labels are not in the atlas folder (set it in the Static "
+                          "Neuro PET/SPECT module).")
+        gridPath = sn.referenceMaskPath(folder, header) or atlas.get(neuro.BRAIN_MASK)
+        if not gridPath:
+            return None, "No regional statistics: no reference mask or MNI brain mask for the grid."
+        logic = StaticNeuroPETLogic()
+        gridNode = slicer.util.loadLabelVolume(gridPath, {"show": False})
+        try:
+            return logic.databaseRegionMasks(atlas, folder, header, gridNode), None
+        except Exception as error:
+            logging.exception("Neuro DB: could not make the regions")
+            return None, f"No regional statistics: the regions could not be made ({error})."
+        finally:
+            slicer.mrmlScene.RemoveNode(gridNode)
 
     def createUserDefined(self, root, header, atlasFolder, customMask=None):
         """New empty user defined database with its reference mask. Returns the folder."""
@@ -995,6 +1038,8 @@ class NeuroPETDatabaseManagerWidget(ScriptedLoadableModuleWidget):
         groups = ((header.get("statistics") or {}).get("groups") or {})
         if groups:
             rows.append(("Mean / SD", "; ".join(f"{g.get('name', k)}: n={g.get('n')}" for k, g in groups.items())))
+            rows.append(("Regional statistics", "yes (stats/regions.json)" if nr.regionsPath(folder, header) else
+                         "no (computed with the mean / SD when the CerebrA is in the atlas folder)"))
         ages = header.get("subjectAges")
         if ages and ages.get("n"):
             rows.append(("Ages", f"{ages.get('mean')} ± {ages.get('sd')} ({ages.get('min')}-{ages.get('max')})"))
