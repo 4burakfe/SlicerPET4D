@@ -68,30 +68,29 @@ def test_surface_colors():
     assert ssp.surfaceColors(red, 0, 1, 4).shape == (4, 4)
 
 
-def test_hemispheres_and_parts():
-    ijkToRas = np.diag([1.0, 1.0, 1.0, 1.0])
-    ijkToRas[0, 3] = -2.0                       # x = i - 2
-    left, right = ssp.hemispheres((2, 3, 4), ijkToRas)
-    assert left[0, 0].tolist() == [True, True, False, False]
-    assert (left ^ right).all()
-    tri = {"points": np.zeros((3, 3)), "normals": np.ones((3, 3)), "triangles": np.array([[0, 1, 2]])}
-    whole = ssp.combine(tri, tri, None)
-    assert whole["parts"].tolist() == [0, 0, 0, 1, 1, 1]
-    assert whole["triangles"].tolist() == [[0, 1, 2], [3, 4, 5]]
-    assert ssp.hasPart(whole, ssp.PART_LEFT) and not ssp.hasPart(whole, ssp.PART_RIGHT)
-    piece, index = ssp.piece(whole, ssp.PART_LEFT)
-    assert index.tolist() == [3, 4, 5] and piece["triangles"].tolist() == [[0, 1, 2]]
-    assert not ssp.hasPart(tri, ssp.PART_LEFT) and ssp.parts(tri).tolist() == [0, 0, 0]
-    assert ssp.viewPart("LeftMedial") == ssp.PART_LEFT and ssp.viewPart("Top") == ssp.PART_BRAIN
+def _withParts():
+    """A surface as made for the (dropped) medial views: the brain's triangle, then a left hemisphere's."""
+    points = np.arange(18, dtype=float).reshape(6, 3)
+    return {"points": points, "normals": np.ones((6, 3)), "triangles": np.array([[0, 1, 2], [3, 4, 5]]),
+            "parts": np.array([0, 0, 0, 1, 1, 1], dtype=np.int8)}
+
+
+def test_brain_part():
+    whole = _withParts()
+    brain, index = ssp.brainPart(whole)
+    assert index.tolist() == [0, 1, 2] and brain["triangles"].tolist() == [[0, 1, 2]]
+    assert np.allclose(brain["points"], whole["points"][:3])
+    plain = {"points": np.zeros((3, 3)), "normals": np.ones((3, 3)), "triangles": np.array([[0, 1, 2]])}
+    same, index = ssp.brainPart(plain)
+    assert same is plain and index.tolist() == [0, 1, 2]
+    assert ssp.hasPart(whole, ssp.PART_LEFT) and not ssp.hasPart(plain, ssp.PART_LEFT)
 
 
 def test_parts_roundtrip(tmp_path):
-    tri = {"points": np.zeros((3, 3)), "normals": np.ones((3, 3)), "triangles": np.array([[0, 1, 2]])}
-    whole = ssp.combine(tri, tri, tri)
     path = str(tmp_path / "s.npz")
-    ssp.write(path, whole, {}, {"maps": "suvr"})
+    ssp.write(path, _withParts(), {}, {"maps": "suvr"})
     surface, _, _ = ssp.read(path)
-    assert surface["parts"].tolist() == [0, 0, 0, 1, 1, 1, 2, 2, 2]
+    assert surface["parts"].tolist() == [0, 0, 0, 1, 1, 1]
 
 
 def test_pan_sync():

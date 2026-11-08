@@ -337,9 +337,9 @@ ORIENTATIONS = (("Axial", "#F34A33"), ("Coronal", "#6EB04B"), ("Sagittal", "#EDD
 PET_ROW, SCORE_ROW = "PET", "Score"
 VIEW_PREFIX = "NeuroRev"
 VIEW_GROUP = 93
-SSP_VIEWS = (("Top", "Superior"), ("Ant", "Anterior"), ("Left", "Left"), ("LeftMedial", "Left medial"),
-             ("Bottom", "Inferior"), ("Post", "Posterior"), ("Right", "Right"), ("RightMedial", "Right medial"))
-SSP_COLUMNS = 4
+SSP_VIEWS = (("Top", "Superior"), ("Ant", "Anterior"), ("Left", "Left"),
+             ("Bottom", "Inferior"), ("Post", "Posterior"), ("Right", "Right"))
+SSP_COLUMNS = 3
 TABLE_VIEW = VIEW_PREFIX + "Table"
 
 
