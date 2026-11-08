@@ -307,3 +307,61 @@ def test_edit_header(tmp_path):
     other = normaldb.createDatabase(str(tmp_path), header(name="other"))
     with pytest.raises(ValueError, match="already exists"):
         normaldb.renameDatabase(other, str(tmp_path), "db two")
+
+
+def test_statistics_helpers(tmp_path):
+    h = header(ageStratified=True, ageGroups=GROUPS)
+    subjects = [{"id": "a", "age": "25"}, {"id": "b", "age": "45"}, {"id": "c", "age": ""}, {"id": "d", "age": "70"}]
+    groups = normaldb.statisticsGroups(h, subjects)
+    assert groups[normaldb.MASTER]["ids"] == ["a", "b", "c", "d"]
+    assert sum(len(g["ids"]) for k, g in groups.items() if k != normaldb.MASTER) == 3
+    assert list(normaldb.statisticsGroups(header(), subjects)) == [normaldb.MASTER]
+    assert normaldb.subjectMapKey(header()) == "suvrFile"
+    assert normaldb.subjectMapKey(header(mapType=normaldb.MAP_SUV)) == "suvFile"
+    rng = np.random.default_rng(1)
+    maps = [rng.random((4, 5, 6)).astype(np.float32) for _ in range(5)]
+    stats = normaldb.RunningStatistics()
+    for m in maps:
+        stats.add(m)
+    assert np.allclose(stats.mean(), np.mean(maps, axis=0), atol=1e-6)
+    assert np.allclose(stats.sd(), np.std(maps, axis=0, ddof=1), atol=1e-5)
+    with pytest.raises(ValueError):
+        stats.add(np.zeros((2, 2, 2)))
+    one = normaldb.RunningStatistics()
+    one.add(maps[0])
+    with pytest.raises(ValueError):
+        one.sd()
+    sigma = normaldb.gaussianSigmas(8.0, (2.0, 1.0, 1.0))
+    assert abs(sigma[1] - 8.0 / 2.3548) < 1e-3 and abs(sigma[0] - sigma[1] / 2) < 1e-6
+    point = np.zeros((41, 41, 41), dtype=np.float32)
+    point[20, 20, 20] = 1.0
+    smooth = normaldb.smoothMap(point, 8.0, (1.0, 1.0, 1.0))
+    assert abs(float(smooth.sum()) - 1.0) < 1e-3 and smooth[20, 20, 20] < 0.01
+    assert normaldb.smoothMap(point, 0, (1, 1, 1))[20, 20, 20] == 1
+    assert normaldb.templatePath(str(tmp_path), header()) is None
+    (tmp_path / normaldb.TEMPLATE_NAME).write_bytes(b"t")
+    assert normaldb.templatePath(str(tmp_path), header(normalizationTemplate={"file": normaldb.TEMPLATE_NAME}))
+
+
+def test_freeze_template(tmp_path):
+    folder = normaldb.createDatabase(str(tmp_path), header(name="db", normalization={"method": "pet",
+                                                                                     "template": "pseudoPET"}))
+    with pytest.raises(ValueError, match="mean"):
+        normaldb.freezeTemplate(folder)
+    h = normaldb.readHeader(folder)
+    relative = normaldb.statsFileName(normaldb.MASTER, "mean")
+    with open(os.path.join(folder, relative), "wb") as f:
+        f.write(b"mean1")
+    h["statistics"] = {"computed": "2026-11-08T10:00:00", "stale": False,
+                       "groups": {normaldb.MASTER: {"name": "Master", "n": 100, "mean": relative, "sd": ""}}}
+    normaldb.writeHeader(folder, h)
+    h = normaldb.freezeTemplate(folder)
+    assert h["normalization"]["method"] == "petTemplate" and h["normalization"]["template"] == ""
+    assert h["normalizationTemplate"]["iteration"] == 1 and h["normalizationTemplate"]["n"] == 100
+    path = normaldb.templatePath(folder, h)
+    assert open(path, "rb").read() == b"mean1"
+    with open(os.path.join(folder, relative), "wb") as f:
+        f.write(b"mean2")
+    assert open(path, "rb").read() == b"mean1"            # frozen
+    assert normaldb.freezeTemplate(folder)["normalizationTemplate"]["iteration"] == 2
+    assert open(path, "rb").read() == b"mean2"

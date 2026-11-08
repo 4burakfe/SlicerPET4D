@@ -362,6 +362,8 @@ def newHeader(name, mode=STATIC, kind=USER_DEFINED, **fields):
         "scanner": "",
         "description": "",
         "statistics": {"computed": None, "stale": False, "groups": {}},
+        # a mean map frozen as the template of the PET to PET normalization: {"file", "made", "fromVersion", "n"}
+        "normalizationTemplate": {},
     }
     for key, value in fields.items():
         if key not in header:
@@ -695,6 +697,103 @@ def summary(folder, header):
     }
 
 
+TEMPLATE_NAME = "template.nii.gz"
+
+
+def subjectMapKey(header):
+    """Column of subjects.csv whose maps the mean / SD are made of: the ratio maps (SUVR / Ratio) or the SUV /
+    count maps, by the database's map type."""
+    return "suvrFile" if header.get("mapType") in (MAP_SUVR, MAP_RATIO) else "suvFile"
+
+
+def statisticsGroups(header, subjects):
+    """{key: {"name", "ids"}} of the mean / SD maps to make: the master (all subjects) and, when age stratified, each
+    age group (subjects without an age go into the master only)."""
+    groups = {MASTER: {"name": MASTER_TITLE, "ids": [s["id"] for s in subjects]}}
+    if header.get("ageStratified"):
+        for group in header.get("ageGroups") or []:
+            groups[groupKey(group["name"])] = {"name": group["name"], "ids": []}
+        for subject in subjects:
+            try:
+                age = float(subject.get("age")) if str(subject.get("age") or "").strip() else None
+            except ValueError:
+                age = None
+            name = ageGroupOf(age, header.get("ageGroups") or [])
+            if name is not None:
+                groups[groupKey(name)]["ids"].append(subject["id"])
+    return groups
+
+
+def gaussianSigmas(fwhmMm, spacing):
+    """Gaussian sigma in voxels of each axis for a FWHM in mm (spacing of the same axes)."""
+    return tuple(float(fwhmMm) / (2.0 * np.sqrt(2.0 * np.log(2.0))) / float(s) for s in spacing)
+
+
+def smoothMap(array, fwhmMm, spacing):
+    """Gaussian smoothing of a map (FWHM in mm; spacing in mm of the array's axes); NaN taken as 0."""
+    array = np.nan_to_num(np.asarray(array, dtype=np.float32))
+    if not fwhmMm or fwhmMm <= 0:
+        return array
+    from scipy import ndimage
+    return ndimage.gaussian_filter(array, gaussianSigmas(fwhmMm, spacing), mode="constant").astype(np.float32)
+
+
+class RunningStatistics:
+    """Mean and SD (n - 1) of maps added one at a time, without keeping them all in memory."""
+
+    def __init__(self):
+        self.n = 0
+        self.total = None
+        self.squares = None
+
+    def add(self, array):
+        array = np.asarray(array, dtype=np.float64)
+        if self.total is None:
+            self.total, self.squares = np.zeros_like(array), np.zeros_like(array)
+        elif array.shape != self.total.shape:
+            raise ValueError(f"A map of shape {array.shape} does not fit the others {self.total.shape}.")
+        self.total += array
+        self.squares += array * array
+        self.n += 1
+
+    def mean(self):
+        return (self.total / self.n).astype(np.float32)
+
+    def sd(self):
+        if self.n < 2:
+            raise ValueError("The SD needs at least two subjects.")
+        variance = (self.squares - self.total * self.total / self.n) / (self.n - 1)
+        return np.sqrt(np.clip(variance, 0, None)).astype(np.float32)
+
+
+def templatePath(folder, header):
+    """The frozen normalization template of a database (normalizationTemplate), None when there is none."""
+    relative = (header.get("normalizationTemplate") or {}).get("file")
+    path = os.path.join(folder, relative) if relative else ""
+    return path if path and os.path.isfile(path) else None
+
+
+def freezeTemplate(folder):
+    """Copy the master mean map of a database as its normalization template (template.<ext>) and make PET to PET its
+    normalization method: the subjects and the patients are then normalized to this fixed map, which does not
+    change when the statistics are computed again (freeze again for the next iteration). Returns the header."""
+    header = readHeader(folder)
+    master = ((header.get("statistics") or {}).get("groups") or {}).get(MASTER) or {}
+    source = os.path.join(folder, master["mean"]) if master.get("mean") else ""
+    if not source or not os.path.isfile(source):
+        raise ValueError("The database has no master mean map: compute the mean / SD maps first.")
+    relative = "template" + (imageExtension(source) or ".nii.gz")
+    shutil.copyfile(source, os.path.join(folder, relative))
+    previous = header.get("normalizationTemplate") or {}
+    header["normalizationTemplate"] = {"file": relative, "made": now(), "fromVersion": header.get("version", 1),
+                                       "n": master.get("n"), "smoothingFwhmMm": header.get("smoothingFwhmMm"),
+                                       "iteration": int(previous.get("iteration") or 0) + 1}
+    header["normalization"] = dict(emptyNormalization(), **(header.get("normalization") or {}))
+    header["normalization"].update(method=NORM_PET_TEMPLATE, template="")
+    writeHeader(folder, header)
+    return header
+
+
 def statsFileName(key, which, extension=".nii.gz"):
     """stats/ file of a group: key MASTER or groupKey(name), which 'mean' or 'sd'."""
     return f"{STATS_DIR}/{key}_{which}{extension}"
@@ -770,6 +869,10 @@ def exportPredefined(folder, zipPath):
     exported["statistics"] = dict(stats, stale=False)
     base = safeName(header["name"])
     files = [header.get("referenceMask")] if header.get("referenceMask") else []
+    if templatePath(folder, header):
+        files.append(header["normalizationTemplate"]["file"])
+    elif header.get("normalizationTemplate"):
+        exported["normalizationTemplate"] = {}
     for group in stats["groups"].values():
         files.extend(group.get(w) for w in ("mean", "sd") if group.get(w))
     with zipfile.ZipFile(zipPath, "w", zipfile.ZIP_DEFLATED) as archive:

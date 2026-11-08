@@ -360,14 +360,17 @@ class StaticNeuroPETLogic(DynamicNeuroPETLogic):
     # --- batch: many normal subjects into a database ----------------------------------------------
     BATCH_COLUMNS = ("file", "id", "status", "message", "referenceMean", "seconds")
 
-    def batchPlan(self, header):
+    def batchPlan(self, header, folder=None):
         """(plan, registration settings) of a batch into the database: its normalization settings
-        (staticneuro.batchNormalization) and the registration settings they give."""
+        (staticneuro.batchNormalization; PET to PET when the database in folder has its template) and the registration
+        settings they give."""
+        hasTemplate = bool(folder) and bool(sn.petTemplatePath(folder, header))
         plan = sn.batchNormalization(header.get("normalization"), neuro.DEFAULT_TEMPLATE, NORMALIZATION_ENGINE,
                                      {reg.ENGINE_ITERATIVE: (NORMALIZATION_ITERATIVE_LINEAR,
                                                              NORMALIZATION_ITERATIVE_DEFORMABLE),
-                                      reg.ENGINE_BRAINSFIT: (NORMALIZATION_STEPS[0], "BSpline" in NORMALIZATION_STEPS)})
-        settings = self.defaultSettings(METHOD_PET)
+                                      reg.ENGINE_BRAINSFIT: (NORMALIZATION_STEPS[0], "BSpline" in NORMALIZATION_STEPS)},
+                                     hasTemplate)
+        settings = self.defaultSettings(plan["method"])
         if plan["engine"] == reg.ENGINE_ITERATIVE:
             settings.update(engine=reg.ENGINE_ITERATIVE, iterativeLinear=plan["linear"],
                             iterativeDeformable=plan["deformable"],
@@ -378,11 +381,12 @@ class StaticNeuroPETLogic(DynamicNeuroPETLogic):
                             resample=[NORMALIZATION_WORKING_MM > 0] * len(steps))
         return plan, settings
 
-    def batchAdd(self, folder, files, atlas, qc=True, progress=None):
+    def batchAdd(self, folder, files, atlas, qc=True, progress=None, replace=False):
         """Add BIDS PET files (staticneuro.findPetFiles) of normal subjects to a user defined database, one after the
-        other: each loaded, normalized to the MNI template with the database's normalization settings (no manual
-        check), resampled onto the template grid and added (logic.addSubject, the database's reference mask). IDs
-        already in the database are skipped; a subject that fails is logged and the batch goes on. qc: a PNG of the
+        other: each loaded, normalized to the MNI template (or the database's own template, PET to PET) with the
+        database's normalization settings (no manual check), resampled onto the template grid and added
+        (logic.addSubject, the database's reference mask). IDs already in the database are skipped (replace: normalized
+        again and replaced); a subject that fails is logged and the batch goes on. qc: a PNG of the
         normalized PET over the MNI T1 (3 slices) in <database>/qc/. progress(index, total, text) returns False to
         stop. The log is <database>/qc/batch_<time>.csv. Returns (rows, log path, stopped)."""
         header = normaldb.readHeader(folder)
@@ -391,14 +395,17 @@ class StaticNeuroPETLogic(DynamicNeuroPETLogic):
         gridPath = sn.referenceMaskPath(folder, header)
         if not gridPath:
             raise ValueError(f"'{header['name']}' has no reference mask (reference_mask in its folder).")
-        plan, settings = self.batchPlan(header)
-        key = plan["template"]
-        templatePath = atlas.get(key)
-        if not templatePath and key == neuro.PSEUDO_PET and neuro.canMakeTemplate(atlas, key):
-            templatePath = self.ensurePseudoPet(atlas)
-        if not templatePath:
-            raise ValueError(f"The template '{key}' of the database's normalization is not in the atlas folder.")
-        template = self.loadAtlasVolume(templatePath, name=f"MNI ICBM152 2009c {key}")
+        plan, settings = self.batchPlan(header, folder)
+        if plan["method"] == METHOD_PET_TEMPLATE:
+            template = self.loadAtlasVolume(sn.petTemplatePath(folder, header), name=f"{header['name']} template")
+        else:
+            key = plan["template"]
+            templatePath = atlas.get(key)
+            if not templatePath and key == neuro.PSEUDO_PET and neuro.canMakeTemplate(atlas, key):
+                templatePath = self.ensurePseudoPet(atlas)
+            if not templatePath:
+                raise ValueError(f"The template '{key}' of the database's normalization is not in the atlas folder.")
+            template = self.loadAtlasVolume(templatePath, name=f"MNI ICBM152 2009c {key}")
         mask = None
         if plan["brainMask"] and neuro.BRAIN_MASK in atlas:
             mask = self.loadAtlasVolume(atlas[neuro.BRAIN_MASK], name="MNI ICBM152 2009c brain mask")
@@ -417,14 +424,14 @@ class StaticNeuroPETLogic(DynamicNeuroPETLogic):
                 break
             row = {"file": path, "id": subjectId, "status": "", "message": "", "referenceMean": "", "seconds": ""}
             start = time.time()
-            if normaldb.hasSubject(folder, subjectId):
+            if normaldb.hasSubject(folder, subjectId) and not replace:
                 row.update(status="skipped", message="already in the database")
             else:
                 def stepProgress(step, steps, text, index=index, subjectId=subjectId):
                     return progress is None or progress(index, total, f"{subjectId} ({index + 1} / {total}): {text}")
                 try:
                     added = self._batchSubject(folder, header, path, subjectId, template, mask, settings, plan,
-                                               gridPath, anatomy, qcFolder, stepProgress)
+                                               gridPath, anatomy, qcFolder, stepProgress, replace)
                     if added is None:
                         row.update(status="stopped", message="stopped during the registration")
                         stopped = True
@@ -445,7 +452,7 @@ class StaticNeuroPETLogic(DynamicNeuroPETLogic):
         return rows, logPath, stopped
 
     def _batchSubject(self, folder, header, path, subjectId, template, mask, settings, plan, gridPath, anatomy,
-                      qcFolder, progress):
+                      qcFolder, progress, replace=False):
         """One subject of batchAdd(): the row added (with "notes"), None when the registration was stopped."""
         from DynamicPETRegistration import DynamicPETRegistrationLogic
         scene = slicer.mrmlScene
@@ -454,7 +461,8 @@ class StaticNeuroPETLogic(DynamicNeuroPETLogic):
             volume = self.loadFromFile(path)
             nodes.append(volume)
             notes = sn.unitWarnings(self.imageInfo(volume), header)
-            result = self.normalize(volume, template, METHOD_PET, None, settings, mask, progress)
+            method = plan["method"]
+            result = self.normalize(volume, template, method, None, settings, mask, progress)
             nodes.append(result.get("bspline"))
             if result.get("stopped") or not result.get("steps"):
                 return None
@@ -465,13 +473,13 @@ class StaticNeuroPETLogic(DynamicNeuroPETLogic):
                 chain.SetAndObserveTransformNodeID(result["bspline"].GetID())
             description = f"Normalized to {template.GetName()} ({reg.stepsText(result['steps'])}, batch)"
             _, normalized, _, _ = self.harden(volume, template, chain, reg.SAVE_SEPARATELY, reg.OUTPUT_FIXED_GRID,
-                                              None, "Linear", description, METHOD_PET)
+                                              None, "Linear", description, method)
             nodes.append(normalized)
             normalized.SetAttribute(NORMALIZATION_ATTRIBUTE, json.dumps(plan))
             age, sex = self.ageAndSex(normalized)
             if age is None:
                 notes.append("age not known")
-            row = self.addSubject(folder, header, normalized, subjectId, gridPath, age, sex, plan, False)
+            row = self.addSubject(folder, header, normalized, subjectId, gridPath, age, sex, plan, replace)
             if anatomy is not None:
                 try:
                     self.writeQcPicture(os.path.join(qcFolder, normaldb.safeName(subjectId) + "_qc.png"), normalized,
@@ -1049,12 +1057,15 @@ class StaticNeuroPETWidget(DynamicNeuroPETWidget):
         folder = self._database()
         header = self._header(folder)
         if header is None:
-            self.templateNote.text = "Pick a normal database above: its master mean map is the template."
-        elif not sn.masterMeanPath(folder, header):
-            self.templateNote.text = (f"'{header['name']}' has no master mean map yet (statistics not computed): pick "
-                                      "another method or database.")
+            self.templateNote.text = ("Pick a normal database above: its template (a mean map frozen as the "
+                                      "template, else its master mean map) is the template.")
+        elif not sn.petTemplatePath(folder, header):
+            self.templateNote.text = (f"'{header['name']}' has no template or master mean map yet (statistics not "
+                                      "computed): pick another method or database.")
         else:
-            self.templateNote.text = (f"Registered to the master mean map of '{header['name']}' (a "
+            frozen = normaldb.templatePath(folder, header)
+            self.templateNote.text = (f"Registered to the {'template' if frozen else 'master mean map'} of "
+                                      f"'{header['name']}' (a "
                                       f"{header.get('tracer') or header.get('nuclide') or ''} template in the MNI "
                                       "2009c space).")
 
@@ -1063,10 +1074,10 @@ class StaticNeuroPETWidget(DynamicNeuroPETWidget):
             return DynamicNeuroPETWidget._template(self)
         folder = self._database()
         header = self._header(folder)
-        path = sn.masterMeanPath(folder, header) if header else None
+        path = sn.petTemplatePath(folder, header) if header else None
         if not path:
-            raise ValueError("Pick a normal database with a master mean map as the template.")
-        template = self.logic.loadAtlasVolume(path, name=f"{header['name']} master mean")
+            raise ValueError("Pick a normal database with a template (or a master mean map).")
+        template = self.logic.loadAtlasVolume(path, name=f"{header['name']} template")
         self.setNode("Template", template)
         return template
 
@@ -1076,7 +1087,7 @@ class StaticNeuroPETWidget(DynamicNeuroPETWidget):
             folder = self._database()
             header = self._header(folder)
             self.normalizeButton.enabled = (self.volume() is not None and header is not None
-                                            and bool(sn.masterMeanPath(folder, header)))
+                                            and bool(sn.petTemplatePath(folder, header)))
 
     @staticmethod
     def _normHardenText(volume, template, method):
@@ -1296,7 +1307,7 @@ class StaticNeuroPETWidget(DynamicNeuroPETWidget):
             warnings = sn.unitWarnings(info, header)
             if warnings:
                 lines.append(WARNING_STYLE.format(" ".join(warnings)))
-            if not sn.masterMeanPath(folder, header):
+            if not sn.petTemplatePath(folder, header):
                 lines.append("Its mean / SD maps are not computed yet.")
             lines.extend(self._normalizationWarnings(header))
             text = "<br>".join(lines)
