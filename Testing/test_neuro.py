@@ -332,3 +332,25 @@ def test_erode_mask():
     full = np.ones((5, 5, 5), dtype=bool)          # the edge of the array counts as outside
     assert neuro.erodeMask(full, 1.0).sum() == 3 ** 3
     assert not neuro.erodeMask(mask, 10.0).any()
+
+
+def test_pseudo_pet(tmp_path):
+    gm = np.zeros((20, 20, 20), dtype=np.float32)
+    wm = np.zeros_like(gm)
+    gm[5:8] = 100.0           # stored in percent
+    wm[10:14] = 1.0
+    image = neuro.pseudoPetArray(gm, wm, (1.0, 1.0, 1.0), fwhmMm=0)
+    assert image.max() == 1.0 and np.isclose(image[12, 0, 0], 0.3) and image[0, 0, 0] == 0
+    smooth = neuro.pseudoPetArray(gm, wm, (2.0, 2.0, 2.0))
+    assert smooth.dtype == np.float32 and np.isclose(smooth.max(), 1.0) and smooth[9, 10, 10] > 0
+    with pytest.raises(ValueError):
+        neuro.pseudoPetArray(gm, wm[:-1])
+    found = {"GM": str(tmp_path / "mni_icbm152_gm_tal_nlin_sym_09c.nii"),
+             "WM": str(tmp_path / "mni_icbm152_wm_tal_nlin_sym_09c.nii")}
+    assert neuro.pseudoPetPath(found) == str(tmp_path / "mni_icbm152_pseudopet_tal_nlin_sym_09c.nii")
+    assert neuro.canMakeTemplate(found, neuro.PSEUDO_PET) and not neuro.canMakeTemplate({"GM": "x"}, neuro.PSEUDO_PET)
+    assert neuro.pseudoPetPath({}) is None and neuro.PSEUDO_PET not in neuro.missingFiles({})
+    for name in found.values():
+        open(name, "w").close()
+    open(tmp_path / "mni_icbm152_pseudopet_tal_nlin_sym_09c.nii", "w").close()
+    assert neuro.findAtlasFiles(str(tmp_path))[neuro.PSEUDO_PET].endswith("pseudopet_tal_nlin_sym_09c.nii")

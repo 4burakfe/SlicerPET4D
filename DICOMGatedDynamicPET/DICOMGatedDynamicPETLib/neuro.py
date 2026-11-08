@@ -32,7 +32,12 @@ TEMPLATES = (   # key, title, file name stem
     ("GM", "Grey matter probability", "mni_icbm152_gm" + TEMPLATE_SUFFIX),
     ("WM", "White matter probability", "mni_icbm152_wm" + TEMPLATE_SUFFIX),
     ("CSF", "CSF probability", "mni_icbm152_csf" + TEMPLATE_SUFFIX),
+    # made on first use from the grey and white matter maps (pseudoPetArray), saved next to them
+    ("pseudoPET", "Synthetic PET (GM + 0.3 WM, smoothed)", "mni_icbm152_pseudopet" + TEMPLATE_SUFFIX),
 )
+PSEUDO_PET = "pseudoPET"
+PSEUDO_PET_WM_WEIGHT = 0.3      # FDG: white matter uptake about a third of the grey matter's
+PSEUDO_PET_FWHM_MM = 6.0        # smoothed to a PET resolution
 DEFAULT_TEMPLATE = "T1"
 BRAIN_MASK = "mask"
 CEREBRA_LABELS = "cerebra"
@@ -75,7 +80,8 @@ EXTRA_FILES = (
 )
 CSV_NAME = "CerebrA_LabelDetails.csv"
 BILATERAL_CSV_NAME = "CerebrA_bilateral_LabelDetails.csv"
-GENERATED = (BILATERAL_LABELS, BILATERAL_CSV, PONS_OVERLAY, PONS_BILATERAL_OVERLAY,     # made by the workflow
+GENERATED = (PSEUDO_PET, BILATERAL_LABELS, BILATERAL_CSV, PONS_OVERLAY,     # made by the workflow
+             PONS_BILATERAL_OVERLAY,
              GROUPED_LABELS, GROUPED_CSV, GROUPED_BILATERAL_LABELS, GROUPED_BILATERAL_CSV, GROUPED_OVERLAY,
              GROUPED_BILATERAL_OVERLAY)
 OPTIONAL = (PONS_LABELS, PONS_CSV, GROUPS_CSV)    # never reported missing (the groups: the extension's table)
@@ -142,6 +148,43 @@ def bilateralPaths(found):
         return None, None
     folder = os.path.dirname(source)
     return os.path.join(folder, BILATERAL_STEM + ".nii"), os.path.join(folder, BILATERAL_CSV_NAME)
+
+
+def pseudoPetPath(found):
+    """Where the synthetic PET template is: the file found, else next to the grey matter map; None without the grey
+    and white matter maps."""
+    if PSEUDO_PET in found:
+        return found[PSEUDO_PET]
+    if "GM" not in found or "WM" not in found:
+        return None
+    stem = next(s for k, _, s in TEMPLATES if k == PSEUDO_PET)
+    return os.path.join(os.path.dirname(found["GM"]), stem + ".nii")
+
+
+def canMakeTemplate(found, key):
+    """Whether the template key can be used: its file is there, or (the synthetic PET) it can be made."""
+    return key in found or (key == PSEUDO_PET and pseudoPetPath(found) is not None)
+
+
+def _probability(array):
+    array = np.asarray(array, dtype=np.float32)
+    top = float(array.max()) if array.size else 0.0
+    return array / top if top > 1.5 else array        # stored 0-100 or 0-255
+
+
+def pseudoPetArray(gm, wm, spacing=(1.0, 1.0, 1.0), wmWeight=PSEUDO_PET_WM_WEIGHT, fwhmMm=PSEUDO_PET_FWHM_MM):
+    """A synthetic FDG-like brain image from the grey and white matter probability maps (same grid; spacing of the
+    numpy axes in mm): GM + wmWeight x WM, smoothed with a Gaussian of fwhmMm, scaled to a maximum of 1."""
+    gm, wm = _probability(gm), _probability(wm)
+    if gm.shape != wm.shape:
+        raise ValueError("The grey and white matter maps are not on the same grid.")
+    image = gm + float(wmWeight) * wm
+    if fwhmMm > 0:
+        from scipy import ndimage
+        sigma = [fwhmMm / 2.3548 / float(s) for s in spacing]
+        image = ndimage.gaussian_filter(image, sigma)
+    top = float(image.max()) if image.size else 0.0
+    return (image / top if top > 0 else image).astype(np.float32)
 
 
 def hasPons(found):

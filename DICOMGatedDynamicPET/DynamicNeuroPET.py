@@ -388,6 +388,37 @@ class DynamicNeuroPETLogic(ScriptedLoadableModuleLogic):
                 logging.exception("Neuro: could not normalize the CT/MR")
         return undo, newSequence, newSummed, normalized
 
+    def ensurePseudoPet(self, atlas):
+        """The synthetic PET template (neuro.pseudoPetArray of the grey and white matter maps): its path, made on
+        first use and saved next to the grey matter map (else in Slicer's temporary folder)."""
+        path = neuro.pseudoPetPath(atlas)
+        if path is None:
+            raise ValueError("The grey and white matter maps (mni_icbm152_gm / _wm_tal_nlin_sym_09c) are not in the "
+                             "atlas folder.")
+        if os.path.isfile(path):
+            return path
+        scene = slicer.mrmlScene
+        gm = slicer.util.loadVolume(atlas["GM"], {"show": False})
+        wm = slicer.util.loadVolume(atlas["WM"], {"show": False})
+        node = None
+        try:
+            spacing = tuple(float(x) for x in gm.GetSpacing())[::-1]
+            array = neuro.pseudoPetArray(slicer.util.arrayFromVolume(gm), slicer.util.arrayFromVolume(wm), spacing)
+            node = scene.AddNewNodeByClass("vtkMRMLScalarVolumeNode", "MNI synthetic PET")
+            node.SetIJKToRASMatrix(_vtkMatrix(_ijkToRas(gm)))
+            slicer.util.updateVolumeFromArray(node, array)
+            for folder in (os.path.dirname(path), slicer.app.temporaryPath):
+                target = os.path.join(folder, os.path.basename(path))
+                if slicer.util.saveNode(node, target):
+                    logging.info(f"Neuro: synthetic PET template saved as {target}")
+                    return target
+                logging.warning(f"Neuro: could not save the synthetic PET template in {folder}")
+            raise RuntimeError("Could not save the synthetic PET template.")
+        finally:
+            for item in (gm, wm, node):
+                if item is not None and scene.IsNodePresent(item):
+                    scene.RemoveNode(item)
+
     # --- regions -----------------------------------------------------------------------------------
     @staticmethod
     def _loadLabels(path):
@@ -1187,7 +1218,9 @@ class DynamicNeuroPETWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         for key, title, _ in neuro.TEMPLATES:
             self.templateCombo.addItem(title, key)
         self.templateCombo.toolTip = ("Template image registered to. T1 by default; with the CT/MR method the template "
-                                      "of the MR contrast (T2, PD) is picked by itself.")
+                                      "of the MR contrast (T2, PD) is picked by itself. Grey matter probability or the "
+                                      "synthetic PET (GM + 0.3 WM, smoothed 6 mm; made on first use) may fit an FDG "
+                                      "PET better. A template picked by hand is kept.")
         form.addRow("Template:", self.templateCombo)
         self.templateNote = qt.QLabel()
         self.templateNote.wordWrap = True
@@ -1354,6 +1387,7 @@ class DynamicNeuroPETWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.methodCombo.connect("currentIndexChanged(int)", self.onMethodChanged)
         self.methodCombo.connect("activated(int)", lambda i: setattr(self, "_methodChosen", True))
         self.templateCombo.connect("currentIndexChanged(int)", lambda i: self._clearNormalization())
+        self.templateCombo.connect("activated(int)", lambda i: self._onTemplatePicked())
         self.normalizeButton.connect("clicked()", self.onNormalize)
         self.normEngineCombo.connect("currentIndexChanged(int)", self.onNormEngineChanged)
         self.normManualButton.connect("toggled(bool)", lambda on: self.normSession and
@@ -1398,7 +1432,7 @@ class DynamicNeuroPETWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         for index in range(self.templateCombo.count):
             item = self.templateCombo.model().item(index)
             if item is not None:
-                item.setEnabled(self.templateCombo.itemData(index) in self.atlas)
+                item.setEnabled(neuro.canMakeTemplate(self.atlas, self.templateCombo.itemData(index)))
         self.maskCheck.enabled = neuro.BRAIN_MASK in self.atlas
         self._updateTemplateChoice()
         self.refreshTimer.start()
@@ -1410,8 +1444,13 @@ class DynamicNeuroPETWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         method = self.method()
         self.normInitCombo.setCurrentIndex(self.normInitCombo.findData(NORMALIZATION_INITIALIZATION[method]))
         self.maskCheck.checked = NORMALIZATION_BRAIN_MASK[method]
+        self._templateChosen = False        # another method: its default template again
         self._updateTemplateChoice()
         self._clearNormalization()
+
+    def _onTemplatePicked(self):
+        self._templateChosen = True
+        self._updateTemplateChoice()
 
     def _updateTemplateChoice(self):
         """T1 for the PET; the template of the MR contrast for the CT/MR method."""
@@ -1424,6 +1463,11 @@ class DynamicNeuroPETWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             note = (f"CT/MR recognised as {contrast} ({reason})." if contrast else f"CT/MR contrast: {reason}.")
         else:
             key, note = neuro.DEFAULT_TEMPLATE, "The PET is registered to the T1 template by default."
+        chosen = self.templateCombo.currentData
+        if getattr(self, "_templateChosen", False) and neuro.canMakeTemplate(self.atlas, chosen):
+            # picked by hand: kept (the registration always uses the template shown)
+            self.templateNote.text = f"{neuro.templateTitle(chosen)} template, picked by hand."
+            return
         if key not in self.atlas and self.atlas:
             note += f" The {key} template is not in the atlas folder, the T1 is used."
             key = neuro.DEFAULT_TEMPLATE
@@ -1490,6 +1534,9 @@ class DynamicNeuroPETWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
     def _template(self):
         key = self.templateCombo.currentData
         path = self.atlas.get(key)
+        if not path and key == neuro.PSEUDO_PET and neuro.canMakeTemplate(self.atlas, key):
+            path = self.logic.ensurePseudoPet(self.atlas)
+            self.atlas = neuro.findAtlasFiles(self.logic.atlasFolder()) or self.atlas
         if not path:
             raise ValueError("Pick the atlas folder: the template file "
                              f"{dict((k, s) for k, _, s in neuro.TEMPLATES)[key]}.nii was not found.")

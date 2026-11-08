@@ -601,8 +601,9 @@ steps, on the toolbar like the Dynamic Neuro Receptor PET:
 2. **CT/MR registration** (optional): the image registered to the CT / MR (BRAINSFit rigid by default, or the
    iterative engine), checked in the registration layout, corrected by hand, then hardened (saved separately or
    overwritten; Revert).
-3. **Normalization** to the MNI ICBM 152 2009c space, three ways: the PET/SPECT to the T1 template, the CT/MR to the
-   MR template with the same transform applied to the image, or the PET/SPECT to a **PET template**: the master mean
+3. **Normalization** to the MNI ICBM 152 2009c space, three ways: the PET/SPECT to an MR template (T1, grey matter
+   probability, or the **synthetic PET**: GM + 0.3 x WM smoothed 6 mm FWHM, made on first use next to the GM map),
+   the CT/MR to the MR template with the same transform applied to the image, or the PET/SPECT to a **PET template**: the master mean
    map of a normal database (only databases with computed statistics are listed).
 4. **Regions/Template**: the **normal database** the patient is compared with, from the database folder of the
    Database Manager. Databases of the image's modality, nuclide and tracer are listed first and the best one is
