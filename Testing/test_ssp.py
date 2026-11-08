@@ -66,3 +66,41 @@ def test_write_read_and_signature(tmp_path):
 def test_surface_colors():
     red = np.tile([[1.0, 0.0, 0.0]], (256, 1))
     assert ssp.surfaceColors(red, 0, 1, 4).shape == (4, 4)
+
+
+def test_hemispheres_and_parts():
+    ijkToRas = np.diag([1.0, 1.0, 1.0, 1.0])
+    ijkToRas[0, 3] = -2.0                       # x = i - 2
+    left, right = ssp.hemispheres((2, 3, 4), ijkToRas)
+    assert left[0, 0].tolist() == [True, True, False, False]
+    assert (left ^ right).all()
+    tri = {"points": np.zeros((3, 3)), "normals": np.ones((3, 3)), "triangles": np.array([[0, 1, 2]])}
+    whole = ssp.combine(tri, tri, None)
+    assert whole["parts"].tolist() == [0, 0, 0, 1, 1, 1]
+    assert whole["triangles"].tolist() == [[0, 1, 2], [3, 4, 5]]
+    assert ssp.hasPart(whole, ssp.PART_LEFT) and not ssp.hasPart(whole, ssp.PART_RIGHT)
+    piece, index = ssp.piece(whole, ssp.PART_LEFT)
+    assert index.tolist() == [3, 4, 5] and piece["triangles"].tolist() == [[0, 1, 2]]
+    assert not ssp.hasPart(tri, ssp.PART_LEFT) and ssp.parts(tri).tolist() == [0, 0, 0]
+    assert ssp.viewPart("LeftMedial") == ssp.PART_LEFT and ssp.viewPart("Top") == ssp.PART_BRAIN
+
+
+def test_parts_roundtrip(tmp_path):
+    tri = {"points": np.zeros((3, 3)), "normals": np.ones((3, 3)), "triangles": np.array([[0, 1, 2]])}
+    whole = ssp.combine(tri, tri, tri)
+    path = str(tmp_path / "s.npz")
+    ssp.write(path, whole, {}, {"maps": "suvr"})
+    surface, _, _ = ssp.read(path)
+    assert surface["parts"].tolist() == [0, 0, 0, 1, 1, 1, 2, 2, 2]
+
+
+def test_pan_sync():
+    center = np.zeros(3)
+    # the top view (looking down, anterior up) panned 10 mm right, 5 mm up
+    pan = ssp.panOffset(center, (10.0, 5.0, 0.0), (10.0, 5.0, 600.0), (0.0, 1.0, 0.0))
+    assert np.allclose(pan, (10.0, 5.0))
+    # the anterior view (looking back, top up) gets the same screen pan: right on its screen is -x... its own axes
+    focal, position = ssp.pannedCamera(center, pan, (0.0, 0.0, 0.0), (0.0, 600.0, 0.0), (0.0, 0.0, 1.0))
+    assert np.allclose(ssp.panOffset(center, focal, position, (0.0, 0.0, 1.0)), pan)
+    assert np.isclose(np.linalg.norm(focal - position), 600.0)
+    assert np.allclose((position - focal) / 600.0, (0.0, 1.0, 0.0))        # its direction kept

@@ -702,6 +702,20 @@ class StaticNeuroPETLogic(DynamicNeuroPETLogic):
         cells = numpy_support.vtk_to_numpy(poly.GetPolys().GetData()).reshape(-1, 4)[:, 1:]
         return {"points": points, "normals": pointNormals, "triangles": cells.astype(np.int64)}
 
+    @classmethod
+    def reviewSurface(cls, mask, gridNode, targetPoints=SSP_TARGET_POINTS):
+        """The 3D-SSP surface of a brain mask: the whole brain's and, for the medial views, each hemisphere's (the
+        mask cut at the midline, x = 0 in MNI space) in one surface (ssp.combine)."""
+        brain = cls.brainSurface(mask, gridNode, targetPoints)
+        mask = np.asarray(mask, dtype=bool)
+        halves = []
+        for half in ssp.hemispheres(mask.shape, _ijkToRas(gridNode)):
+            try:
+                halves.append(cls.brainSurface(mask & half, gridNode, targetPoints // 2))
+            except ValueError:          # nothing on that side
+                halves.append(None)
+        return ssp.combine(brain, *halves)
+
     @staticmethod
     def surfacePolyData(surface, values=None, name="SSP"):
         """vtkPolyData of a surface dict, with the vertex values as its active scalars."""
@@ -780,13 +794,22 @@ class StaticNeuroPETLogic(DynamicNeuroPETLogic):
         path = ssp.sspPath(folder, header) if header is not None else None
         if path and locked:
             read = ssp.read(path)
-            if read is not None and read[2].get("maps") == mapKey:
+            subjects = header.get("kind") == normaldb.USER_DEFINED and normaldb.readSubjects(folder)
+            medial = read is not None and ssp.hasPart(read[0], ssp.PART_LEFT)
+            if read is not None and read[2].get("maps") == mapKey and (medial or not subjects):
                 surface, groups, meta = read
                 out["source"] = "the database's surface projections"
                 if abs(float(meta.get("fwhmMm") or 0) - result["fwhm"]) > 1e-6:
                     notes.append("The database's surface projections were made with another smoothing.")
+                if not medial:
+                    notes.append("The database's surface projections have no medial surfaces (made by an older "
+                                 "version): no medial views.")
+            elif read is not None and read[2].get("maps") == mapKey and not medial:
+                notes.append("The database's surface projections have no medial surfaces (made by an older version): "
+                             "projected from its subjects now; compute the mean / SD again in the Neuro PET Database "
+                             "Manager to store them.")
         if surface is None:
-            surface = self.brainSurface(result["union"], grid)
+            surface = self.reviewSurface(result["union"], grid)
         out["surface"] = surface
         ijkToRas = _ijkToRas(grid)
         out["patient"] = ssp.project(result["smoothed"], ijkToRas, surface["points"], surface["normals"])
@@ -1971,6 +1994,10 @@ class StaticNeuroPETWidget(DynamicNeuroPETWidget):
         self.outlineCheck.toolTip = (f"The regions as {REVIEW_OUTLINE_THICKNESS} px outlines on the PET and the score "
                                      "slices. Click a region in the table to show it alone for a few seconds.")
         view.addRow(self.outlineCheck)
+        self.legendCheck = qt.QCheckBox("Show the color legends")
+        self.legendCheck.checked = True
+        self.legendCheck.toolTip = "A color legend on the left of each row (PET, scores, 3D-SSP)"
+        view.addRow(self.legendCheck)
         layout.addWidget(viewBox)
         self._buildSspBox(layout)
 
@@ -2016,9 +2043,10 @@ class StaticNeuroPETWidget(DynamicNeuroPETWidget):
         self.layoutCombo.connect("activated(int)", lambda i: self._onLayoutPicked())
         self.uptakeSpin.connect("valueChanged(int)", lambda v: self._showScoreMap())
         self.outlineCheck.connect("toggled(bool)", lambda on: self._assignReviewViews())
+        self.legendCheck.connect("toggled(bool)", lambda on: (self._updateLegends(), self._showSsp()))
         self.anatomyWindowRange.connect("valuesChanged(double,double)", lambda a, b: self._applyAnatomyDisplay())
         self.reviewResult = None
-        self.sspModel = None
+        self.sspModels = {}                # surface part: model node
         self.scoreNode = None
         self.reviewTable = None
         self._reviewPreviousLayout = None
@@ -2238,6 +2266,7 @@ class StaticNeuroPETWidget(DynamicNeuroPETWidget):
         slicer.util.updateVolumeFromArray(self.scoreNode, nr.maskedScores(result["z"], mask, factor))
         self.scoreNode.SetName(f"{result['volume'].GetName()} {kind} map")
         self._applyScoreDisplay()
+        self._updateLegends()
 
     def _updateReviewTable(self, kind):
         result = self.reviewResult
@@ -2473,6 +2502,8 @@ class StaticNeuroPETWidget(DynamicNeuroPETWidget):
     def _rgbOf(label):
         """256 x 3 RGB (0..1) of a color map of colormaps.LABELS or a Slicer color table (by name)."""
         colors = colortables.table(label)
+        if colors is None:
+            colors = nr.colorTable(label)
         if colors is not None:
             return colors
         node = colormaps.colorNodeForLabel(label) if label in colormaps.LABELS else colormaps._builtInNode(label)
@@ -2615,6 +2646,11 @@ class StaticNeuroPETWidget(DynamicNeuroPETWidget):
         self.sspWindowRange.decimals = 2
         self.sspWindowRange.toolTip = "Display range of the patient's projected values"
         form.addRow("Patient window:", self.sspWindowRange)
+        self.sspLightingCheck = qt.QCheckBox("Lighting")
+        self.sspLightingCheck.checked = True
+        self.sspLightingCheck.toolTip = "Shaded surface; off: flat colors at full brightness (as in the original 3D-SSP)"
+        form.addRow(self.sspLightingCheck)
+        self.sspLightingCheck.connect("toggled(bool)", lambda on: self._showSsp())
         self.restoreViewsButton = _button("Restore 3D views")
         self.restoreViewsButton.toolTip = "The 3D-SSP views back to their default direction, zoom and position"
         form.addRow(self.restoreViewsButton)
@@ -2701,66 +2737,214 @@ class StaticNeuroPETWidget(DynamicNeuroPETWidget):
                 out[tags[viewNode.GetSingletonTag()]] = (widget, viewNode)
         return out
 
+    def _sspModelNode(self, part):
+        """The model of one part of the surface (the brain, or a hemisphere for the medial views)."""
+        scene = slicer.mrmlScene
+        node = self.sspModels.get(part)
+        if node is None or not scene.IsNodePresent(node):
+            suffix = {ssp.PART_LEFT: " left hemisphere", ssp.PART_RIGHT: " right hemisphere"}.get(part, "")
+            node = scene.AddNewNodeByClass("vtkMRMLModelNode", scene.GenerateUniqueName(SSP_MODEL_NAME + suffix))
+            node.CreateDefaultDisplayNodes()
+            self.sspModels[part] = node
+        return node
+
     def _showSsp(self):
         result = self.reviewResult
         data = (result or {}).get("ssp")
         if not data or not hasattr(self, "sspMapCombo"):
             return
-        values, rgba, (low, high), _ = self._sspValues()
-        scene = slicer.mrmlScene
-        poly = self.logic.surfacePolyData(data["surface"], values)
-        if self.sspModel is None or not scene.IsNodePresent(self.sspModel):
-            self.sspModel = scene.AddNewNodeByClass("vtkMRMLModelNode", scene.GenerateUniqueName(SSP_MODEL_NAME))
-            self.sspModel.CreateDefaultDisplayNodes()
-        self.sspModel.SetAndObservePolyData(poly)
-        display = self.sspModel.GetDisplayNode()
-        display.SetAndObserveColorNodeID(self._sspColorNode(rgba).GetID())
-        display.SetActiveScalarName("SSP")
-        display.SetScalarVisibility(True)
-        display.SetScalarRangeFlag(slicer.vtkMRMLDisplayNode.UseManualScalarRange)
-        display.SetScalarRange(low, high)
-        display.SetBackfaceCulling(False)
-        display.SetVisibility2D(False)
+        values, rgba, (low, high), what = self._sspValues()
+        colorNode = self._sspColorNode(rgba)
         views = self._sspViewNodes()
-        display.RemoveAllViewNodeIDs()
-        for _, viewNode in views.values():
-            display.AddViewNodeID(viewNode.GetID())
-        if not views:       # not in the review layout: hidden (shown in the SSP views only)
-            display.AddViewNodeID("vtkMRMLViewNodeNone")
+        surface = data["surface"]
+        values = np.asarray(values, np.float32)
+        for part in (ssp.PART_BRAIN, ssp.PART_LEFT, ssp.PART_RIGHT):
+            if not ssp.hasPart(surface, part):
+                node = self.sspModels.pop(part, None)
+                if node is not None and slicer.mrmlScene.IsNodePresent(node):
+                    slicer.mrmlScene.RemoveNode(node)
+                continue
+            if part == ssp.PART_BRAIN and not ssp.hasPart(surface, ssp.PART_LEFT):
+                piece, index = surface, np.arange(len(values))
+            else:
+                piece, index = ssp.piece(surface, part)
+            model = self._sspModelNode(part)
+            model.SetAndObservePolyData(self.logic.surfacePolyData(piece, values[index]))
+            display = model.GetDisplayNode()
+            display.SetAndObserveColorNodeID(colorNode.GetID())
+            display.SetActiveScalarName("SSP")
+            display.SetScalarVisibility(True)
+            display.SetScalarRangeFlag(slicer.vtkMRMLDisplayNode.UseManualScalarRange)
+            display.SetScalarRange(low, high)
+            display.SetBackfaceCulling(False)
+            display.SetVisibility2D(False)
+            if hasattr(display, "SetLighting"):         # off: full brightness, no shading (flat colors)
+                display.SetLighting(bool(self.sspLightingCheck.checked))
+            shown = [viewNode.GetID() for key, (_, viewNode) in views.items() if ssp.viewPart(key) == part]
+            display.RemoveAllViewNodeIDs()
+            for viewId in shown:
+                display.AddViewNodeID(viewId)
+            if not shown:       # not in the review layout: hidden (shown in the SSP views only)
+                display.AddViewNodeID("vtkMRMLViewNodeNone")
+        brain = self.sspModels.get(ssp.PART_BRAIN)
+        rows = [views[key][1].GetID() for key in (nr.SSP_VIEWS[0][0], nr.SSP_VIEWS[nr.SSP_COLUMNS][0])
+                if key in views]
+        if brain is not None:
+            self._legend(brain, rows, what if what != "patient" else self._patientUnits(), "%.1f")
+
+    def _legend(self, node, viewIds, title, labelFormat):
+        """A color legend of node on the left of the views viewIds (hidden with none)."""
+        try:
+            colorLogic = slicer.modules.colors.logic()
+            if not hasattr(colorLogic, "AddDefaultColorLegendDisplayNode"):
+                return
+            legend = colorLogic.GetColorLegendDisplayNode(node) if hasattr(colorLogic, "GetColorLegendDisplayNode") \
+                else None
+            if legend is None:
+                if not viewIds:
+                    return
+                legend = colorLogic.AddDefaultColorLegendDisplayNode(node)
+            wasModifying = legend.StartModify()
+            legend.RemoveAllViewNodeIDs()
+            for viewId in viewIds:
+                legend.AddViewNodeID(viewId)
+            legend.SetVisibility(bool(viewIds) and bool(self.legendCheck.checked))
+            legend.SetTitleText(title)
+            legend.SetLabelFormat(labelFormat)
+            legend.SetPosition(0.02, 0.5)       # left, middle
+            legend.SetSize(0.1, 0.6)
+            legend.EndModify(wasModifying)
+        except Exception:
+            logging.debug("Static Neuro: no color legend", exc_info=True)
+
+    def _updateLegends(self):
+        """One color legend per row, on the left: the PET, the scores, the 3D-SSP (each in its row's first view)."""
+        if not hasattr(self, "legendCheck"):
+            return
+        first = {}
+        for row, widget in self._reviewSliceWidgets():
+            first.setdefault(row, widget.mrmlSliceNode().GetID())
+        volume = self.volume()
+        if volume is not None:
+            self._legend(volume, [first[nr.PET_ROW]] if nr.PET_ROW in first else [], self._petUnits(volume), "%.2f")
+        if self.scoreNode is not None and slicer.mrmlScene.IsNodePresent(self.scoreNode):
+            self._legend(self.scoreNode, [first[nr.SCORE_ROW]] if nr.SCORE_ROW in first else [], self._scoreKind(),
+                         "%.1f")
+
+    def _petUnits(self, volume):
+        units = self.logic.imageInfo(volume).get("units") or ""
+        return "SUV" if not units or "suv" in units.lower() or "g/ml" in units.lower() else units
+
+    def _syncCameras(self, enable=True):
+        """Zoom and pan of the 3D-SSP views linked (each its own rotation): camera node observers."""
+        for cameraNode, tag in getattr(self, "_cameraObservers", []):
+            try:
+                cameraNode.RemoveObserver(tag)
+            except Exception:
+                pass
+        self._cameraObservers = []
+        if not enable:
+            return
+        logic = slicer.modules.cameras.logic()
+        for key, (_, viewNode) in self._sspViewNodes().items():
+            cameraNode = logic.GetViewActiveCameraNode(viewNode)
+            if cameraNode is not None:
+                tag = cameraNode.AddObserver(vtk.vtkCommand.ModifiedEvent,
+                                             lambda caller, event, k=key: self._onCameraMoved(k))
+                self._cameraObservers.append((cameraNode, tag))
+
+    def _sspCenter(self):
+        data = (self.reviewResult or {}).get("ssp")
+        return np.asarray(data["surface"]["points"]).mean(axis=0) if data else np.zeros(3)
+
+    def _onCameraMoved(self, sourceKey):
+        if getattr(self, "_syncingCameras", False):
+            return
+        views = self._sspViewNodes()
+        if sourceKey not in views:
+            return
+        logic = slicer.modules.cameras.logic()
+        source = logic.GetViewActiveCameraNode(views[sourceKey][1])
+        if source is None:
+            return
+        center = self._sspCenter()
+        camera = source.GetCamera()
+        pan = ssp.panOffset(center, camera.GetFocalPoint(), camera.GetPosition(), camera.GetViewUp())
+        scale = camera.GetParallelScale()
+        self._syncingCameras = True
+        try:
+            for key, (widget, viewNode) in views.items():
+                target = logic.GetViewActiveCameraNode(viewNode)
+                if key == sourceKey or target is None:
+                    continue
+                other = target.GetCamera()
+                focal, position = ssp.pannedCamera(center, pan, other.GetFocalPoint(), other.GetPosition(),
+                                                   other.GetViewUp())
+                if (np.allclose(focal, other.GetFocalPoint(), atol=1e-3)
+                        and abs(other.GetParallelScale() - scale) < 1e-6):
+                    continue
+                wasModifying = target.StartModify()
+                target.SetFocalPoint(*focal)
+                target.SetPosition(*position)
+                target.SetParallelScale(scale)
+                target.EndModify(wasModifying)
+                renderer = widget.threeDView().renderWindow().GetRenderers().GetFirstRenderer()
+                if renderer is not None:
+                    renderer.ResetCameraClippingRange()
+        finally:
+            self._syncingCameras = False
 
     def _setupSspViews(self, fit=False):
-        """The six 3D-SSP views: black, no box, parallel projection, each camera looking at the surface from its
-        side (top and bottom with the front up, the others with the top up)."""
+        """The 3D-SSP views: black, no box, parallel projection, a box orientation marker, each camera looking at
+        the surface from its side (top and bottom with the front up, the others with the top up; the medial views at
+        one hemisphere from the other side), all with the same zoom and pan."""
         data = (self.reviewResult or {}).get("ssp")
         views = self._sspViewNodes()
         if not views:
+            self._syncCameras(False)
             return
         self._showSsp()
-        center = np.asarray(data["surface"]["points"]).mean(axis=0) if data else np.zeros(3)
-        for key, (widget, viewNode) in views.items():
-            widget.threeDController().setVisible(False)
-            viewNode.SetBoxVisible(False)
-            viewNode.SetAxisLabelsVisible(False)
-            viewNode.SetBackgroundColor(0.0, 0.0, 0.0)
-            viewNode.SetBackgroundColor2(0.0, 0.0, 0.0)
-            viewNode.SetRenderMode(slicer.vtkMRMLViewNode.Orthographic)
-            if hasattr(viewNode, "SetOrientationMarkerType"):      # a small box with the sides' letters
-                viewNode.SetOrientationMarkerType(slicer.vtkMRMLAbstractViewNode.OrientationMarkerTypeCube)
-                viewNode.SetOrientationMarkerSize(slicer.vtkMRMLAbstractViewNode.OrientationMarkerSizeSmall)
-            if not data or not fit:
-                continue
-            direction, up = ssp.CAMERAS[key]
-            camera = slicer.modules.cameras.logic().GetViewActiveCameraNode(viewNode)
-            if camera is None:
-                continue
-            camera.SetFocalPoint(*center)
-            camera.SetPosition(*(center + 600.0 * np.asarray(direction)))
-            camera.SetViewUp(*up)
-            renderer = widget.threeDView().renderWindow().GetRenderers().GetFirstRenderer()
-            if renderer is not None:
-                renderer.ResetCamera()
-                renderer.ResetCameraClippingRange()
-            widget.threeDView().forceRender()
+        center = self._sspCenter()
+        scale = None
+        self._syncingCameras = True
+        try:
+            for key, (widget, viewNode) in views.items():
+                widget.threeDController().setVisible(False)
+                viewNode.SetBoxVisible(False)
+                viewNode.SetAxisLabelsVisible(False)
+                viewNode.SetBackgroundColor(0.0, 0.0, 0.0)
+                viewNode.SetBackgroundColor2(0.0, 0.0, 0.0)
+                viewNode.SetRenderMode(slicer.vtkMRMLViewNode.Orthographic)
+                if hasattr(viewNode, "SetOrientationMarkerType"):      # a small box with the sides' letters
+                    viewNode.SetOrientationMarkerType(slicer.vtkMRMLAbstractViewNode.OrientationMarkerTypeCube)
+                    viewNode.SetOrientationMarkerSize(slicer.vtkMRMLAbstractViewNode.OrientationMarkerSizeSmall)
+                if not data or not fit:
+                    continue
+                direction, up = ssp.CAMERAS[key]
+                camera = slicer.modules.cameras.logic().GetViewActiveCameraNode(viewNode)
+                if camera is None:
+                    continue
+                camera.SetFocalPoint(*center)
+                camera.SetPosition(*(center + 600.0 * np.asarray(direction)))
+                camera.SetViewUp(*up)
+                renderer = widget.threeDView().renderWindow().GetRenderers().GetFirstRenderer()
+                if renderer is not None:
+                    renderer.ResetCamera()
+                    renderer.ResetCameraClippingRange()
+                    scale = max(scale or 0.0, camera.GetCamera().GetParallelScale())
+            if scale:       # one zoom for all, centred (ResetCamera centres each on its own model)
+                for key, (widget, viewNode) in views.items():
+                    camera = slicer.modules.cameras.logic().GetViewActiveCameraNode(viewNode)
+                    if camera is None:
+                        continue
+                    direction, _ = ssp.CAMERAS[key]
+                    camera.SetFocalPoint(*center)
+                    camera.SetPosition(*(center + 600.0 * np.asarray(direction)))
+                    camera.SetParallelScale(scale)
+                    widget.threeDView().forceRender()
+        finally:
+            self._syncingCameras = False
+        self._syncCameras(True)
 
     # layout and views
     def _reviewLayout(self):
@@ -2827,6 +3011,7 @@ class StaticNeuroPETWidget(DynamicNeuroPETWidget):
 
     def _exitReviewViews(self):
         self._endFlash()
+        self._syncCameras(False)
         self._restoreSegmentationDisplay()
         layoutManager = slicer.app.layoutManager()
         if layoutManager is not None and layoutManager.layout in nr.LAYOUT_IDS and self._reviewPreviousLayout is not None:
@@ -2872,6 +3057,7 @@ class StaticNeuroPETWidget(DynamicNeuroPETWidget):
                 widget.sliceLogic().FitSliceToAll()
         self._outlineSegmentation(sliceViews)
         self._setupSspViews(fit)
+        self._updateLegends()
 
     def _outlineSegmentation(self, viewIds):
         """The regions as outlines (no fill, REVIEW_OUTLINE_THICKNESS px) on the PET and the score slices, hidden with
@@ -3117,7 +3303,9 @@ class StaticNeuroPETWidget(DynamicNeuroPETWidget):
         self.regResult = None
         self.regUndo = None
         self._databaseKey = None
-        self.reviewResult = self.scoreNode = self.reviewTable = self.sspModel = None
+        self.reviewResult = self.scoreNode = self.reviewTable = None
+        self.sspModels = {}
+        self._cameraObservers = []
         self._segmentationDisplay = None
         self._anatomyWindowFor = None
         self._flash = self._autoCompared = None

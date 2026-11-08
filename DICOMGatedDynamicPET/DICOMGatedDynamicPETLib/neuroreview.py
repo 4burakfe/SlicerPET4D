@@ -32,7 +32,12 @@ UPTAKE_FRACTION = 0.5           # score map shown: the database mean above 50 % 
                                 # matter; white matter and CSF, low in the normals, hidden); adjustable >= MASK_FRACTION
 SD_FLOOR_FRACTION = 0.2         # SD floor: 20 % of the median SD in the mask
 DEFAULT_MAXIMUM = 5.0           # score window: -5 ... +5, 0 in the middle
-SCORE_COLORMAPS = ("ColdToHotRainbow", "DivergingBlueRed")     # Slicer's colour tables; the first is the default
+SCORE_COLORMAPS = ("ColdToHotRainbow", "DivergingBlueRed", "Plasma", "Viridis")     # the first is the default
+# Plasma and Viridis (matplotlib, CC0): 17 anchors, interpolated to 256 (the others are Slicer's colour tables)
+_ANCHORS = {
+    "Plasma": "0d08873105974c02a16600a77e03a89511a1aa2395bc3587cc4778da5a6ae66c5cf0804ef89540fdac33fdc527f8df25f0f921",
+    "Viridis": "44015448186a472d7b4240863b528b33638d2c728e26828e21918c1fa08828ae803fbc735ec96284d44baddc30d8e219fde725",
+}
 GREY = (0.62, 0.62, 0.62)       # the side above the normals with "below the normals only"
 OUTSIDE = -1.0e6                # score map voxels outside the scored mask (shown black: below the display threshold)
 REGIONS_FILE = normaldb.STATS_DIR + "/regions.json"
@@ -282,6 +287,18 @@ def tableRows(patientValues, patientSuv, reference, kind=DEFAULT_SCORE):
 # ---------------------------------------------------------------------------
 # Display
 # ---------------------------------------------------------------------------
+def colorTable(label, count=256):
+    """count x 3 RGB (0..1) of Plasma / Viridis; None for the other colour maps (Slicer's)."""
+    anchors = _ANCHORS.get(label)
+    if anchors is None:
+        return None
+    rgb = np.array([[int(anchors[i + c:i + c + 2], 16) for c in (0, 2, 4)] for i in range(0, len(anchors), 6)],
+                   dtype=float) / 255.0
+    where = np.linspace(0.0, 1.0, len(rgb))
+    at = np.linspace(0.0, 1.0, count)
+    return np.stack([np.interp(at, where, rgb[:, c]) for c in range(3)], axis=1)
+
+
 def divergingColors(table, hypoOnly=False, count=256, grey=GREY):
     """count x 4 RGBA (0..1) of a score map shown over a window symmetric about 0 ([-maximum, maximum]): the colour
     table (n x 3 RGB 0..1) across it, 0 in the middle; with hypoOnly the side above 0 (above the normals) grey."""
@@ -320,8 +337,9 @@ ORIENTATIONS = (("Axial", "#F34A33"), ("Coronal", "#6EB04B"), ("Sagittal", "#EDD
 PET_ROW, SCORE_ROW = "PET", "Score"
 VIEW_PREFIX = "NeuroRev"
 VIEW_GROUP = 93
-SSP_VIEWS = (("Top", "Superior"), ("Ant", "Anterior"), ("Left", "Left"),
-             ("Bottom", "Inferior"), ("Post", "Posterior"), ("Right", "Right"))
+SSP_VIEWS = (("Top", "Superior"), ("Ant", "Anterior"), ("Left", "Left"), ("LeftMedial", "Left medial"),
+             ("Bottom", "Inferior"), ("Post", "Posterior"), ("Right", "Right"), ("RightMedial", "Right medial"))
+SSP_COLUMNS = 4
 TABLE_VIEW = VIEW_PREFIX + "Table"
 
 
@@ -358,7 +376,8 @@ def _sspRows():
                 f'<property name="viewgroup" action="default">{VIEW_GROUP + 1}</property>'
                 '</view></item>')
     return ['<item><layout type="horizontal" split="true">' + "".join(
-        threeD(k, t) for k, t in SSP_VIEWS[start:start + 3]) + '</layout></item>' for start in (0, 3)]
+        threeD(k, t) for k, t in SSP_VIEWS[start:start + SSP_COLUMNS]) + '</layout></item>'
+        for start in range(0, len(SSP_VIEWS), SSP_COLUMNS)]
 
 
 def _withTable(rows):

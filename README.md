@@ -655,8 +655,8 @@ steps, on the toolbar like the Dynamic Neuro Receptor PET:
 5. **Review**: the patient compared with the normal database. Entering the step compares automatically (once per
    image, regions and database; **Compare with the database** again by hand, or *Compute the regional values*
    without a database: SUV and SUVR to the reference region). **Layout** (left): *Single monitor* (the normalized
-   PET axial / coronal / sagittal with the region outlines, below it the **voxel score map**, then the six **3D-SSP**
-   views, the **region table** on the right), *Dual monitor* (the default with two screens: the slices and the table
+   PET axial / coronal / sagittal with the region outlines, below it the **voxel score map**, then the eight **3D-SSP**
+   views (superior, anterior, left, left medial / inferior, posterior, right, right medial), the **region table** on the right), *Dual monitor* (the default with two screens: the slices and the table
    in the main window, the 3D-SSP views in a window maximized on the second screen), *Slices and table* or
    *3D-SSP only*. The slice views are linked and have no title bars. Settings on the left:
    - **Normals**: automatically the patient's age group (the master when the age is not known or its group has no
@@ -669,23 +669,28 @@ steps, on the toolbar like the Dynamic Neuro Receptor PET:
      are the database's (locked); for other regions of a user defined database computed from its subjects on the fly
      and cached in `<database>/cache/`; otherwise approximated from the mean / SD maps (the mean voxel SD is larger
      than the SD of a regional mean, so these scores are conservative). The optic chiasm is left out of the regions.
-   - **Display**: PET colors and window; score colors (diverging, ColdToHotRainbow or DivergingBlueRed: below the
+   - **Display**: PET colors and window; score colors (ColdToHotRainbow, DivergingBlueRed, Plasma or Viridis: below the
      normals cold, above them hot, 0 in the middle) over a window symmetric about 0 (default +/- 5); *Below the
      normals only* greys the positive side. **Scores where normal uptake >** (default 50 % of the normal mean's
      maximum): the score slices show only where the normals' uptake is high (cortex, deep grey matter); white matter
-     and CSF are black. **Show the region outlines** (2 px, on the PET and the score slices).
+     and CSF are black. **Show the region outlines** (2 px, on the PET and the score slices). **Show the color
+     legends**: one on the left of each row.
    - **Region table**: the region color, SUVmean, the value of the database's map type (SUVR / ratio), the normals'
      mean, SD and n, and the score; as wide as its content. Click a column header to sort (by name or by value);
      click a region to show it alone on the slices for 5 s.
-   - **3D-SSP** (Minoshima et al. 1995): the surface of all the regions together; each vertex takes the maximum of
+   - **3D-SSP** (Minoshima et al. 1995): the surface of all the regions together, and for the medial views each
+     hemisphere's (the regions cut at the midline, x = 0 in MNI space, stored with the brain's in `ssp.npz`; an older
+     `ssp.npz` without them gives no medial views, or for a user defined database the projections are made from its
+     subjects); each vertex takes the maximum of
      the patient's smoothed map along its inward normal (0-13.5 mm, 1 mm steps). **Map**: the score (default) or the
      patient's projected values (SUVR for an SUVR database, else SUV; smoothed). **Score from**: *Minoshima*
      (default; against the same projection of every normal: the database's `stats/ssp.npz` when the regions are the
      database's, else computed from the subjects of a user defined database and cached), or *Voxel score map
      projected* (the most extreme voxel score along the normal; used automatically when the normals' projections are
      not there, e.g. an older predefined database). Its own score colors and window, patient colors and window.
-     Black background, parallel projection, a box orientation marker; **Restore 3D views** puts back the default
-     direction, zoom and position.
+     Black background, parallel projection, a box orientation marker, **Lighting** (on by default; off: flat colors);
+     zoom and pan are shared by the views, rotation is not. **Restore 3D views** puts back the default direction, zoom
+     and position.
    - **MR fusion**: the PET and the scores over the MNI template T1, or over the patient's CT / MR when the
      normalization went through it, with the PET opacity, the score opacity (default 0.5) and the MR window.
 
