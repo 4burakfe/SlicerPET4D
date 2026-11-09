@@ -84,6 +84,7 @@ SSP_TARGET_POINTS = 60000               # vertices of the 3D-SSP surface
 SSP_MAX_EDGE_MM = 4.0                   # its triangles' longest edge after the decimation (the flat midline faces of
 #                                         the hemispheres otherwise become a few long triangles across the face)
 SSP_MODEL_NAME = "Neuro 3D-SSP surface"
+SSP_MODEL_ATTRIBUTE = NEURO_PREFIX + "SSPModel"     # (view set)/(surface part) of the review's 3D-SSP models
 SSP_COLOR_NODE = "Neuro 3D-SSP colors"
 SSP_LOW_COLOR_NODE = "Neuro 3D-SSP low score colors"
 SSP_CAMERA_DISTANCE = 600.0             # mm from the brain centre (parallel projection)
@@ -3058,9 +3059,19 @@ class StaticNeuroPETWidget(DynamicNeuroPETWidget):
             suffix = {ssp.PART_LEFT: " left hemisphere", ssp.PART_RIGHT: " right hemisphere"}.get(part, "")
             name = SSP_MODEL_NAME + (" low scores" if viewSet else "") + suffix
             node = scene.AddNewNodeByClass("vtkMRMLModelNode", scene.GenerateUniqueName(name))
+            node.SetAttribute(SSP_MODEL_ATTRIBUTE, f"{viewSet or 'main'}/{part}")
             node.CreateDefaultDisplayNodes()
             self.sspModels[(viewSet, part)] = node
         return node
+
+    def _dropStaleSspModels(self):
+        """The 3D-SSP models in the scene that are not this widget's removed: those of a module reloaded (or an older
+        version) stay in their views, drawn inside the new ones (a nested, speckled surface)."""
+        mine = {node.GetID() for node in self.sspModels.values() if node is not None}
+        for node in list(slicer.util.getNodesByClass("vtkMRMLModelNode")):
+            name = node.GetName() or ""
+            if (name.startswith(SSP_MODEL_NAME) or node.GetAttribute(SSP_MODEL_ATTRIBUTE)) and node.GetID() not in mine:
+                slicer.mrmlScene.RemoveNode(node)
 
     def _dropSspModel(self, viewSet, part):
         node = self.sspModels.pop((viewSet, part), None)
@@ -3072,6 +3083,7 @@ class StaticNeuroPETWidget(DynamicNeuroPETWidget):
         data = (result or {}).get("ssp")
         if not data or not hasattr(self, "sspMapCombo"):
             return
+        self._dropStaleSspModels()
         views = self._sspViewNodes()
         surface = data["surface"]
         for viewSet, colorName in ((nr.SSP_MAIN, SSP_COLOR_NODE), (nr.SSP_LOW, SSP_LOW_COLOR_NODE)):
