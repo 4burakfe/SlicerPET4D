@@ -3483,7 +3483,11 @@ class StaticNeuroPETWidget(DynamicNeuroPETWidget):
         return np.asarray(data["patient"], np.float32), colors, (low, max(high, low + 1e-6)), "patient"
 
     def _sspColorNode(self, rgba, name=SSP_COLOR_NODE):
+        """The color table of a set of 3D-SSP views, written only when its colors change and then in one modification
+        (each SetColor alone fires a Modified event that updates every model using the table in every 3D view: 256
+        of them made a layout change take tens of seconds)."""
         scene = slicer.mrmlScene
+        rgba = np.asarray(rgba, dtype=np.float64)
         node = scene.GetFirstNodeByName(name)
         if node is None or not node.IsA("vtkMRMLColorTableNode"):
             node = scene.CreateNodeByClass("vtkMRMLColorTableNode")
@@ -3492,9 +3496,62 @@ class StaticNeuroPETWidget(DynamicNeuroPETWidget):
             node.SetTypeToUser()
             node.SetNumberOfColors(len(rgba))
             scene.AddNode(node)
-        for i, (r, g, b, a) in enumerate(rgba):
-            node.SetColor(i, f"{i}", float(r), float(g), float(b), float(a))
+        written = getattr(self, "_sspColorsWritten", None)
+        if written is None:
+            written = self._sspColorsWritten = {}
+        key = (node.GetID(), rgba.shape, rgba.tobytes())
+        if written.get(name) == key:
+            return node
+        wasModifying = node.StartModify()
+        try:
+            if node.GetNumberOfColors() != len(rgba):
+                node.SetNumberOfColors(len(rgba))
+            for i, (r, g, b, a) in enumerate(rgba):
+                node.SetColor(i, f"{i}", float(r), float(g), float(b), float(a))
+        finally:
+            node.EndModify(wasModifying)
+        written[name] = key
         return node
+
+    def _sspPolyData(self, viewSet, part, surface, values):
+        """The polydata of one part of the surface in one set of views with its vertex values: the geometry built once
+        per surface (and the part's vertex indices kept), only the values copied in when they change; (polydata,
+        changed)."""
+        from vtk.util import numpy_support
+        cache = getattr(self, "_sspPolys", None)
+        if cache is None:
+            cache = self._sspPolys = {}
+        found = cache.get((viewSet, part))
+        if found is None or found[0] is not surface:
+            if part == ssp.PART_BRAIN and surface.get("parts") is None:
+                piece, index = surface, None
+            else:
+                piece, index = ssp.piece(surface, part)
+            count = len(piece["points"])
+            poly = self.logic.surfacePolyData(piece, np.zeros(count, np.float32))
+            found = cache[(viewSet, part)] = (surface, poly, index, None)
+        surface, poly, index, last = found
+        values = np.asarray(values if index is None else values[index], dtype=np.float32)
+        if last is not None and last.shape == values.shape and np.array_equal(last, values):
+            return poly, False
+        array = poly.GetPointData().GetArray("SSP")
+        numpy_support.vtk_to_numpy(array)[:] = values
+        array.Modified()
+        poly.Modified()
+        cache[(viewSet, part)] = (surface, poly, index, values.copy())
+        return poly, True
+
+    @staticmethod
+    def _setViewNodeIds(display, viewIds):
+        """The views of a display node, changed only when they differ (a change redraws the model in every view)."""
+        current = [display.GetNthViewNodeID(i) for i in range(display.GetNumberOfViewNodeIDs())]
+        if current == list(viewIds):
+            return
+        wasModifying = display.StartModify()
+        display.RemoveAllViewNodeIDs()
+        for viewId in viewIds:
+            display.AddViewNodeID(viewId)
+        display.EndModify(wasModifying)
 
     def _sspViewNodes(self):
         """{(view set, view key): (3D widget, view node)} of the 3D-SSP views of the layout."""
@@ -3534,6 +3591,7 @@ class StaticNeuroPETWidget(DynamicNeuroPETWidget):
                 slicer.mrmlScene.RemoveNode(node)
 
     def _dropSspModel(self, viewSet, part):
+        getattr(self, "_sspPolys", {}).pop((viewSet, part), None)
         node = self.sspModels.pop((viewSet, part), None)
         if node is not None and slicer.mrmlScene.IsNodePresent(node):
             slicer.mrmlScene.RemoveNode(node)
@@ -3561,12 +3619,10 @@ class StaticNeuroPETWidget(DynamicNeuroPETWidget):
                 if not ssp.hasPart(surface, part):
                     self._dropSspModel(viewSet, part)
                     continue
-                if part == ssp.PART_BRAIN and surface.get("parts") is None:
-                    piece, index = surface, np.arange(len(values))
-                else:
-                    piece, index = ssp.piece(surface, part)
                 model = self._sspModelNode(viewSet, part)
-                model.SetAndObservePolyData(self.logic.surfacePolyData(piece, values[index]))
+                poly, _ = self._sspPolyData(viewSet, part, surface, values)
+                if model.GetPolyData() is not poly:
+                    model.SetAndObservePolyData(poly)
                 display = model.GetDisplayNode()
                 display.SetAndObserveColorNodeID(colorNode.GetID())
                 display.SetActiveScalarName("SSP")
@@ -3578,11 +3634,8 @@ class StaticNeuroPETWidget(DynamicNeuroPETWidget):
                 if hasattr(display, "SetLighting"):         # off: full brightness, no shading (flat colors)
                     display.SetLighting(bool(self.sspLightingCheck.checked))
                 shown = [viewNode.GetID() for key, viewNode in shownViews.items() if ssp.viewPart(key) == part]
-                display.RemoveAllViewNodeIDs()
-                for viewId in shown:
-                    display.AddViewNodeID(viewId)
-                if not shown:       # not in the review layout: hidden (shown in the SSP views only)
-                    display.AddViewNodeID("vtkMRMLViewNodeNone")
+                # not in the review layout: hidden (shown in the SSP views only)
+                self._setViewNodeIds(display, shown or ["vtkMRMLViewNodeNone"])
                 models.append(model)
             if not models:
                 continue
@@ -3651,9 +3704,23 @@ class StaticNeuroPETWidget(DynamicNeuroPETWidget):
                                              lambda caller, event, k=key: self._onCameraMoved(k))
                 self._cameraObservers.append((cameraNode, tag))
 
-    def _sspCenter(self):
+    def _sspBoundsOf(self):
+        """(centre, radius) of the 3D-SSP surface's vertices, worked out once per surface; None without one."""
         data = (self.reviewResult or {}).get("ssp")
-        return np.asarray(data["surface"]["points"]).mean(axis=0) if data else np.zeros(3)
+        if not data:
+            return None
+        surface = data["surface"]
+        found = getattr(self, "_sspBounds", None)
+        if found is None or found[0] is not surface:
+            points = np.asarray(surface["points"], dtype=np.float64)
+            center = points.mean(axis=0) if len(points) else np.zeros(3)
+            radius = float(np.max(np.linalg.norm(points - center, axis=1))) if len(points) else 100.0
+            found = self._sspBounds = (surface, center, radius)
+        return found[1], found[2]
+
+    def _sspCenter(self):
+        bounds = self._sspBoundsOf()
+        return bounds[0].copy() if bounds else np.zeros(3)
 
     def _onCameraMoved(self, sourceKey):
         if getattr(self, "_syncingCameras", False):
@@ -3694,13 +3761,17 @@ class StaticNeuroPETWidget(DynamicNeuroPETWidget):
         """The near and far planes of a 3D-SSP camera set to hold the whole surface (with the hemispheres' views
         drawn before anything was rendered in them, the planes were left where they cut the surface: the view black
         or striped until zoomed)."""
-        data = (self.reviewResult or {}).get("ssp")
+        bounds = self._sspBoundsOf()
         camera = cameraNode.GetCamera() if cameraNode is not None else None
-        if not data or camera is None:
+        if bounds is None or camera is None:
             return
-        distance = float(np.linalg.norm(np.asarray(camera.GetPosition()) - np.asarray(camera.GetFocalPoint())))
-        near, far = ssp.clippingRange(data["surface"]["points"], camera.GetFocalPoint(), distance)
-        camera.SetClippingRange(near, far)
+        center, radius = bounds
+        focal = np.asarray(camera.GetFocalPoint(), dtype=np.float64)
+        distance = float(np.linalg.norm(np.asarray(camera.GetPosition()) - focal))
+        # the surface's bounding sphere seen from the focal point (not every vertex again at each camera change)
+        reach = radius + float(np.linalg.norm(focal - center))
+        margin = 20.0
+        camera.SetClippingRange(max(0.1, distance - reach - margin), distance + reach + margin)
         try:
             widget.threeDView().scheduleRender()
         except AttributeError:
@@ -4312,6 +4383,9 @@ class StaticNeuroPETWidget(DynamicNeuroPETWidget):
         self._contrastFor = None
         self.reviewResult = self.scoreNode = self.reviewTable = self.greyPetNode = None
         self.sspModels = {}
+        self._sspPolys = {}
+        self._sspColorsWritten = {}
+        self._sspBounds = None
         self.scoreRgbNode = None
         self._cameraObservers = []
         self._segmentationDisplay = None
