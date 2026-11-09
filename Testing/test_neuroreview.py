@@ -165,15 +165,16 @@ def test_score_color_tables():
     assert nr.colorTable("ColdToHotRainbow") is None
     assert {"Plasma", "Viridis"} <= set(nr.SCORE_COLORMAPS)
     assert nr.SCORE_COLORMAPS[0] == "SSP_Rainbow" and nr.DEFAULT_MAXIMUM == 4.0
-    for label in ("SSP_Rainbow", "SSP_Hel", "SSP_Tamu", "SSP_Jet"):
+    for label in [label for label in nr.SCORE_COLORMAPS if label.startswith("SSP")]:
         table = nr.colorTable(label)
-        assert label in nr.SCORE_COLORMAPS
-        assert table.shape == (256, 3) and table.min() >= 0 and table.max() <= 1
+        assert table.shape == (256, 3) and table.min() >= 0 and table.max() <= 1, label
     rainbow = nr.colorTable("SSP_Rainbow")
-    assert rainbow[0].tolist() == pytest.approx([0.25098, 0, 0.501961])
-    assert rainbow[85].tolist() == pytest.approx([0, 0, 1]) and rainbow[127].tolist() == pytest.approx([0, 1, 0])
-    assert nr.colorTable("SSP_Tamu")[-1].tolist() == pytest.approx([1, 0, 0])     # beyond the last point: its colour
-    assert nr.colorTable("SSP_Jet")[-1].tolist() == pytest.approx([0.5, 0, 0])
+    assert rainbow[0].tolist() == [0, 0, 0] and rainbow[-1].tolist() == [1, 1, 1]
+    assert rainbow[126].tolist() == pytest.approx([0, 1, 0])
+    steps = nr.colorTable("SSP_Rainbow10")
+    assert len({tuple(row) for row in steps}) == 10 and steps[25].tolist() == [0, 0, 0]
+    assert steps[26].tolist() == [0.3, 0, 0.5] and steps[-1].tolist() == [1, 1, 1]
+    assert nr.colorTable("SSP-PET-DICOM")[63].tolist() == pytest.approx([0, 0, 0.8])
 
 
 def test_layout_xml():

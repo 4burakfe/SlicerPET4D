@@ -669,8 +669,10 @@ steps, on the toolbar like the Dynamic Neuro Receptor PET:
      are the database's (locked); for other regions of a user defined database computed from its subjects on the fly
      and cached in `<database>/cache/`; otherwise approximated from the mean / SD maps (the mean voxel SD is larger
      than the SD of a regional mean, so these scores are conservative). The optic chiasm is left out of the regions.
-   - **Display**: PET colors and window; score colors (SSP_Rainbow (default), SSP_Hel, SSP_Tamu, SSP_Jet (a copy of jet),
-     ColdToHotRainbow, DivergingBlueRed, Plasma or Viridis: below the normals cold, above them hot, 0 in the middle;
+   - **Display**: PET colors and window; score colors (SSP_Rainbow (default), SSP_Rainbow10 (ten steps), SSP-PET-DICOM,
+     SSP_HotIron, SSP_Inferno, SSP_Viridis, the diverging SSP_Turbo, SSP_IceFire (black at 0), SSP_CoolWarm,
+     SSP_GreyZero (grey around 0) and SSP_PurpleOrange, or Slicer's ColdToHotRainbow, DivergingBlueRed, Plasma or
+     Viridis: below the normals the low end, above them the high end, 0 in the middle;
      the same choice for the score slices and the 3D-SSP) over a window symmetric about 0 (default +/- 4); PET colors
      default Inferno; *Below the
      normals only* greys the positive side. **Score slices**: *Score as color, PET as brightness* (default: each voxel

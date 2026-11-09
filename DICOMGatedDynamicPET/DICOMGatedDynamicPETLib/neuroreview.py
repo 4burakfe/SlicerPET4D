@@ -43,20 +43,41 @@ BRIGHTNESS_GAMMA = 0.8
 SCORE_MASKS = ((MASK_GM, "Grey matter (MNI probability)"), (MASK_UPTAKE, "High normal uptake"))
 SD_FLOOR_FRACTION = 0.2         # SD floor: 20 % of the median SD in the mask
 DEFAULT_MAXIMUM = 4.0           # score window: -4 ... +4, 0 in the middle
-# the score colour maps made here: (position 0..255, R, G, B 0..1) points, linear between them (Slicer's procedural
-# color files); SSP_Jet a copy of the jet colour map
+# the score colour maps made here: (position 0..255, R, G, B 0..1) points, linear between them. From the CAT12
+# colours: SSP_Rainbow, SSP-PET-DICOM (GE Col), SSP_HotIron, SSP_Inferno, SSP_Viridis; SSP_Rainbow10 has ten flat
+# steps (_STEPS). Diverging, for scores (0 in the middle): SSP_Turbo (a smooth rainbow), SSP_IceFire (black at 0:
+# only the abnormal coloured), SSP_CoolWarm (blue - light grey - red), SSP_GreyZero (the rainbow with a grey band
+# around 0, about +/- 0.5 of a +/- 4 window), SSP_PurpleOrange
 _POINTS = {
-    "SSP_Rainbow": ((0, 0.25098, 0, 0.501961), (42.6, 0, 0, 0.501961), (85, 0, 0, 1), (127, 0, 1, 0),
-                    (170, 1, 1, 0), (212, 1, 0.501961, 0), (255, 1, 0.0117647, 0)),
-    "SSP_Hel": ((0, 0.25098, 0, 0.501961), (42.6, 0, 0, 0.501961), (85, 0.403922, 0.486275, 0.752941),
-                (127, 0.407843, 0.501961, 0.494118), (170, 1, 1, 0), (212, 1, 0.501961, 0), (255, 1, 0.0117647, 0)),
-    "SSP_Tamu": ((0, 0.25098, 0, 0.501961), (67, 0, 0, 0.752941), (125, 0.752941, 0.752941, 0.752941),
-                 (192, 1, 0.678431, 0.415686), (251.66, 1, 0, 0)),
-    "SSP_Jet": ((0, 0, 0, 0.5), (31.875, 0, 0, 1), (95.625, 0, 1, 1), (159.375, 1, 1, 0), (223.125, 1, 0, 0),
-                (255, 0.5, 0, 0)),
+    "SSP_Rainbow": ((0, 0, 0, 0), (41, 0, 0, 0.5), (84, 0, 0.5, 1), (126, 0, 1, 0), (169, 1, 1, 0), (211, 1, 0, 0),
+                    (255, 1, 1, 1)),
+    "SSP-PET-DICOM": ((0, 0, 0, 0), (31, 0, 0.4, 0.4), (63, 0, 0, 0.8), (95, 0.4, 0, 0.8), (127, 0.8, 0, 0.8),
+                      (159, 0.9, 0.3, 0.3), (191, 1, 0.5, 0), (223, 1, 0.8, 0.5), (255, 1, 1, 1)),
+    "SSP_HotIron": ((0, 0, 0, 0), (63, 0.5, 0, 0), (127, 1, 0, 0), (191, 1, 1, 0), (255, 1, 1, 1)),
+    "SSP_Inferno": ((0, 0, 0, 0.02), (51, 0.259, 0.039, 0.408), (102, 0.576, 0.149, 0.404),
+                    (153, 0.867, 0.318, 0.227), (204, 0.988, 0.647, 0.039), (255, 0.988, 1.0, 0.643)),
+    "SSP_Viridis": ((0, 0.267, 0.004, 0.329), (51, 0.255, 0.267, 0.529), (102, 0.165, 0.471, 0.557),
+                    (153, 0.133, 0.659, 0.518), (204, 0.478, 0.820, 0.318), (255, 0.992, 0.906, 0.145)),
+    "SSP_Turbo": ((0, 0.190, 0.072, 0.232), (32, 0.268, 0.416, 0.936), (64, 0.148, 0.743, 0.879),
+                  (96, 0.253, 0.954, 0.569), (128, 0.595, 0.981, 0.310), (160, 0.936, 0.809, 0.175),
+                  (192, 1.0, 0.494, 0.113), (224, 0.777, 0.168, 0.045), (255, 0.480, 0.016, 0.011)),
+    "SSP_IceFire": ((0, 0.8, 1, 1), (48, 0, 0.7, 1), (96, 0, 0.2, 0.6), (128, 0.05, 0.05, 0.05), (160, 0.6, 0.1, 0),
+                    (208, 1, 0.5, 0), (255, 1, 1, 0.6)),
+    "SSP_CoolWarm": ((0, 0.230, 0.299, 0.754), (64, 0.552, 0.690, 0.996), (128, 0.865, 0.865, 0.865),
+                     (192, 0.958, 0.604, 0.483), (255, 0.706, 0.016, 0.150)),
+    "SSP_GreyZero": ((0, 0, 0, 0), (40, 0, 0, 0.8), (80, 0, 0.8, 1), (112, 0.55, 0.55, 0.55),
+                     (144, 0.55, 0.55, 0.55), (176, 1, 0.9, 0), (216, 1, 0.2, 0), (255, 1, 1, 1)),
+    "SSP_PurpleOrange": ((0, 0.176, 0, 0.294), (51, 0.502, 0.451, 0.675), (102, 0.847, 0.855, 0.922),
+                         (128, 0.969, 0.969, 0.969), (153, 0.996, 0.878, 0.714), (204, 0.878, 0.510, 0.078),
+                         (255, 0.498, 0.231, 0.031)),
 }
-SCORE_COLORMAPS = ("SSP_Rainbow", "SSP_Hel", "SSP_Tamu", "SSP_Jet", "ColdToHotRainbow", "DivergingBlueRed", "Plasma",
-                   "Viridis")     # the first is the default
+_STEPS = {
+    "SSP_Rainbow10": ((0, 0, 0), (0.3, 0, 0.5), (0, 0, 1), (0, 0.7, 1), (0, 1, 0), (0.6, 1, 0), (1, 1, 0),
+                      (1, 0.5, 0), (1, 0, 0), (1, 1, 1)),
+}
+SCORE_COLORMAPS = ("SSP_Rainbow", "SSP_Rainbow10", "SSP-PET-DICOM", "SSP_HotIron", "SSP_Inferno", "SSP_Viridis",
+                   "SSP_Turbo", "SSP_IceFire", "SSP_CoolWarm", "SSP_GreyZero", "SSP_PurpleOrange", "ColdToHotRainbow",
+                   "DivergingBlueRed", "Plasma", "Viridis")     # the first is the default
 # Plasma and Viridis (matplotlib, CC0): 17 anchors, interpolated to 256 (the others are Slicer's colour tables)
 _ANCHORS = {
     "Plasma": "0d08873105974c02a16600a77e03a89511a1aa2395bc3587cc4778da5a6ae66c5cf0804ef89540fdac33fdc527f8df25f0f921",
@@ -351,6 +372,10 @@ def tableRows(patientValues, patientSuv, reference, kind=DEFAULT_SCORE):
 # ---------------------------------------------------------------------------
 def colorTable(label, count=256):
     """count x 3 RGB (0..1) of the SSP_ maps, Plasma and Viridis; None for the other colour maps (Slicer's)."""
+    steps = _STEPS.get(label)
+    if steps is not None:
+        steps = np.asarray(steps, dtype=float)
+        return steps[np.minimum((np.arange(count) * len(steps)) // count, len(steps) - 1)]
     points = _POINTS.get(label)
     if points is not None:
         points = np.asarray(points, dtype=float)
