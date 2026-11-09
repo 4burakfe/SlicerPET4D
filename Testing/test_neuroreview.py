@@ -176,8 +176,8 @@ def test_score_color_tables():
     assert steps[26].tolist() == [0.3, 0, 0.5] and steps[-1].tolist() == [1, 1, 1]
     assert nr.colorTable("SSP-PET-DICOM")[63].tolist() == pytest.approx([0, 0, 0.8])
     ice = nr.colorTable("SSP_IceFire")
-    assert ice[0].tolist() == [0, 0, 1] and ice[127].tolist() == pytest.approx([0, 0, 0.1])
-    assert np.all(ice[:128, :2] == 0)                   # the cold side pure blue
+    assert ice[0].tolist() == [0.6, 0, 1] and ice[127].tolist() == pytest.approx([0, 0, 0.1])
+    assert np.all(ice[40:128, :2] == 0) and np.all(ice[:128, 1] == 0)     # blue, purple at the lowest end
 
 
 def test_reference_regions_left_out():
