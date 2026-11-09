@@ -442,6 +442,34 @@ def taggedAgeSex(attributes):
 
 
 # ---------------------------------------------------------------------------
+# Name and ID of the patient (read from the DICOM tags, editable on the Data page)
+# ---------------------------------------------------------------------------
+def formatPatientName(text):
+    """A DICOM Person Name ('DOE^JOHN^^^' or 'Doe^John=...') as plain text ('DOE JOHN'); '' when not given."""
+    text = str(text or "").split("=")[0]            # the alphabetic representation only
+    parts = [p.strip() for p in text.split("^") if p.strip()]
+    return " ".join(parts)
+
+
+def taggedSubjectId(attributes):
+    """The patient's ID from the loaders' tags of a volume: the BIDS subject of an imported file ('sub-16'), else
+    ''."""
+    for prefix in (STATIC_PREFIX, SPECT_PREFIX):
+        subject = str((attributes or {}).get(prefix + "SubjectID") or "").strip()
+        if subject:
+            return subject if subject.startswith("sub-") else "sub-" + subject
+    return ""
+
+
+def patientText(name, patientId):
+    """'NAME (ID)', 'NAME', 'ID' or '' for the workflow toolbar."""
+    name, patientId = str(name or "").strip(), str(patientId or "").strip()
+    if name and patientId:
+        return f"{name} ({patientId})"
+    return name or patientId
+
+
+# ---------------------------------------------------------------------------
 # A patient added to a user defined database
 # ---------------------------------------------------------------------------
 def suggestedSubjectId(attributes, name=""):

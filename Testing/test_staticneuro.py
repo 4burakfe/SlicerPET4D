@@ -182,3 +182,14 @@ def test_qc_montage():
     assert picture.shape[1] == 2 * (10 + 10 + 8) + 3 * 8
     with pytest.raises(ValueError):
         sn.qcMontage(anatomy, pet[:-1])
+
+
+def test_patient_name_and_id():
+    assert sn.formatPatientName("DOE^JOHN^^^") == "DOE JOHN"
+    assert sn.formatPatientName("Yamada^Tarou=山田^太郎") == "Yamada Tarou"
+    assert sn.formatPatientName("") == "" and sn.formatPatientName(None) == ""
+    assert sn.taggedSubjectId({"StaticPET.SubjectID": "16"}) == "sub-16"
+    assert sn.taggedSubjectId({"SPECTRecon.SubjectID": "sub-3"}) == "sub-3"
+    assert sn.taggedSubjectId({}) == ""
+    assert sn.patientText("DOE JOHN", "123") == "DOE JOHN (123)"
+    assert sn.patientText("", "123") == "123" and sn.patientText("A", "") == "A" and sn.patientText("", "") == ""

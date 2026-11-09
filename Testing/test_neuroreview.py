@@ -177,7 +177,7 @@ def test_score_color_tables():
     assert np.allclose(nr.colorTable("Viridis")[-1], (0xfd / 255, 0xe7 / 255, 0x25 / 255))
     assert nr.colorTable("ColdToHotRainbow") is None
     assert {"Plasma", "Viridis"} <= set(nr.SCORE_COLORMAPS)
-    assert nr.SCORE_COLORMAPS[:2] == ("SSP_Turbo", "SSP_IceFire") and nr.DEFAULT_MAXIMUM == 4.0
+    assert nr.SCORE_COLORMAPS[:2] == ("SSP_Turbo", "SSP_IceFire") and nr.DEFAULT_MAXIMUM == 7.0
     for label in [label for label in nr.SCORE_COLORMAPS if label.startswith("SSP")]:
         table = nr.colorTable(label)
         assert table.shape == (256, 3) and table.min() >= 0 and table.max() <= 1, label
@@ -237,4 +237,4 @@ def test_layout_xml():
     plainTags = [v.getAttribute("singletontag") for v in plain.getElementsByTagName("view")]
     assert len(plainTags) == 13 and nr.sspViewName("LeftMedial") not in plainTags      # 2 x (2 x 3) and the table
     assert nr.sspViews(False)[1] == 3 and len(nr.sspViews(False)[0]) == 6
-    assert nr.defaultLayout(2) == nr.LAYOUT_DUAL and nr.defaultLayout(1) == nr.LAYOUT_SINGLE
+    assert nr.defaultLayout(2) == nr.LAYOUT_DUAL_LOW and nr.defaultLayout(1) == nr.LAYOUT_SINGLE

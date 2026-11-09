@@ -42,7 +42,7 @@ BRIGHTNESS_PERCENTILE = 99.5    # the PET brightness: full at this percentile of
 BRIGHTNESS_GAMMA = 0.8
 SCORE_MASKS = ((MASK_GM, "Grey matter (MNI probability)"), (MASK_UPTAKE, "High normal uptake"))
 SD_FLOOR_FRACTION = 0.2         # SD floor: 20 % of the median SD in the mask
-DEFAULT_MAXIMUM = 4.0           # score window: -4 ... +4, 0 in the middle
+DEFAULT_MAXIMUM = 7.0           # score window: -7 ... +7 SD, 0 in the middle
 # the score colour maps made here: (position 0..255, R, G, B 0..1) points, linear between them. From the CAT12
 # colours: SSP_Rainbow, SSP-PET-DICOM, SSP_HotIron, SSP_Inferno, SSP_Viridis; SSP_Rainbow10 has ten flat
 # steps (_STEPS). Diverging, for scores (0 in the middle): SSP_Turbo (a smooth rainbow), SSP_IceFire (black at 0:
@@ -530,8 +530,9 @@ def sspViewTags():
 
 
 def defaultLayout(screens):
-    """Dual monitor with two screens or more, else the single monitor layout."""
-    return LAYOUT_DUAL if screens >= 2 else LAYOUT_SINGLE
+    """Dual monitor with the 16 3D-SSP views (with the low scores) with two screens or more, else the single monitor
+    layout."""
+    return LAYOUT_DUAL_LOW if screens >= 2 else LAYOUT_SINGLE
 
 
 def _sliceRows():

@@ -867,6 +867,12 @@ class DynamicNeuroPETLogic(ScriptedLoadableModuleLogic):
 # Widget
 # ---------------------------------------------------------------------------
 def _badge(state, number, size=22):
+    return qt.QIcon(_badgePixmap(state, number, size))
+
+
+def _badgePixmap(state, number, size=22):
+    """The state badge of a step (a ring with its number, a filled disc with a tick when done), drawn at twice the
+    size (sharp on high DPI screens)."""
     scale = 2
     pixmap = qt.QPixmap(size * scale, size * scale)
     pixmap.fill(qt.QColor(0, 0, 0, 0))
@@ -894,7 +900,7 @@ def _badge(state, number, size=22):
                          else str(number))
     finally:
         painter.end()
-    return qt.QIcon(pixmap)
+    return pixmap
 
 
 def _button(text, role="action"):
@@ -927,6 +933,8 @@ class DynamicNeuroPETWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
     STEP_AFTER_REGIONS = STEP_MODEL
     NORM_METHODS = METHODS
     LOAD_REGIONS_TEXT = "Load regions and go to modeling"
+    NORM_HARDEN_GRIDS = NORMALIZATION_GRIDS         # the first one the default of the Harden dialog
+    NORM_HARDEN_ACTIONS = (("Save separately", reg.SAVE_SEPARATELY), ("Overwrite", reg.OVERWRITE))
 
     def __init__(self, parent=None):
         ScriptedLoadableModuleWidget.__init__(self, parent)
@@ -964,8 +972,10 @@ class DynamicNeuroPETWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.titleLabel.wordWrap = True
         self.layout.addWidget(self.titleLabel)
 
+        # the page, then Back / Next right under its last element (not at the bottom of the panel), then the
+        # free space
         self.stack = qt.QStackedWidget()
-        self.layout.addWidget(self.stack, 1)
+        self.layout.addWidget(self.stack)
 
         nav = qt.QHBoxLayout()
         self.backButton = qt.QPushButton("‹ Back")
@@ -974,6 +984,7 @@ class DynamicNeuroPETWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         nav.addStretch(1)
         nav.addWidget(self.nextButton)
         self.layout.addLayout(nav)
+        self.layout.addStretch(1)
         self.backButton.connect("clicked()", lambda: self.moveStep(-1))
         self.nextButton.connect("clicked()", lambda: self.moveStep(1))
 
@@ -1704,9 +1715,8 @@ class DynamicNeuroPETWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         template, method = self.normResult["template"], self.normResult["method"]
         petSpacing = reg.gridSpacing(_ijkToRas(self.logic.firstImage(sequence)))
         text = self._normHardenText(sequence, template, method)
-        choice = hardenDialog("Harden normalization", text, NORMALIZATION_GRIDS, petSpacing,
-                              [("Save separately", reg.SAVE_SEPARATELY), ("Overwrite", reg.OVERWRITE)],
-                              slicer.util.mainWindow())
+        choice = hardenDialog("Harden normalization", text, self.NORM_HARDEN_GRIDS, petSpacing,
+                              list(self.NORM_HARDEN_ACTIONS), slicer.util.mainWindow())
         if choice is None:
             return
         steps = reg.stepsText(self.normResult["steps"])
@@ -1715,9 +1725,8 @@ class DynamicNeuroPETWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.normManualButton.checked = False
         qt.QApplication.setOverrideCursor(qt.Qt.WaitCursor)
         try:
-            undo, newSequence, newSummed, normalizedAnatomy = self.logic.harden(
-                sequence, template, self.normSession.linear, choice["action"], choice["grid"], choice["spacing"],
-                choice["interpolation"], description, method, self.anatomy())
+            undo, newSequence, newSummed, normalizedAnatomy = self._hardenNormalization(
+                sequence, template, choice, description, method)
         except Exception as error:
             logging.exception("Neuro: could not harden the normalization")
             slicer.util.errorDisplay(f"Could not harden the normalization:\n{error}")
@@ -1737,6 +1746,11 @@ class DynamicNeuroPETWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self._showNormalized(newSequence, template)
         self._updateNormButtons()
         self.refresh()
+
+    def _hardenNormalization(self, sequence, template, choice, description, method):
+        """logic.harden() of the pending normalization with the Harden dialog's choice."""
+        return self.logic.harden(sequence, template, self.normSession.linear, choice["action"], choice["grid"],
+                                 choice["spacing"], choice["interpolation"], description, method, self.anatomy())
 
     @staticmethod
     def _normHardenText(sequence, template, method):
@@ -2123,6 +2137,8 @@ class DynamicNeuroPETWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         if enterStep and slicer.util.selectedModule() == self.MODULE_NAME:
             self._callStep(key, "enter")
         self.refresh()
+        if previous != key:
+            self._scrollToTop()
 
     def moveStep(self, delta):
         keys = [k for k, _, _, _ in self.STEPS]
@@ -2147,6 +2163,19 @@ class DynamicNeuroPETWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         states[STEP_MODEL] = STATE_READY if segmentation is not None else STATE_WAITING
         return states
 
+    def _stepIcon(self, key, state, number):
+        """The icon of a step button: its state and number."""
+        return _badge(state, number)
+
+    def _scrollToTop(self):
+        """The module panel scrolled back to its top (a step shown after a long one opened where that one ended)."""
+        widget = self.parent
+        while widget is not None:
+            if widget.inherits("QScrollArea"):
+                widget.verticalScrollBar().setValue(0)
+                return
+            widget = widget.parentWidget()
+
     def _defaultMethod(self):
         """Normalize with the patient's CT/MR when the study has one (else the PET), until the method is picked by
         hand; a pending normalization is not touched."""
@@ -2163,7 +2192,7 @@ class DynamicNeuroPETWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         states = self.stepStates()
         for number, (key, _, title, explanation) in enumerate(self.STEPS, start=1):
             button = self.stepButtons[key]
-            button.setIcon(_badge(states[key], number))
+            button.setIcon(self._stepIcon(key, states[key], number))
             button.checked = key == self.current
             if key == self.current:
                 self.titleLabel.text = f"<b>{number}. {title}</b> - {explanation}"

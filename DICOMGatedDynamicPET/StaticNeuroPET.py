@@ -15,7 +15,7 @@ Receptor PET module (same normalization and regions) and the Neuro PET normal da
     4. Regions              the CerebrA regions: with a database its region settings (atlas, growth, white matter,
                             reference region and its mask) are used, locked unless unlocked
     5. Review               the comparison with the database (4 x 4 layout: PET with region outlines, voxel z / t
-                            map, 3D-SSP views, region table with SUVmean and regional scores; MR fusion); adding
+                            map, 3D-SSP views, region table with SUVmean and regional scores; fusion with the CT / MR / template); adding
                             the patient to a user defined database (SUV and SUVR maps on the database grid, a row
                             in subjects.csv)
 """
@@ -45,8 +45,9 @@ from DICOMGatedDynamicPETLib import ssp  # noqa: E402
 from DICOMGatedDynamicPETLib import staticneuro as sn  # noqa: E402
 from DICOMGatedDynamicPETLib.hardendialog import hardenDialog  # noqa: E402
 from DynamicNeuroPET import (DynamicNeuroPETLogic, DynamicNeuroPETWidget, _button, _ijkToRas, _percentiles,  # noqa
-                             _vtkMatrix, ATLAS_BILATERAL, ATLAS_FILE_ATTRIBUTE, METHOD_ANATOMY, METHOD_PET,
-                             METHOD_PET_TEMPLATE, NEURO_PREFIX, NORMALIZED_SUFFIX, REFERENCE_SUFFIX, REG_PREFIX,
+                             _badgePixmap, _vtkMatrix, ATLAS_BILATERAL, ATLAS_FILE_ATTRIBUTE, METHOD_ANATOMY,
+                             METHOD_PET, METHOD_PET_TEMPLATE, NEURO_PREFIX, NORMALIZATION_GRIDS, NORMALIZED_SUFFIX,
+                             REFERENCE_SUFFIX, REG_PREFIX,
                              STATE_DONE, STATE_READY, STATE_WAITING, STEP_DATA, STEP_NORM, STEP_REG, STEP_REGIONS,
                              NORMALIZATION_ENGINE, NORMALIZATION_ITERATIVE_DEFORMABLE, NORMALIZATION_ITERATIVE_LINEAR,
                              NORMALIZATION_STEPS, NORMALIZATION_WORKING_MM)
@@ -60,12 +61,21 @@ STEPS = (
     (STEP_REVIEW, None, "Review", "Comparison with the normal database"),
 )
 METHODS = ((METHOD_PET, "PET/SPECT to MR template (T1)"),
-           (METHOD_ANATOMY, "CT/MR to MR template, same transform to the PET/SPECT"),
+           (METHOD_ANATOMY, "MR to MR template, same transform to the PET/SPECT (not with a CT)"),
            (METHOD_PET_TEMPLATE, "PET/SPECT to PET template (normal database mean)"))
 SETTINGS_DB_ROOT = "DICOMGatedDynamicPET/NeuroDatabase/RootFolder"     # shared with the Neuro PET Database Manager
 SETTINGS_IMPORT_FOLDER = "DICOMGatedDynamicPET/StaticNeuro/ImportFolder"
 SETTINGS_DISPLAY = "DICOMGatedDynamicPET/StaticNeuro/DisplaySettings"     # JSON of the saved review display settings
 AGE_ATTRIBUTE, SEX_ATTRIBUTE = NEURO_PREFIX + "PatientAge", NEURO_PREFIX + "PatientSex"
+NAME_ATTRIBUTE, ID_ATTRIBUTE = NEURO_PREFIX + "PatientName", NEURO_PREFIX + "PatientID"
+SOURCE_ATTRIBUTE = NEURO_PREFIX + "Source"      # a CT / MR normalized with the image (the volume it was made from)
+# Harden of the normalization: the template grid and Overwrite by default
+NORM_HARDEN_GRIDS = tuple(sorted(NORMALIZATION_GRIDS, key=lambda option: option[1] != reg.OUTPUT_FIXED_GRID))
+NORM_HARDEN_ACTIONS = (("Overwrite", reg.OVERWRITE), ("Save separately", reg.SAVE_SEPARATELY))
+STEP_ICON_SIZE = 22                     # px, the height of a step's icon (its pictogram and its state badge)
+STEP_GLYPH_COLOR = "#5b6770"
+REVIEW_SCORE_WINDOWS = (2.0, 3.0, 4.0, 5.0, 7.0, 10.0)     # the score windows of the review toolbar (+/- SD)
+FUSION_TEMPLATES = ("T1", "T2", "PD")   # the MNI templates offered for the fusion of the review
 DATABASE_PARAMETER = NEURO_PREFIX + "Database"
 NORMALIZATION_ATTRIBUTE = NEURO_PREFIX + "Normalization"    # JSON of the settings the image was normalized with
 REGISTERED_SUFFIX = " registered"
@@ -193,6 +203,75 @@ def _showOnSecondScreen(window):
 
 
 # ---------------------------------------------------------------------------
+# Step icons: a pictogram of the step next to its state badge
+# ---------------------------------------------------------------------------
+def _stepGlyph(key, size=STEP_ICON_SIZE):
+    """A small line drawing of a step (drawn at twice the size): the patient (data), two overlapping images
+    (registration), the template grid (normalization), the atlas regions (regions), a bar chart (review)."""
+    scale = 2
+    full = size * scale
+    pixmap = qt.QPixmap(full, full)
+    pixmap.fill(qt.QColor(0, 0, 0, 0))
+    painter = qt.QPainter(pixmap)
+    try:
+        painter.setRenderHint(qt.QPainter.Antialiasing)
+        color = qt.QColor(STEP_GLYPH_COLOR)
+        pen = qt.QPen(color)
+        pen.setWidth(2 * scale)
+        painter.setPen(pen)
+        painter.setBrush(qt.QBrush(qt.QColor(0, 0, 0, 0)))
+        m = 3 * scale                       # margin
+        w = full - 2 * m
+        if key == STEP_DATA:                # head and shoulders
+            head = int(w * 0.42)
+            painter.drawEllipse(m + (w - head) // 2, m, head, head)
+            painter.drawArc(m + w // 8, m + int(w * 0.52), w - w // 4, int(w * 0.9), 0, 180 * 16)
+        elif key == STEP_REG:               # two overlapping images
+            side = int(w * 0.68)
+            painter.drawRect(m, m, side, side)
+            painter.setBrush(qt.QBrush(qt.QColor(color.red(), color.green(), color.blue(), 90)))
+            painter.drawRect(m + w - side, m + w - side, side, side)
+        elif key == STEP_NORM:              # the template grid
+            painter.drawRoundedRect(m, m, w, w, 2 * scale, 2 * scale)
+            thin = qt.QPen(color)
+            thin.setWidth(scale)
+            painter.setPen(thin)
+            for i in (1, 2):
+                painter.drawLine(m + i * w // 3, m, m + i * w // 3, m + w)
+                painter.drawLine(m, m + i * w // 3, m + w, m + i * w // 3)
+        elif key == STEP_REGIONS:           # a brain divided into regions
+            painter.drawEllipse(m, m + w // 8, w, int(w * 0.75))
+            painter.drawLine(m + w // 2, m + w // 8, m + w // 2, m + w // 8 + int(w * 0.75))
+            painter.drawLine(m + w // 2, m + w // 2, m + w, m + w // 2)
+            painter.drawLine(m + w // 4, m + w // 6, m + w // 4, m + int(w * 0.8))
+        else:                               # review: a bar chart
+            painter.setPen(qt.Qt.NoPen)
+            painter.setBrush(qt.QBrush(color))
+            bar = w // 5
+            for i, height in enumerate((0.45, 0.85, 0.65)):
+                h = int(w * height)
+                painter.drawRect(m + i * (bar + bar // 2) + bar // 4, m + w - h, bar, h)
+    finally:
+        painter.end()
+    return pixmap
+
+
+def _stepIcon(key, state, number, size=STEP_ICON_SIZE):
+    """The pictogram of a step and its state badge side by side (twice as wide as high)."""
+    scale = 2
+    full = size * scale
+    pixmap = qt.QPixmap(2 * full, full)
+    pixmap.fill(qt.QColor(0, 0, 0, 0))
+    painter = qt.QPainter(pixmap)
+    try:
+        painter.drawPixmap(0, 0, _stepGlyph(key, size))
+        painter.drawPixmap(full, 0, _badgePixmap(state, number, size))
+    finally:
+        painter.end()
+    return qt.QIcon(pixmap)
+
+
+# ---------------------------------------------------------------------------
 # Logic
 # ---------------------------------------------------------------------------
 class StaticNeuroPETLogic(DynamicNeuroPETLogic):
@@ -259,6 +338,50 @@ class StaticNeuroPETLogic(DynamicNeuroPETLogic):
             return
         node.SetAttribute(AGE_ATTRIBUTE, f"{age:g}" if age is not None else "")
         node.SetAttribute(SEX_ATTRIBUTE, sex or "")
+
+    @staticmethod
+    def _subjectHierarchyPatient(node):
+        """(name, ID) of the patient item above the volume in the subject hierarchy (a DICOM load); ('', '')."""
+        try:
+            shNode = slicer.vtkMRMLSubjectHierarchyNode.GetSubjectHierarchyNode(slicer.mrmlScene)
+            item = shNode.GetItemByDataNode(node)
+            root = shNode.GetSceneItemID()
+            constants = slicer.vtkMRMLSubjectHierarchyConstants
+            nameKey = constants.GetDICOMPatientNameAttributeName()
+            idKey = constants.GetDICOMPatientIDAttributeName()
+            while item and item != root:
+                name, patientId = shNode.GetItemAttribute(item, nameKey), shNode.GetItemAttribute(item, idKey)
+                if name or patientId:
+                    return sn.formatPatientName(name), (patientId or "").strip()
+                item = shNode.GetItemParent(item)
+        except Exception:
+            logging.debug("Static Neuro: no patient in the subject hierarchy", exc_info=True)
+        return "", ""
+
+    @classmethod
+    def patientNameAndId(cls, node):
+        """(name, ID) of the patient: the values entered on the Data page, else the DICOM tags (the file, else the
+        subject hierarchy), else the BIDS subject of an imported file (ID)."""
+        if node is None:
+            return "", ""
+        name, patientId = node.GetAttribute(NAME_ATTRIBUTE), node.GetAttribute(ID_ATTRIBUTE)
+        if name is None or patientId is None:
+            values = cls.dicomValues(node, ("0010,0010", "0010,0020"))
+            taggedName, taggedId = sn.formatPatientName(values["0010,0010"]), values["0010,0020"].strip()
+            if not taggedName or not taggedId:
+                hierarchyName, hierarchyId = cls._subjectHierarchyPatient(node)
+                taggedName, taggedId = taggedName or hierarchyName, taggedId or hierarchyId
+            taggedId = taggedId or sn.taggedSubjectId(cls.attributes(node))
+            name = taggedName if name is None else name
+            patientId = taggedId if patientId is None else patientId
+        return name, patientId
+
+    @staticmethod
+    def setPatientNameAndId(node, name, patientId):
+        if node is None:
+            return
+        node.SetAttribute(NAME_ATTRIBUTE, (name or "").strip())
+        node.SetAttribute(ID_ATTRIBUTE, (patientId or "").strip())
 
     @classmethod
     def isStaticImage(cls, node):
@@ -352,6 +475,9 @@ class StaticNeuroPETLogic(DynamicNeuroPETLogic):
 
     @staticmethod
     def revertHarden(undo):
+        for node in undo.get("extras") or ():          # the CT / MR sequences normalized with the image
+            if node is not None and slicer.mrmlScene.IsNodePresent(node):
+                slicer.mrmlScene.RemoveNode(node)
         if undo["action"] == reg.OVERWRITE:
             node = undo["node"]
             if not slicer.mrmlScene.IsNodePresent(node):
@@ -385,19 +511,29 @@ class StaticNeuroPETLogic(DynamicNeuroPETLogic):
 
     # --- normalization ---------------------------------------------------------------------------
     def harden(self, volume, template, linearNode, action, grid, spacing=None, interpolation="Linear",
-               description="", method=METHOD_PET, anatomy=None):
-        """The image resampled through the normalization onto the template's field of view; with METHOD_ANATOMY the
-        CT/MR is normalized too. Returns (undo, volume, None, normalized CT/MR or None)."""
+               description="", method=METHOD_PET, anatomy=None, extras=None):
+        """The image resampled through the normalization onto the template's field of view. The patient's CT/MR is
+        normalized too with the same transform (on the template grid) whatever the method: it lies on the image
+        (registered in step 2, or a PET/CT, PET/MR); so are extras, other sequences lying on the CT/MR (undo
+        ["extras"]). Returns (undo, volume, None, normalized CT/MR or None)."""
         attributes = {NEURO_PREFIX + "Template": template.GetName(), NEURO_PREFIX + "Method": method,
                       NEURO_PREFIX + "Transform": description}
         undo, node = self.hardenVolume(volume, template, linearNode, action, grid, spacing, interpolation,
                                        attributes, NORMALIZED_SUFFIX)
         normalized = None
-        if method == METHOD_ANATOMY and anatomy is not None:
+        if anatomy is not None:
             try:
                 normalized = self.normalizedAnatomy(anatomy, template, linearNode)
             except Exception:
                 logging.exception("Static Neuro: could not normalize the CT/MR")
+        undo["extras"] = []
+        for extra in extras or ():
+            if extra is None or extra is volume or extra is anatomy:
+                continue
+            try:
+                undo["extras"].append(self.normalizedAnatomy(extra, template, linearNode))
+            except Exception:
+                logging.exception(f"Static Neuro: could not normalize '{extra.GetName()}'")
         return undo, node, None, normalized
 
     # --- adding a patient to a normal database --------------------------------------------------
@@ -1110,8 +1246,12 @@ class StaticNeuroPETWidget(DynamicNeuroPETWidget):
     STEP_AFTER_REGIONS = STEP_REVIEW
     NORM_METHODS = METHODS
     LOAD_REGIONS_TEXT = "Load regions and go to review"
+    NORM_HARDEN_GRIDS = NORM_HARDEN_GRIDS
+    NORM_HARDEN_ACTIONS = NORM_HARDEN_ACTIONS
 
     def setup(self):
+        self._patientTexts = {}         # volume ID: the patient's name (ID) shown on the toolbar
+        self._contrastFor = None        # (CT/MR ID, (contrast, reason)): read once per CT/MR
         self.regSession = None
         self.regResult = None
         self.regUndo = None
@@ -1126,12 +1266,200 @@ class StaticNeuroPETWidget(DynamicNeuroPETWidget):
     def volume(self):
         return self.sequence()
 
+    # --- workflow toolbar: the patient right of the module's name, the review tools ----------------------------
+    def _stepButton(self, index, key, title, explanation):
+        button = DynamicNeuroPETWidget._stepButton(self, index, key, title, explanation)
+        button.setIconSize(qt.QSize(2 * STEP_ICON_SIZE, STEP_ICON_SIZE))
+        return button
+
+    def _stepIcon(self, key, state, number):
+        return _stepIcon(key, state, number)
+
+    def _buildToolbar(self):
+        toolbar = DynamicNeuroPETWidget._buildToolbar(self)
+        if toolbar is None:
+            return None
+        toolbar.setIconSize(qt.QSize(2 * STEP_ICON_SIZE, STEP_ICON_SIZE))
+        actions = list(toolbar.actions())
+        self.patientLabel = qt.QLabel()
+        self.patientLabel.setStyleSheet("QLabel { color: #2f7ed8; font-weight: bold; padding: 0 6px; }")
+        if len(actions) > 1:            # right of the module's name, before the steps
+            self._patientAction = toolbar.insertWidget(actions[1], self.patientLabel)
+        else:
+            self._patientAction = toolbar.addWidget(self.patientLabel)
+        self._patientAction.setVisible(False)
+        self._reviewToolActions = [toolbar.addSeparator()]
+        for text, tip, fill in (
+                ("Layout", "Review layout (single or dual monitor, the 3D-SSP views)", self._fillLayoutMenu),
+                ("Windows", "Score windows (slices and 3D-SSP) and the PET, 3D-SSP and fusion windows",
+                 self._fillWindowMenu),
+                ("Colors", "Color maps of the PET, the scores and the 3D-SSP", self._fillColorMenu)):
+            button = qt.QToolButton()
+            button.setText(text)
+            button.toolTip = tip
+            button.setToolButtonStyle(qt.Qt.ToolButtonTextOnly)
+            button.setPopupMode(qt.QToolButton.InstantPopup)
+            button.setFocusPolicy(qt.Qt.NoFocus)
+            menu = qt.QMenu(button)
+            button.setMenu(menu)
+            menu.connect("aboutToShow()", lambda m=menu, f=fill: f(m))
+            self._reviewToolActions.append(toolbar.addWidget(button))
+        for action in self._reviewToolActions:
+            action.setVisible(False)
+        return toolbar
+
+    def _updateReviewTools(self):
+        for action in getattr(self, "_reviewToolActions", []):
+            try:
+                action.setVisible(getattr(self, "current", None) == STEP_REVIEW)
+            except Exception:
+                pass
+
+    @staticmethod
+    def _menuChoice(menu, title, checked, callback):
+        action = menu.addAction(title)
+        action.setCheckable(True)
+        action.setChecked(bool(checked))
+        action.connect("triggered()", callback)
+        return action
+
+    def _fillLayoutMenu(self, menu):
+        menu.clear()
+        current = self.layoutCombo.currentData
+        for key, title in nr.LAYOUTS:
+            self._menuChoice(menu, title, key == current, lambda k=key: self._pickLayout(k))
+
+    def _pickLayout(self, key):
+        index = self.layoutCombo.findData(key)
+        if index >= 0:
+            self.layoutCombo.setCurrentIndex(index)
+            self._onLayoutPicked()
+
+    def _setScoreWindows(self, maximum):
+        """The score window of the slices and of the 3D-SSP: -maximum .. +maximum."""
+        self.scoreMaximumSpin.value = maximum
+        self.sspMaximumSpin.value = maximum
+
+    def _fillWindowMenu(self, menu):
+        menu.clear()
+        menu.addSection("Score window (slices and 3D-SSP)")
+        current = float(self.scoreMaximumSpin.value)
+        for maximum in REVIEW_SCORE_WINDOWS:
+            self._menuChoice(menu, f"\u00b1 {maximum:g} SD", abs(current - maximum) < 1e-6
+                             and abs(float(self.sspMaximumSpin.value) - maximum) < 1e-6,
+                             lambda v=maximum: self._setScoreWindows(v))
+        menu.addSection("Image windows")
+        reset = menu.addAction("PET: automatic (0 - 99.5th percentile)")
+        reset.connect("triggered()", self._initPetWindow)
+        full = menu.addAction("PET: 0 - maximum")
+        full.connect("triggered()", lambda: self.petWindowRange.setValues(0.0, self.petWindowRange.maximum))
+        patient = menu.addAction("3D-SSP patient values: automatic")
+        patient.connect("triggered()", lambda: (self._initSspWindow(), self._showSsp()))
+        patient.enabled = bool((self.reviewResult or {}).get("ssp"))
+        fusion = menu.addAction("Fusion image: automatic")
+        fusion.connect("triggered()", self._resetAnatomyWindow)
+        fusion.enabled = self._fusionVolume() is not None
+
+    def _resetAnatomyWindow(self):
+        self._anatomyWindowFor = None
+        self._onFusionChanged()
+
+    def _fillColorMenu(self, menu):
+        menu.clear()
+        for title, combo, labels in (("PET", self.petColorCombo, colormaps.LABELS),
+                                     ("Scores (slices)", self.scoreColorCombo, nr.SCORE_COLORMAPS),
+                                     ("3D-SSP scores", self.sspColorCombo, nr.SCORE_COLORMAPS),
+                                     ("3D-SSP patient values", self.sspPatientColorCombo, colormaps.LABELS)):
+            sub = menu.addMenu(title)
+            for label in labels:
+                self._menuChoice(sub, label, combo.currentText == label,
+                                 lambda c=combo, t=label: c.setCurrentIndex(max(0, c.findText(t))))
+        if self.fusionCheck.enabled:
+            menu.addSeparator()
+            self._menuChoice(menu, "Fusion with an anatomical image", self.fusionCheck.checked,
+                             lambda: setattr(self.fusionCheck, "checked", not self.fusionCheck.checked))
+
+    # --- navigation: no CT/MR, no registration step ----------------------------------------------------------
+    def moveStep(self, delta):
+        """Back / Next; the CT/MR registration is skipped when there is no CT/MR."""
+        keys = [k for k, _, _, _ in self.STEPS]
+        index = keys.index(self.current) + delta
+        while 0 <= index < len(keys) and keys[index] == STEP_REG and self.anatomy() is None:
+            index += 1 if delta > 0 else -1
+        if 0 <= index < len(keys):
+            self.showStep(keys[index])
+
+    # --- the CT/MR: an MR may be normalized (to the MR template), a CT not ------------------------------------
+    def contrast(self):
+        """(contrast, reason) of the CT/MR: the user's choice, else read from the DICOM tags (once per CT/MR)."""
+        chosen = self.contrastCombo.currentData if hasattr(self, "contrastCombo") else ""
+        if chosen:
+            return chosen, "chosen"
+        anatomy = self.anatomy()
+        key = anatomy.GetID() if anatomy is not None else ""
+        if self._contrastFor is None or self._contrastFor[0] != key:
+            self._contrastFor = (key, self.logic.anatomyContrast(anatomy))
+        return self._contrastFor[1]
+
+    def _anatomyIsMr(self):
+        """Whether the CT/MR can be normalized to the MR template: an MR (a CT fits its bone to the brain)."""
+        return self.anatomy() is not None and self.contrast()[0] != "CT"
+
+    def _updateMethodItems(self):
+        """The MR to MR template method offered only with an MR; with a CT (or none) the PET/SPECT is normalized."""
+        if not hasattr(self, "methodCombo"):
+            return
+        allowed = self._anatomyIsMr()
+        index = self.methodCombo.findData(METHOD_ANATOMY)
+        item = self.methodCombo.model().item(index) if index >= 0 else None
+        if item is not None:
+            item.setEnabled(allowed)
+            item.setToolTip("" if allowed else ("Pick an MR in step 1: a CT is not normalized to the MR template (its "
+                                                "bone pulls the fit); the PET/SPECT is, and the CT follows it."))
+        if not allowed and self.method() == METHOD_ANATOMY and self.normResult is None:
+            self.methodCombo.setCurrentIndex(self.methodCombo.findData(METHOD_PET))
+
+    def _defaultMethod(self):
+        """The MR when the study has one, else the PET/SPECT (to the MR template, or to the database's template when
+        its settings say so); until the method is picked by hand."""
+        self._updateMethodItems()
+        if getattr(self, "_methodChosen", False) or not hasattr(self, "methodCombo") or self.normResult is not None:
+            return
+        wanted = METHOD_ANATOMY if self._anatomyIsMr() else METHOD_PET
+        if self.methodCombo.currentData != wanted:
+            self.methodCombo.setCurrentIndex(self.methodCombo.findData(wanted))
+
     # --- page 1: data --------------------------------------------------------------------------------
     def _buildDataPage(self):
         page = qt.QWidget()
         layout = qt.QVBoxLayout(page)
         layout.setContentsMargins(0, 0, 0, 0)
-        box = qt.QGroupBox("Patient data")
+        patientBox = qt.QGroupBox("Patient")
+        patientForm = qt.QFormLayout(patientBox)
+        self.patientNameEdit = qt.QLineEdit()
+        self.patientNameEdit.toolTip = ("Name of the patient (from the DICOM tags; edit it if it is missing or wrong). "
+                                        "Shown on the toolbar from the next step on.")
+        patientForm.addRow("Name:", self.patientNameEdit)
+        self.patientIdEdit = qt.QLineEdit()
+        self.patientIdEdit.toolTip = ("Patient ID (from the DICOM tags, or the BIDS subject of an imported file; edit "
+                                      "it if it is missing or wrong)")
+        patientForm.addRow("Patient ID:", self.patientIdEdit)
+        ageRow = qt.QHBoxLayout()
+        self.ageSpin = qt.QDoubleSpinBox()
+        self.ageSpin.setRange(-1.0, 130.0)
+        self.ageSpin.setDecimals(0)
+        self.ageSpin.specialValueText = "Unknown"
+        self.ageSpin.suffix = " years"
+        self.ageSpin.toolTip = "Age of the patient at the scan (from the tags; edit it if it is missing or wrong)"
+        self.sexCombo = qt.QComboBox()
+        for key, title in sn.SEXES:
+            self.sexCombo.addItem(title, key)
+        self.sexCombo.toolTip = "Sex of the patient (from the tags; edit it if it is missing or wrong)"
+        ageRow.addWidget(self.ageSpin)
+        ageRow.addWidget(qt.QLabel("Sex:"))
+        ageRow.addWidget(self.sexCombo)
+        patientForm.addRow("Age:", ageRow)
+        box = qt.QGroupBox("Images")
         form = qt.QFormLayout(box)
         self.sequenceSelector = self._nodeSelector(["vtkMRMLScalarVolumeNode"],
                                                    "Static PET (PET4D DICOM plugin, e.g. '<series> static SUVbw') or "
@@ -1147,24 +1475,10 @@ class StaticNeuroPETWidget(DynamicNeuroPETWidget):
         self.sequenceInfo = qt.QLabel()
         self.sequenceInfo.wordWrap = True
         form.addRow(self.sequenceInfo)
-        ageRow = qt.QHBoxLayout()
-        self.ageSpin = qt.QDoubleSpinBox()
-        self.ageSpin.setRange(-1.0, 130.0)
-        self.ageSpin.setDecimals(0)
-        self.ageSpin.specialValueText = "Unknown"
-        self.ageSpin.suffix = " years"
-        self.ageSpin.toolTip = "Age of the patient at the scan (from the tags; edit it if it is missing or wrong)"
-        self.sexCombo = qt.QComboBox()
-        for key, title in sn.SEXES:
-            self.sexCombo.addItem(title, key)
-        self.sexCombo.toolTip = "Sex of the patient (from the tags; edit it if it is missing or wrong)"
-        ageRow.addWidget(self.ageSpin)
-        ageRow.addWidget(qt.QLabel("Sex:"))
-        ageRow.addWidget(self.sexCombo)
-        form.addRow("Age:", ageRow)
         self.anatomySelector = self._nodeSelector(["vtkMRMLScalarVolumeNode"],
-                                                  "CT or MR of the same patient (optional: registration in step 2, "
-                                                  "and the normalization through the CT/MR in step 3)")
+                                                  "CT or MR of the same patient (optional: registration in step 2; "
+                                                  "normalized with the image in step 3, and an MR may be the one "
+                                                  "normalized)")
         self.anatomySelector.hideChildNodeTypes = ["vtkMRMLLabelMapVolumeNode"]
         form.addRow("CT / MR:", self.anatomySelector)
         self.anatomyInfo = qt.QLabel()
@@ -1174,8 +1488,17 @@ class StaticNeuroPETWidget(DynamicNeuroPETWidget):
         for key, title in (("", "Automatic"), ("T1", "T1"), ("T2", "T2"), ("PD", "PD"), ("CT", "CT")):
             self.contrastCombo.addItem(title, key)
         self.contrastCombo.toolTip = ("Contrast of the CT/MR, read from the DICOM tags. It picks the template of "
-                                      "step 3 when the CT/MR is normalized.")
+                                      "step 3 when the MR is normalized (a CT is not: the PET/SPECT is).")
         form.addRow("Contrast:", self.contrastCombo)
+        self.extraSelector = slicer.qMRMLCheckableNodeComboBox()
+        self.extraSelector.nodeTypes = ["vtkMRMLScalarVolumeNode"]
+        self.extraSelector.hideChildNodeTypes = ["vtkMRMLLabelMapVolumeNode"]
+        self.extraSelector.setMRMLScene(slicer.mrmlScene)
+        self.extraSelector.toolTip = ("Other sequences of the patient lying on the CT/MR (e.g. FLAIR, T2, the CT of a "
+                                      "PET/CT next to the MR): normalized with the same transform in step 3, for the "
+                                      "fusion of the review")
+        form.addRow("Other sequences:", self.extraSelector)
+        layout.addWidget(patientBox)
         layout.addWidget(box)
         dicomButton = qt.QPushButton("Open the DICOM browser")
         dicomButton.toolTip = "Load the static PET / SPECT and the CT/MR from DICOM"
@@ -1194,7 +1517,19 @@ class StaticNeuroPETWidget(DynamicNeuroPETWidget):
         self.contrastCombo.connect("currentIndexChanged(int)", lambda i: self.onDataChanged())
         self.ageSpin.connect("valueChanged(double)", lambda v: self.onAgeSexChanged())
         self.sexCombo.connect("currentIndexChanged(int)", lambda i: self.onAgeSexChanged())
+        self.patientNameEdit.connect("textEdited(QString)", lambda text: self.onPatientChanged())
+        self.patientIdEdit.connect("textEdited(QString)", lambda text: self.onPatientChanged())
         return page
+
+    def extraVolumes(self):
+        """The other sequences picked on the Data page (not the image or the CT/MR)."""
+        if not hasattr(self, "extraSelector"):
+            return []
+        try:
+            nodes = list(self.extraSelector.checkedNodes())
+        except Exception:
+            return []
+        return [n for n in nodes if n is not None and n is not self.volume() and n is not self.anatomy()]
 
     def selectInputs(self):
         if self.volume() is None:
@@ -1251,14 +1586,51 @@ class StaticNeuroPETWidget(DynamicNeuroPETWidget):
         self._syncAgeSex()
 
     def _syncAgeSex(self):
-        age, sex = self.logic.ageAndSex(self.volume())
+        volume = self.volume()
+        age, sex = self.logic.ageAndSex(volume)
+        name, patientId = self.logic.patientNameAndId(volume)
         self._updating = True
         try:
             self.ageSpin.value = age if age is not None else -1.0
             self.sexCombo.setCurrentIndex(max(0, self.sexCombo.findData(sex or "")))
-            self.ageSpin.enabled = self.sexCombo.enabled = self.volume() is not None
+            self.patientNameEdit.text = name
+            self.patientIdEdit.text = patientId
+            for widget in (self.ageSpin, self.sexCombo, self.patientNameEdit, self.patientIdEdit):
+                widget.enabled = volume is not None
         finally:
             self._updating = False
+        if volume is not None:
+            self._patientTexts[volume.GetID()] = sn.patientText(name, patientId)
+        self._updatePatientLabel()
+
+    def onPatientChanged(self):
+        volume = self.volume()
+        if self._updating or volume is None:
+            return
+        self.logic.setPatientNameAndId(volume, self.patientNameEdit.text, self.patientIdEdit.text)
+        self._patientTexts[volume.GetID()] = sn.patientText(self.patientNameEdit.text, self.patientIdEdit.text)
+        self._updatePatientLabel()
+
+    def _patientText(self):
+        """'Name (ID)' of the image's patient (read once per volume)."""
+        volume = self.volume()
+        if volume is None:
+            return ""
+        if volume.GetID() not in self._patientTexts:
+            self._patientTexts[volume.GetID()] = sn.patientText(*self.logic.patientNameAndId(volume))
+        return self._patientTexts[volume.GetID()]
+
+    def _updatePatientLabel(self):
+        """The patient's name and ID right of the module's name on the toolbar, from the second step on (under the
+        step title when there is no toolbar)."""
+        text = self._patientText() if getattr(self, "current", STEP_DATA) != STEP_DATA else ""
+        label = getattr(self, "patientLabel", None)
+        if label is not None:
+            label.text = text
+            label.toolTip = f"Patient: {text}" if text else ""
+            self._patientAction.setVisible(bool(text))
+        elif text and hasattr(self, "titleLabel") and "Patient:" not in self.titleLabel.text:
+            self.titleLabel.text += f"<br><span style='color:#2f7ed8'>Patient: {text}</span>"
 
     def onAgeSexChanged(self):
         if self._updating or self.volume() is None:
@@ -1288,12 +1660,16 @@ class StaticNeuroPETWidget(DynamicNeuroPETWidget):
             self.sequenceInfo.text = text
         anatomy = self.anatomy()
         if anatomy is None:
-            self.anatomyInfo.text = "No CT/MR: step 2 and the CT/MR normalization are skipped."
+            self.anatomyInfo.text = "No CT/MR: step 2 is skipped and the PET/SPECT is normalized."
         else:
-            contrast, reason = self.logic.anatomyContrast(anatomy)
-            self.anatomyInfo.text = (f"Recognised as <b>{contrast}</b> ({reason})." if contrast else
-                                     f"Contrast not recognised ({reason}); the T1 template is used unless you pick "
-                                     "one.")
+            contrast, reason = self.contrast()
+            if contrast == "CT":
+                self.anatomyInfo.text = (f"Recognised as <b>CT</b> ({reason}): the PET/SPECT is normalized and the CT "
+                                         "follows it (a CT is not normalized to the MR template).")
+            else:
+                self.anatomyInfo.text = (f"Recognised as <b>{contrast}</b> ({reason})." if contrast else
+                                         f"Contrast not recognised ({reason}); the T1 template is used unless you "
+                                         "pick one.")
 
     # --- page 2: CT/MR registration --------------------------------------------------------------
     def _buildRegPage(self):
@@ -1645,9 +2021,10 @@ class StaticNeuroPETWidget(DynamicNeuroPETWidget):
     @staticmethod
     def _normHardenText(volume, template, method):
         return (f"Resample '{volume.GetName()}' through the normalization onto the field of view of the template "
-                f"'{template.GetName()}'."
-                + ("\nThe CT/MR is normalized too (on the template grid)." if method == METHOD_ANATOMY else "")
-                + "\n\nSave separately (default) keeps the image in the patient space next to the normalized one.")
+                f"'{template.GetName()}'.\nThe patient's CT/MR (and the other sequences of step 1) are normalized "
+                "too with the same transform (on the template grid)."
+                "\n\nOverwrite (default) replaces the image in the patient space (Revert puts it back); Save "
+                "separately keeps it next to the normalized one.")
 
     # --- normalization settings (stored with a database and on the normalized image) ----------------------
     def normalizationSettings(self):
@@ -1676,19 +2053,41 @@ class StaticNeuroPETWidget(DynamicNeuroPETWidget):
             return None
 
     def onNormalize(self):
+        if self.method() == METHOD_ANATOMY and self.anatomy() is not None and not self._anatomyIsMr():
+            slicer.util.warningDisplay("A CT is not normalized to the MR template (its bone pulls the fit). Normalize "
+                                       "the PET/SPECT: the CT follows it.", windowTitle="Normalization")
+            return
         settings = self.normalizationSettings()
         DynamicNeuroPETWidget.onNormalize(self)
         if self.normResult is not None:
             self.normResult["settings"] = settings
         self._updateDatabaseInfo()
 
+    def _hardenNormalization(self, volume, template, choice, description, method):
+        return self.logic.harden(volume, template, self.normSession.linear, choice["action"], choice["grid"],
+                                 choice["spacing"], choice["interpolation"], description, method, self.anatomy(),
+                                 self.extraVolumes())
+
     def onNormHarden(self):
         settings = (self.normResult or {}).get("settings")
         undo = self.normUndo
+        method = (self.normResult or {}).get("method")
         DynamicNeuroPETWidget.onNormHarden(self)
         volume = self.volume()
-        if self.normUndo is not undo and volume is not None and settings:
-            volume.SetAttribute(NORMALIZATION_ATTRIBUTE, json.dumps(settings))
+        if self.normUndo is not undo and volume is not None:
+            if settings:
+                volume.SetAttribute(NORMALIZATION_ATTRIBUTE, json.dumps(settings))
+            notes = []
+            extras = (self.normUndo.get("undo") or {}).get("extras") or []
+            if extras:
+                notes.append("Other sequences: " + ", ".join(f"'{n.GetName()}'" for n in extras) + ".")
+            anatomy = self.anatomy()
+            if (anatomy is not None and method != METHOD_ANATOMY
+                    and not self.logic.petInAnatomySpace(self.normUndo["previous"], anatomy)):
+                notes.append(f"'{anatomy.GetName()}' was not registered in step 2: it is taken as lying on the image "
+                             "(PET/CT, PET/MR).")
+            if notes:
+                self.normLabel.text += "\n" + " ".join(notes)
         self._updateDatabaseInfo()
 
     def _applyNormalizationSettings(self, header):
@@ -2077,8 +2476,8 @@ class StaticNeuroPETWidget(DynamicNeuroPETWidget):
             self.scoreStyleCombo.addItem(title, key)
         self.scoreStyleCombo.toolTip = (
             "Score as color, PET as brightness (default): each voxel colored by its score and as bright as the "
-            "patient's uptake there, with no threshold or mask (the PET's own pattern in the score's colors; the MR "
-            "fusion is not used in this row). Score map: the scores alone, in a mask and with a threshold (below).")
+            "patient's uptake there, with no threshold or mask (the PET's own pattern in the score's colors; over the "
+            "fusion image at the score opacity). Score map: the scores alone, in a mask and with a threshold (below).")
         view.addRow("Score slices:", self.scoreStyleCombo)
         self.scoreMaskCombo = qt.QComboBox()
         for key, title in nr.SCORE_MASKS:
@@ -2130,14 +2529,14 @@ class StaticNeuroPETWidget(DynamicNeuroPETWidget):
         layout.addWidget(viewBox)
         self._buildSspBox(layout)
 
-        fusionBox = qt.QGroupBox("MR fusion")
+        fusionBox = qt.QGroupBox("Fusion")
         fusion = qt.QFormLayout(fusionBox)
-        self.fusionCheck = qt.QCheckBox("Show the PET and the scores over an MR")
+        self.fusionCheck = qt.QCheckBox("Show the PET and the scores over an anatomical image")
         fusion.addRow(self.fusionCheck)
         self.fusionSourceCombo = qt.QComboBox()
-        self.fusionSourceCombo.toolTip = ("The MNI template T1, or the patient's own CT / MR when the normalization went "
-                                          "through it (normalized with the same transform)")
-        fusion.addRow("MR:", self.fusionSourceCombo)
+        self.fusionSourceCombo.toolTip = ("The patient's CT / MR and the other sequences of step 1 (normalized with "
+                                          "the image in step 3), or an MNI template (T1, T2, PD)")
+        fusion.addRow("Image:", self.fusionSourceCombo)
         self.fusionOpacity = ctk.ctkSliderWidget()
         self.fusionOpacity.minimum, self.fusionOpacity.maximum = 0.0, 1.0
         self.fusionOpacity.singleStep, self.fusionOpacity.decimals = 0.05, 2
@@ -2152,8 +2551,8 @@ class StaticNeuroPETWidget(DynamicNeuroPETWidget):
         fusion.addRow("Score opacity:", self.scoreOpacity)
         self.anatomyWindowRange = ctk.ctkRangeWidget()
         self.anatomyWindowRange.decimals = 1
-        self.anatomyWindowRange.toolTip = "Display range of the MR / CT (grey)"
-        fusion.addRow("MR window:", self.anatomyWindowRange)
+        self.anatomyWindowRange.toolTip = "Display range of the fusion image (CT / MR / template, grey)"
+        fusion.addRow("Image window:", self.anatomyWindowRange)
         layout.addWidget(fusionBox)
         settingsRow = qt.QHBoxLayout()
         self.saveDisplayButton = _button("Save display settings")
@@ -2336,12 +2735,33 @@ class StaticNeuroPETWidget(DynamicNeuroPETWidget):
         key = self.groupCombo.currentData if self.groupCombo.count else ""
         return key or nr.patientGroup(header, age)[0]
 
+    def _fusionCandidates(self):
+        """The patient's volumes in the template space for the fusion: the normalized CT / MR first, then the other
+        normalized sequences (and any other normalized anatomical volume)."""
+        first = self.node("NormalizedAnatomy")
+        skip = {n.GetID() for n in (self.volume(), getattr(self, "greyPetNode", None), self.scoreNode) if n is not None}
+        nodes = []
+        for node in slicer.util.getNodesByClass("vtkMRMLScalarVolumeNode"):
+            if (node.GetID() in skip or node.IsA("vtkMRMLLabelMapVolumeNode") or node.GetHideFromEditors()
+                    or node.GetAttribute(ATLAS_FILE_ATTRIBUTE) or not node.GetAttribute(NEURO_PREFIX + "Template")
+                    or self.logic.isStaticImage(node)):
+                continue
+            nodes.append(node)
+        nodes.sort(key=lambda n: n is not first)
+        return nodes
+
     def _fillFusionSources(self):
-        anatomy = self.node("NormalizedAnatomy")
-        wanted = [("template", "MNI template T1")] if "T1" in (self.atlas or {}) else []
-        if anatomy is not None:
-            wanted.append(("patient", f"Patient's CT / MR ({anatomy.GetName()})"))
-        if [self.fusionSourceCombo.itemData(i) for i in range(self.fusionSourceCombo.count)] == [k for k, _ in wanted]:
+        wanted = []
+        for node in self._fusionCandidates():
+            source = node.GetAttribute(SOURCE_ATTRIBUTE)
+            what = "CT" if source and source == (self.anatomy().GetName() if self.anatomy() else None) and \
+                self.contrast()[0] == "CT" else "Patient"
+            wanted.append((f"node:{node.GetID()}", f"{what}: {node.GetName()}"))
+        for key, title, _ in neuro.TEMPLATES:
+            if key in FUSION_TEMPLATES and key in (self.atlas or {}):
+                wanted.append((f"template:{key}", f"MNI template {title}"))
+        if [(self.fusionSourceCombo.itemData(i), self.fusionSourceCombo.itemText(i))
+                for i in range(self.fusionSourceCombo.count)] == wanted:
             return
         current = self.fusionSourceCombo.currentData
         self.fusionSourceCombo.blockSignals(True)
@@ -2355,11 +2775,13 @@ class StaticNeuroPETWidget(DynamicNeuroPETWidget):
     def _fusionVolume(self):
         if not self.fusionCheck.checked or not self.fusionCheck.enabled:
             return None
-        key = self.fusionSourceCombo.currentData
-        if key == "patient":
-            return self.node("NormalizedAnatomy")
-        if key == "template" and "T1" in (self.atlas or {}):
-            return self.logic.loadAtlasVolume(self.atlas["T1"], name="MNI ICBM152 2009c T1")
+        key = self.fusionSourceCombo.currentData or ""
+        if key.startswith("node:"):
+            node = slicer.mrmlScene.GetNodeByID(key[len("node:"):])
+            return node if node is not None and slicer.mrmlScene.IsNodePresent(node) else None
+        if key.startswith("template:") and key[len("template:"):] in (self.atlas or {}):
+            name = key[len("template:"):]
+            return self.logic.loadAtlasVolume(self.atlas[name], name=f"MNI ICBM152 2009c {name}")
         return None
 
     def onCompare(self):
@@ -3615,7 +4037,9 @@ class StaticNeuroPETWidget(DynamicNeuroPETWidget):
             composite.SetLinkedControl(False)
             top = pet if row == nr.PET_ROW else score
             colored = self._scoreColorsNode() if row == nr.SCORE_ROW and score is not None else None
-            if colored is not None:     # the colored PET; the scores on top, invisible (data probe, legend)
+            if colored is not None and anatomy is not None:     # the colored PET over the fusion image
+                background, foreground, opacity = anatomy, colored, float(self.scoreOpacity.value)
+            elif colored is not None:   # the colored PET; the scores on top, invisible (data probe, legend)
                 background, foreground, opacity = colored, score, 0.0
             elif anatomy is not None:
                 background, foreground = anatomy, top
@@ -3869,6 +4293,8 @@ class StaticNeuroPETWidget(DynamicNeuroPETWidget):
         DynamicNeuroPETWidget.refresh(self)
         self._updateRegButtons()
         self._updateReviewPage()
+        self._updatePatientLabel()
+        self._updateReviewTools()
 
     def cleanup(self):
         self._closeRegSession()
@@ -3882,6 +4308,8 @@ class StaticNeuroPETWidget(DynamicNeuroPETWidget):
         self.regResult = None
         self.regUndo = None
         self._databaseKey = None
+        self._patientTexts = {}
+        self._contrastFor = None
         self.reviewResult = self.scoreNode = self.reviewTable = self.greyPetNode = None
         self.sspModels = {}
         self.scoreRgbNode = None
@@ -4039,6 +4467,23 @@ class StaticNeuroPETTest(ScriptedLoadableModuleTest):
         settings = widget.normalizationSettings()
         self.assertIn(settings["method"], [m for m, _ in METHODS])
         self.assertTrue(_sameRegion("Cerebellum Gray Matter" + REFERENCE_SUFFIX, "cerebellum gray matter"))
+        # no CT/MR: Next from the data goes to the normalization (and Back to the data)
+        widget.setNode("Anatomy", None)
+        widget.showStep(STEP_DATA)
+        widget.moveStep(1)
+        self.assertEqual(widget.current, STEP_NORM)
+        widget.moveStep(-1)
+        self.assertEqual(widget.current, STEP_DATA)
+        # the patient's name and ID: the BIDS subject, then the values typed on the Data page
+        node.SetAttribute(sn.STATIC_PREFIX + "SubjectID", "7")
+        self.assertEqual(StaticNeuroPETLogic.patientNameAndId(node), ("", "sub-7"))
+        StaticNeuroPETLogic.setPatientNameAndId(node, " DOE JOHN ", "123")
+        self.assertEqual(StaticNeuroPETLogic.patientNameAndId(node), ("DOE JOHN", "123"))
+        self.assertEqual(NORM_HARDEN_GRIDS[0][1], reg.OUTPUT_FIXED_GRID)
+        self.assertEqual(NORM_HARDEN_ACTIONS[0][1], reg.OVERWRITE)
+        self.assertFalse(widget._anatomyIsMr())
+        for key, _, _, _ in STEPS:
+            self.assertFalse(_stepIcon(key, STATE_READY, 1).isNull())
         # batch: the normalization plan of a database without settings, the QC picture
         plan, settings = StaticNeuroPETLogic().batchPlan(normaldb.newHeader("batch", nuclide="F-18", tracer="FDG"))
         self.assertEqual(plan["method"], METHOD_PET)

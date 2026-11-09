@@ -629,14 +629,19 @@ database:
 ## Static Neuro PET/SPECT (workflow)
 
 The **Static Neuro PET/SPECT** module (Nuclear Medicine > PET4D) is the workflow for a static brain PET or SPECT. Its
-steps, on the toolbar like the Dynamic Neuro Receptor PET:
+steps, on the toolbar like the Dynamic Neuro Receptor PET (each with a small pictogram next to its state; from step 2
+on the patient's name and ID right of the module's name). **Back / Next** are right under the last element of the
+step; a step opens at its top. Without a CT / MR, Next goes from the data straight to the normalization.
 
 1. **Data**: the static PET (loaded by the PET4D DICOM plugin, SUV expected; Bq/ml gives a warning, ratio values are
    not affected) or SPECT (from the DICOM SPECT reconstruction module: counts, Bq/ml or SUV), and optionally the
    patient's CT / MR. Modality, units, nuclide and tracer are read from the tags of the loaders. **Import from
    file...** loads an image file; BIDS names such as `sub-00000016_ses-SUV_pet.nii.gz` are read with their `.json`
    sidecar (tracer, nuclide, units, timing) and the `participants.tsv` of the dataset (age, sex); a session or
-   acquisition named `SUV...` means SUV units. **Age and sex** come from the tags and can be typed.
+   acquisition named `SUV...` means SUV units. **Patient**: the **name and patient ID** (from the DICOM tags or
+   the subject hierarchy; the BIDS subject of an imported file as the ID), **age and sex** (from the tags); all can be
+   typed. **Other sequences**: more volumes of the patient lying on the CT / MR (FLAIR, T2, ...), normalized with the
+   same transform in step 3 for the fusion of the review.
 2. **CT/MR registration** (optional): the image registered to the CT / MR (BRAINSFit rigid by default, or the
    iterative engine), checked in the registration layout, corrected by hand, then hardened (saved separately or
    overwritten; Revert).
@@ -645,9 +650,12 @@ steps, on the toolbar like the Dynamic Neuro Receptor PET:
    picked; the others are marked with `!` and warn when picked. The database's normalization settings become the
    defaults of the page; other settings are allowed but warned about. Then the normalization to the MNI ICBM 152
    2009c space, three ways: the PET/SPECT to an MR template (T1, grey matter probability, or the **synthetic PET**:
-   GM + 0.3 x WM smoothed 6 mm FWHM, made on first use next to the GM map), the CT/MR to the MR template with the
-   same transform applied to the image, or the PET/SPECT to a **PET template**: the master mean map of the picked
-   database (it needs computed statistics). The settings used are kept on the normalized image
+   GM + 0.3 x WM smoothed 6 mm FWHM, made on first use next to the GM map), the **MR** to the MR template with the
+   same transform applied to the image (not a CT: its bone pulls the fit; with a CT the PET/SPECT is normalized), or
+   the PET/SPECT to a **PET template**: the master mean map of the picked database (it needs computed statistics).
+   Whatever the method, the patient's CT / MR (and the other sequences) are normalized with the same transform: they
+   lie on the image (registered in step 2, or a PET/CT, PET/MR). **Harden** resamples onto the template grid (1 mm)
+   and overwrites the image by default (Revert puts it back). The settings used are kept on the normalized image
    (`DynamicPET.Neuro.Normalization`).
 4. **Regions**: the CerebrA regions. The database sets the region settings (atlas, growth, white matter, reference
    region from its own reference mask): they are locked; **Unlock** (with a warning) changes them. Without a
@@ -658,10 +666,13 @@ steps, on the toolbar like the Dynamic Neuro Receptor PET:
    PET axial / coronal / sagittal with the region outlines, below it the **voxel score map**, then the eight **3D-SSP**
    views (superior, anterior, left, left medial / inferior, posterior, right, right medial; the six without the medial
    ones when the regions are bilateral), the **region table** on
-   the right), *Dual monitor* (the default with two screens: the slices and the table in the main window, the 3D-SSP
-   views in a window maximized on the second screen), *Slices and table* or *3D-SSP and table*. *Dual monitor, 3D-SSP
-   + low scores* and *3D-SSP + low scores and table* add a second set of the eight 3D-SSP views below the first (16 views):
-   the scores below the threshold only, colors reversed, the rest grey. The slice views are linked and have no title bars. Settings on the left:
+   the right), *Dual monitor* (the slices and the table in the main window, the 3D-SSP views in a window maximized on
+   the second screen), *Slices and table* or *3D-SSP and table*. *Dual monitor, 3D-SSP + low scores* (the default
+   with two screens) and *3D-SSP + low scores and table* add a second set of the eight 3D-SSP views below the first (16 views):
+   the scores below the threshold only, colors reversed, the rest grey. The slice views are linked and have no title bars.
+   In this step the toolbar has **Layout**, **Windows** (score windows +/- 2 to 10 SD for the slices and the 3D-SSP;
+   the PET, 3D-SSP patient and fusion windows back to automatic) and **Colors** (the PET, score and 3D-SSP color maps,
+   the fusion on / off) menus. Settings on the left:
    - **Normals**: automatically the patient's age group (the master when the age is not known or its group has no
      maps), or picked by hand. **Score**: z = (patient - normal mean) / SD or the Crawford-Howell t = z /
      sqrt(1 + 1/n) (default); negative means below the normals (hypometabolism / hypoperfusion).
@@ -676,7 +687,7 @@ steps, on the toolbar like the Dynamic Neuro Receptor PET:
      SSP_Rainbow10 (ten steps), SSP-PET-DICOM, SSP_HotIron, SSP_Inferno, SSP_Viridis, SSP_CoolWarm, SSP_GreyZero (grey
      around 0) and SSP_PurpleOrange, or Slicer's ColdToHotRainbow, DivergingBlueRed, Plasma or
      Viridis: below the normals the low end, above them the high end, 0 in the middle;
-     the same choice for the score slices and the 3D-SSP) over a window symmetric about 0 (default +/- 4); PET colors
+     the same choice for the score slices and the 3D-SSP) over a window symmetric about 0 (default +/- 7); PET colors
      default Inferno. **Scores colored**: all (default); *below the normals only*; or *below the threshold only*
      (**Threshold**, default -2). In the last two the color scale is reversed across minus the window .. 0 (the
      lowest scores at its top end) and the other scores are grey. **Save display settings** keeps the display, 3D-SSP and fusion settings
@@ -688,7 +699,7 @@ steps, on the toolbar like the Dynamic Neuro Receptor PET:
      probability >= 0.5, the same for every tracer, so the cortex stays with a striatal tracer such as fallypride) or
      *High normal uptake* (the normal mean above a percentage of its maximum, default 50 %). **Hide |score| below**
      (default 2): only the clusters below / above the normals are colored. **Score background**: the PET in grey
-     (default) or black; with the MR fusion the MR. The voxel score map projected on the 3D-SSP uses the same grey
+     (default) or black; with the fusion the fusion image. The voxel score map projected on the 3D-SSP uses the same grey
      matter (or uptake) mask. **Show the region outlines** (1 px, on the PET and the score slices). The name of the
      region under the mouse is shown on its left, also with the outlines hidden. **Show the color
      legends**: one on the left of each row.
@@ -713,8 +724,9 @@ steps, on the toolbar like the Dynamic Neuro Receptor PET:
      inferior, anterior and posterior views (for their default direction), **Lighting** (on by default; off: flat colors);
      zoom and pan are shared by the views, rotation is not. **Restore 3D views** puts back the default direction, zoom
      and position.
-   - **MR fusion**: the PET and the scores over the MNI template T1, or over the patient's CT / MR when the
-     normalization went through it, with the PET opacity, the score opacity (default 0.5) and the MR window.
+   - **Fusion**: the PET and the scores (also the score colored PET) over the patient's CT, MR or another sequence
+     (normalized in step 3) or an MNI template (T1, T2, PD), with the PET opacity, the score opacity (default 0.5) and
+     the image window.
 
    **Add this patient to a normal database** (user
    defined databases) builds a database from normal subjects: the normalized image is resampled onto the database
