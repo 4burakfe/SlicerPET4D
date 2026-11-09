@@ -31,6 +31,9 @@ DEFAULT_SOURCE = SOURCE_MINOSHIMA
 MAP_SCORE, MAP_PATIENT = "score", "patient"
 MAPS = ((MAP_SCORE, "Score (z / t)"), (MAP_PATIENT, "Patient (projected values)"))
 SSP_FILE = "stats/ssp.npz"
+# the surface's version in the .npz meta: 2, the triangles split to short edges after the decimation (the
+# hemispheres' flat midline faces were long triangles); an older stored surface is not used
+SURFACE_VERSION = 2
 
 PART_BRAIN, PART_LEFT, PART_RIGHT = 0, 1, 2
 # camera of each view: (direction from the brain centre to the camera, view up), RAS; the medial views look at one

@@ -404,7 +404,8 @@ class NeuroPETDatabaseManagerLogic(ScriptedLoadableModuleLogic):
             sspGroups = {k: {"mean": a.mean(), "sd": a.sd(), "n": a.n, "name": groups[k]["name"]}
                          for k, a in sspAccumulators.items() if a.n >= 2}
             ssp.write(sspFile, surface, sspGroups, {"depthMm": ssp.DEPTH_MM, "stepMm": ssp.STEP_MM,
-                                                    "clipToBrain": True, "fwhmMm": fwhm,
+                                                    "clipToBrain": True, "surface": ssp.SURFACE_VERSION,
+                                                    "fwhmMm": fwhm,
                                                     "maps": mapKey, "version": header.get("version", 1)})
             header["statistics"]["ssp"] = ssp.SSP_FILE
         elif os.path.isfile(sspFile):

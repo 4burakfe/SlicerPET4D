@@ -81,6 +81,8 @@ REVIEW_OUTLINE_THICKNESS = 1            # px, the region outlines on the slices
 REVIEW_FLASH_MS = 5000                  # a region clicked in the table: shown alone for 5 s
 MONITOR2_PLACE_DELAY_MS = 300           # the Monitor 2 window placed once the layout manager made its views
 SSP_TARGET_POINTS = 60000               # vertices of the 3D-SSP surface
+SSP_MAX_EDGE_MM = 4.0                   # its triangles' longest edge after the decimation (the flat midline faces of
+#                                         the hemispheres otherwise become a few long triangles across the face)
 SSP_MODEL_NAME = "Neuro 3D-SSP surface"
 SSP_COLOR_NODE = "Neuro 3D-SSP colors"
 SSP_LOW_COLOR_NODE = "Neuro 3D-SSP low score colors"
@@ -673,8 +675,8 @@ class StaticNeuroPETLogic(DynamicNeuroPETLogic):
     @staticmethod
     def brainSurface(mask, gridNode, targetPoints=SSP_TARGET_POINTS):
         """The surface of a brain mask (numpy (k, j, i) on gridNode's grid; holes filled, smoothed 1 voxel, the
-        largest piece, decimated to about targetPoints vertices): {"points" (RAS mm), "normals" (outward, unit),
-        "triangles"}."""
+        largest piece, decimated to about targetPoints vertices, the triangles then split to edges of at most
+        SSP_MAX_EDGE_MM): {"points" (RAS mm), "normals" (outward, unit), "triangles"}."""
         from scipy import ndimage
         from vtk.util import numpy_support
         mask = ndimage.binary_fill_holes(np.asarray(mask, dtype=bool))
@@ -694,11 +696,17 @@ class StaticNeuroPETLogic(DynamicNeuroPETLogic):
         connectivity.Update()
         count = connectivity.GetOutput().GetNumberOfPoints()
         last = connectivity
-        if count > targetPoints:
+        if count > targetPoints and hasattr(vtk, "vtkAdaptiveSubdivisionFilter"):     # else not decimated
             decimate = vtk.vtkQuadricDecimation()
             decimate.SetInputConnection(connectivity.GetOutputPort())
             decimate.SetTargetReduction(1.0 - float(targetPoints) / count)
-            last = decimate
+            # flat parts (the hemispheres' midline faces) are decimated into long triangles across them, the
+            # projected values interpolated along them: split back to short edges (voxel units here)
+            spacing = float(np.min(np.linalg.norm(_ijkToRas(gridNode)[:3, :3], axis=0))) or 1.0
+            subdivide = vtk.vtkAdaptiveSubdivisionFilter()
+            subdivide.SetInputConnection(decimate.GetOutputPort())
+            subdivide.SetMaximumEdgeLength(SSP_MAX_EDGE_MM / spacing)
+            last = subdivide
         transform = vtk.vtkTransform()
         transform.SetMatrix(_vtkMatrix(_ijkToRas(gridNode)))
         moved = vtk.vtkTransformPolyDataFilter()
@@ -819,9 +827,9 @@ class StaticNeuroPETLogic(DynamicNeuroPETLogic):
             read = ssp.read(path)
             if read is not None and read[2].get("maps") == mapKey and not (
                     abs(float(read[2].get("depthMm") or 0) - ssp.DEPTH_MM) < 1e-6 and read[2].get("clipToBrain")
-                    and ssp.hasMedial(read[0])):
+                    and ssp.hasMedial(read[0]) and int(read[2].get("surface") or 0) >= ssp.SURFACE_VERSION):
                 outdated, read = True, None         # an older projection (13.5 mm, not stopped at the brain's edge,
-                #                                     or without the hemispheres of the medial views)
+                #                                     without the hemispheres of the medial views, an older surface)
             if read is not None and read[2].get("maps") == mapKey:
                 surface, groups, meta = read
                 out["source"] = "the database's surface projections"
