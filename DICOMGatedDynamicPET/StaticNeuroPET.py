@@ -1374,6 +1374,11 @@ class StaticNeuroPETWidget(DynamicNeuroPETWidget):
             for label in labels:
                 self._menuChoice(sub, label, combo.currentText == label,
                                  lambda c=combo, t=label: c.setCurrentIndex(max(0, c.findText(t))))
+        menu.addSection("Score slices")
+        for key, title in nr.SCORE_STYLES:
+            self._menuChoice(menu, title, self.scoreStyleCombo.currentData == key,
+                             lambda k=key: self.scoreStyleCombo.setCurrentIndex(
+                                 max(0, self.scoreStyleCombo.findData(k))))
         if self.fusionCheck.enabled:
             menu.addSeparator()
             self._menuChoice(menu, "Fusion with an anatomical image", self.fusionCheck.checked,
@@ -2938,7 +2943,7 @@ class StaticNeuroPETWidget(DynamicNeuroPETWidget):
         compared = result.get("ratio") and units in (normaldb.MAP_SUVR, normaldb.MAP_RATIO, "SUVR")
         columns = ["Region", "SUVmean"] + ([units or "SUVR"] if compared else [])
         if result.get("header") is not None:
-            columns += ["Normal mean", "Normal SD", "n", kind]
+            columns += ["Normal (mean ± SD)", kind]
         table = vtk.vtkTable()
         arrays = []
         for name in columns:
@@ -2958,12 +2963,16 @@ class StaticNeuroPETWidget(DynamicNeuroPETWidget):
             return float(f"{value:.{digits}g}") if isinstance(value, float) else value
 
         cellRows = []
-        for name, suv, value, mean, sd, count, score in rows:
+        for name, suv, value, mean, sd, _, score in rows:
             cells = [name, text(suv)] + ([text(value)] if compared else [])
             numbers = [name, rounded(suv)] + ([rounded(value)] if compared else [])
             if result.get("header") is not None:
-                cells += [text(mean), text(sd), text(count), "" if score is None else f"{score:.2f}"]
-                numbers += [rounded(mean), rounded(sd), count, None if score is None else round(float(score), 2)]
+                normal = text(mean)
+                if normal and text(sd):         # mean and SD with the same decimals (2; none from 100)
+                    decimals = 2 if abs(float(mean)) < 100 else 0
+                    normal = f"{float(mean):.{decimals}f} ± {float(sd):.{decimals}f}"
+                cells += [normal, "" if score is None else f"{score:.2f}"]
+                numbers += [normal or None, None if score is None else round(float(score), 2)]
             for array, cell in zip(arrays, cells):
                 array.InsertNextValue(cell)
             cellRows.append(numbers)
