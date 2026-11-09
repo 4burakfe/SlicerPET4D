@@ -696,7 +696,8 @@ steps, on the toolbar like the Dynamic Neuro Receptor PET:
      mean, SD and n, and the score; as wide as its content. Click a column header to sort (by name or by value);
      click a region to show it alone on the slices for 5 s, the slices moved through it.
    - **3D-SSP** (Minoshima et al. 1995): the surface of all the regions together, and for the medial views each
-     hemisphere's (the regions cut at the midline, x = 0 in MNI space, stored with the brain's in `ssp.npz`; an older
+     hemisphere's (each made from its own mask, not by cutting a mesh: the regions with a side, "... L" / "... R", on
+     theirs, bilateral regions cut at the midline, x = 0 in MNI space; stored with the brain's in `ssp.npz`; an older
      `ssp.npz` without them is not used: compute the mean / SD again); each vertex takes the maximum of
      the patient's smoothed map along its inward normal (0-20 mm, 1 mm steps; the ray stops where it leaves the
      brain, the regions, and takes nothing beyond). **Map**: the score (default) or the

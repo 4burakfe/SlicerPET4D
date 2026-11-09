@@ -83,6 +83,34 @@ def hemispheres(shape, ijkToRas, midlineX=0.0):
     return x < midlineX, x >= midlineX
 
 
+def regionSide(name):
+    """"L" / "R" of a region named with its side ("Precuneus L", "Pons R (reference)"), None for the others."""
+    text = str(name or "").strip()
+    if text.lower().endswith(nr.REFERENCE_MARK):
+        text = text[:-len(nr.REFERENCE_MARK)].strip()
+    side = text[-2:].upper()
+    return side[1] if side in (" L", " R") else None
+
+
+def hemisphereMasks(masks, shape, ijkToRas, midlineX=0.0):
+    """(left, right) boolean arrays of the regions {name: mask}: the regions named with a side ("... L" / "... R")
+    on theirs, the others cut at the midline (all of them for bilateral regions); a voxel of both sides left."""
+    cutLeft, cutRight = hemispheres(shape, ijkToRas, midlineX)
+    left = np.zeros(shape, dtype=bool)
+    right = np.zeros(shape, dtype=bool)
+    for name, mask in masks.items():
+        mask = np.asarray(mask, dtype=bool)
+        side = regionSide(name)
+        if side == "L":
+            left |= mask
+        elif side == "R":
+            right |= mask
+        else:
+            left |= mask & cutLeft
+            right |= mask & cutRight
+    return left, right & ~left
+
+
 def combine(brain, left=None, right=None):
     """One surface of the brain's and the hemispheres' surfaces (vertices after one another, "parts" per vertex)."""
     pieces = [(PART_BRAIN, brain)] + [(part, s) for part, s in ((PART_LEFT, left), (PART_RIGHT, right))

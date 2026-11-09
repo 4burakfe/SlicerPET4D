@@ -604,7 +604,8 @@ class StaticNeuroPETLogic(DynamicNeuroPETLogic):
                 else:
                     ratio = None
             result.setdefault("values", result["suv"])
-            result.update(smoothed=ratio if result["ratio"] else values, union=nr.unionMask(masks, values.shape))
+            result.update(smoothed=ratio if result["ratio"] else values, union=nr.unionMask(masks, values.shape),
+                          hemispheres=ssp.hemisphereMasks(masks, values.shape, _ijkToRas(grid)))
             return result
         grid = self.loadAtlasVolume(os.path.join(folder, group["mean"]), name=f"{header['name']} mean ({groupKey})")
         sdNode = self.loadAtlasVolume(os.path.join(folder, group["sd"]), name=f"{header['name']} SD ({groupKey})")
@@ -650,7 +651,8 @@ class StaticNeuroPETLogic(DynamicNeuroPETLogic):
                 notes.append("The MNI brain mask is not on the database grid: the score mask is the mean map's.")
         mask = nr.scoreMask(mean, brain)
         smoothed = normaldb.smoothMap(values, fwhm, spacing)
-        result.update(smoothed=smoothed, union=nr.unionMask(masks, mean.shape))
+        result.update(smoothed=smoothed, union=nr.unionMask(masks, mean.shape),
+                      hemispheres=ssp.hemisphereMasks(masks, mean.shape, _ijkToRas(grid)))
         result["z"] = nr.scoreMap(smoothed, mean, sd, mask, nr.SCORE_Z)
         result["brightness"] = nr.petBrightness(values)     # the patient's map (not smoothed) as brightness
         result["gm"] = None         # the MNI grey matter probability on the grid: the score slices' default mask
@@ -728,15 +730,16 @@ class StaticNeuroPETLogic(DynamicNeuroPETLogic):
         return {"points": points, "normals": pointNormals, "triangles": cells.astype(np.int64)}
 
     @classmethod
-    def reviewSurface(cls, mask, gridNode, targetPoints=SSP_TARGET_POINTS):
-        """The 3D-SSP surface of a brain mask: the whole brain's and, for the medial views, each hemisphere's (the
-        mask cut at the midline, x = 0 in MNI space) in one surface (ssp.combine)."""
+    def reviewSurface(cls, mask, gridNode, targetPoints=SSP_TARGET_POINTS, hemispheres=None):
+        """The 3D-SSP surface of a brain mask: the whole brain's and, for the medial views, each hemisphere's in one
+        surface (ssp.combine). hemispheres: (left, right) masks (ssp.hemisphereMasks: the regions' own sides);
+        None: the mask cut at the midline, x = 0 in MNI space. Each made from its own mask (no cut of a mesh)."""
         brain = cls.brainSurface(mask, gridNode, targetPoints)
         mask = np.asarray(mask, dtype=bool)
         halves = []
-        for half in ssp.hemispheres(mask.shape, _ijkToRas(gridNode)):
+        for half in (hemispheres or ssp.hemispheres(mask.shape, _ijkToRas(gridNode))):
             try:
-                halves.append(cls.brainSurface(mask & half, gridNode, targetPoints // 2))
+                halves.append(cls.brainSurface(mask & np.asarray(half, dtype=bool), gridNode, targetPoints // 2))
             except ValueError:          # nothing on that side
                 halves.append(None)
         return ssp.combine(brain, *halves)
@@ -837,7 +840,7 @@ class StaticNeuroPETLogic(DynamicNeuroPETLogic):
                 if abs(float(meta.get("fwhmMm") or 0) - result["fwhm"]) > 1e-6:
                     notes.append("The database's surface projections were made with another smoothing.")
         if surface is None:
-            surface = self.reviewSurface(result["union"], grid)
+            surface = self.reviewSurface(result["union"], grid, hemispheres=result.get("hemispheres"))
         out["surface"] = surface
         ijkToRas = _ijkToRas(grid)
         brain = result["union"]                     # each ray stops where it leaves the brain

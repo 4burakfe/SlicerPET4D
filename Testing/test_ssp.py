@@ -132,6 +132,22 @@ def test_hemispheres_and_parts():
     assert set(ssp.CAMERAS) >= {"LeftMedial", "RightMedial"}
 
 
+def test_hemisphere_masks():
+    ijkToRas = np.diag([1.0, 1.0, 1.0, 1.0])
+    ijkToRas[0, 3] = -3.0                       # x = i - 3: i 0-2 left, 3-5 right
+    shape = (1, 1, 6)
+    region = np.zeros(shape, bool)
+    region[0, 0, 1:5] = True                    # across the midline: on the side of its name
+    bilateral = np.zeros(shape, bool)
+    bilateral[0, 0, [0, 5]] = True
+    left, right = ssp.hemisphereMasks({"Precuneus L": region, "Pons (reference)": bilateral}, shape, ijkToRas)
+    assert left[0, 0].tolist() == [True, True, True, True, True, False]
+    assert right[0, 0].tolist() == [False, False, False, False, False, True]
+    left, right = ssp.hemisphereMasks({"Precuneus R (reference)": region}, shape, ijkToRas)
+    assert right[0, 0, 1:5].all() and not left.any()
+    assert ssp.regionSide("Cuneus L") == "L" and ssp.regionSide("Prefrontal") is None
+
+
 def test_side_labels():
     assert ssp.sideLabels("Top") == ("L", "R") and ssp.sideLabels("Post") == ("L", "R")
     assert ssp.sideLabels("Bottom") == ("R", "L") and ssp.sideLabels("Ant") == ("R", "L")
