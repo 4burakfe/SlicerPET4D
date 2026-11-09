@@ -31,9 +31,10 @@ DEFAULT_SOURCE = SOURCE_MINOSHIMA
 MAP_SCORE, MAP_PATIENT = "score", "patient"
 MAPS = ((MAP_SCORE, "Score (z / t)"), (MAP_PATIENT, "Patient (projected values)"))
 SSP_FILE = "stats/ssp.npz"
-# the surface's version in the .npz meta: 3, the triangles split to short edges after the decimation, the
-# hemispheres (medial views) only from regions with sides; an older stored surface is not used
-SURFACE_VERSION = 3
+# the surface's version in the .npz meta: 4, contoured on a coarser grid (closed, in one piece; 3 was decimated and
+# split again, its pieces' normals pointing in or out at random: a speckled surface), the hemispheres (medial
+# views) only from regions with sides; an older stored surface is not used
+SURFACE_VERSION = 4
 
 PART_BRAIN, PART_LEFT, PART_RIGHT = 0, 1, 2
 # camera of each view: (direction from the brain centre to the camera, view up), RAS; the medial views look at one
@@ -129,6 +130,16 @@ def combine(brain, left=None, right=None):
 def hasMedial(surface):
     """Whether a surface has both hemispheres' surfaces (the medial views)."""
     return hasPart(surface, PART_LEFT) and hasPart(surface, PART_RIGHT)
+
+
+def openEdges(triangles):
+    """Number of edges of a triangle mesh in one triangle only (0: closed; cracks or holes otherwise)."""
+    triangles = np.asarray(triangles, dtype=np.int64)
+    if not len(triangles):
+        return 0
+    edges = np.sort(np.concatenate([triangles[:, [0, 1]], triangles[:, [1, 2]], triangles[:, [2, 0]]]), axis=1)
+    _, counts = np.unique(edges, axis=0, return_counts=True)
+    return int(np.sum(counts == 1))
 
 
 def clippingRange(points, center, distance, margin=20.0):

@@ -179,3 +179,10 @@ def test_pan_sync():
     assert np.allclose(ssp.panOffset(center, focal, position, (0.0, 0.0, 1.0)), pan)
     assert np.isclose(np.linalg.norm(focal - position), 600.0)
     assert np.allclose((position - focal) / 600.0, (0.0, 1.0, 0.0))        # its direction kept
+
+
+def test_open_edges():
+    tetrahedron = np.array([[0, 1, 2], [0, 3, 1], [1, 3, 2], [2, 3, 0]])
+    assert ssp.openEdges(tetrahedron) == 0
+    assert ssp.openEdges(tetrahedron[:3]) == 3
+    assert ssp.openEdges(np.zeros((0, 3), int)) == 0

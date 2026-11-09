@@ -81,8 +81,10 @@ REVIEW_OUTLINE_THICKNESS = 1            # px, the region outlines on the slices
 REVIEW_FLASH_MS = 5000                  # a region clicked in the table: shown alone for 5 s
 MONITOR2_PLACE_DELAY_MS = 300           # the Monitor 2 window placed once the layout manager made its views
 SSP_TARGET_POINTS = 60000               # vertices of the 3D-SSP surface
-SSP_MAX_EDGE_MM = 4.0                   # its triangles' longest edge after the decimation (the flat midline faces of
-#                                         the hemispheres otherwise become a few long triangles across the face)
+SSP_MAX_EDGE_MM = 4.0                   # its triangles' longest edge: the surface is contoured on a coarser grid (not
+#                                         decimated: long triangles across the hemispheres' flat midline faces; nor
+#                                         split again after it: vtkAdaptiveSubdivisionFilter leaves T-junctions, the
+#                                         surface in thousands of pieces whose normals point in or out at random)
 SSP_MODEL_NAME = "Neuro 3D-SSP surface"
 SSP_MODEL_ATTRIBUTE = NEURO_PREFIX + "SSPModel"     # (view set)/(surface part) of the review's 3D-SSP models
 SSP_COLOR_NODE = "Neuro 3D-SSP colors"
@@ -677,57 +679,74 @@ class StaticNeuroPETLogic(DynamicNeuroPETLogic):
     # --- 3D-SSP ------------------------------------------------------------------------------------
     @staticmethod
     def brainSurface(mask, gridNode, targetPoints=SSP_TARGET_POINTS):
-        """The surface of a brain mask (numpy (k, j, i) on gridNode's grid; holes filled, smoothed 1 voxel, the
-        largest piece, decimated to about targetPoints vertices, the triangles then split to edges of at most
-        SSP_MAX_EDGE_MM): {"points" (RAS mm), "normals" (outward, unit), "triangles"}."""
+        """The surface of a brain mask (numpy (k, j, i) on gridNode's grid; holes filled, smoothed 1 voxel, padded
+        so that it is closed, the largest piece): contoured on a grid coarser by a step that gives about targetPoints
+        vertices (edges at most SSP_MAX_EDGE_MM; no decimation): one closed surface, its normals consistent:
+        {"points" (RAS mm), "normals" (outward, unit), "triangles"}."""
         from scipy import ndimage
         from vtk.util import numpy_support
         mask = ndimage.binary_fill_holes(np.asarray(mask, dtype=bool))
         if not mask.any():
             raise ValueError("The regions are empty: no brain surface.")
-        smooth = ndimage.gaussian_filter(mask.astype(np.float32), 1.0)
-        image = vtk.vtkImageData()
-        image.SetDimensions(*smooth.shape[::-1])
-        image.GetPointData().SetScalars(numpy_support.numpy_to_vtk(smooth.ravel(), deep=True,
-                                                                   array_type=vtk.VTK_FLOAT))
-        contour = vtk.vtkFlyingEdges3D() if hasattr(vtk, "vtkFlyingEdges3D") else vtk.vtkMarchingCubes()
-        contour.SetInputData(image)
-        contour.SetValue(0, 0.5)
-        connectivity = vtk.vtkPolyDataConnectivityFilter()
-        connectivity.SetInputConnection(contour.GetOutputPort())
-        connectivity.SetExtractionModeToLargestRegion()
-        connectivity.Update()
-        count = connectivity.GetOutput().GetNumberOfPoints()
-        last = connectivity
-        if count > targetPoints and hasattr(vtk, "vtkAdaptiveSubdivisionFilter"):     # else not decimated
-            decimate = vtk.vtkQuadricDecimation()
-            decimate.SetInputConnection(connectivity.GetOutputPort())
-            decimate.SetTargetReduction(1.0 - float(targetPoints) / count)
-            # flat parts (the hemispheres' midline faces) are decimated into long triangles across them, the
-            # projected values interpolated along them: split back to short edges (voxel units here)
-            spacing = float(np.min(np.linalg.norm(_ijkToRas(gridNode)[:3, :3], axis=0))) or 1.0
-            subdivide = vtk.vtkAdaptiveSubdivisionFilter()
-            subdivide.SetInputConnection(decimate.GetOutputPort())
-            subdivide.SetMaximumEdgeLength(SSP_MAX_EDGE_MM / spacing)
-            last = subdivide
+        smooth = np.pad(ndimage.gaussian_filter(mask.astype(np.float32), 1.0), 1)      # closed at the grid's edges
+        ijkToRas = _ijkToRas(gridNode)
+        spacing = float(np.min(np.linalg.norm(ijkToRas[:3, :3], axis=0))) or 1.0
+
+        def contour(field):
+            image = vtk.vtkImageData()
+            image.SetDimensions(*field.shape[::-1])
+            image.GetPointData().SetScalars(numpy_support.numpy_to_vtk(np.ascontiguousarray(field).ravel(), deep=True,
+                                                                       array_type=vtk.VTK_FLOAT))
+            surface = vtk.vtkFlyingEdges3D() if hasattr(vtk, "vtkFlyingEdges3D") else vtk.vtkMarchingCubes()
+            surface.SetInputData(image)
+            surface.SetValue(0, 0.5)
+            largest = vtk.vtkPolyDataConnectivityFilter()
+            largest.SetInputConnection(surface.GetOutputPort())
+            largest.SetExtractionModeToLargestRegion()
+            cleaned = vtk.vtkCleanPolyData()        # the points of the other pieces dropped
+            cleaned.SetInputConnection(largest.GetOutputPort())
+            cleaned.Update()
+            return cleaned.GetOutput()
+
+        poly = contour(smooth)
+        step = 1.0
+        count = poly.GetNumberOfPoints()
+        if count > targetPoints:
+            # vertices ~ area / step^2; a triangle's edge at most the cell's diagonal (sqrt(3) step)
+            step = min(float(np.sqrt(count / float(targetPoints))), SSP_MAX_EDGE_MM / (np.sqrt(3.0) * spacing))
+            if step > 1.05:
+                grid = np.meshgrid(*[np.arange(0.0, n - 1 + 1e-6, step) for n in smooth.shape], indexing="ij")
+                poly = contour(ndimage.map_coordinates(smooth, grid, order=1).astype(np.float32))
+            else:
+                step = 1.0
+        # the contour's (i, j, k): the padded grid's, step apart
+        matrix = ijkToRas @ np.array([[step, 0, 0, -1], [0, step, 0, -1], [0, 0, step, -1], [0, 0, 0, 1]], float)
         transform = vtk.vtkTransform()
-        transform.SetMatrix(_vtkMatrix(_ijkToRas(gridNode)))
+        transform.SetMatrix(_vtkMatrix(matrix))
         moved = vtk.vtkTransformPolyDataFilter()
         moved.SetTransform(transform)
-        moved.SetInputConnection(last.GetOutputPort())
+        moved.SetInputData(poly)
         normals = vtk.vtkPolyDataNormals()
         normals.SetInputConnection(moved.GetOutputPort())
         normals.ComputePointNormalsOn()
         normals.ComputeCellNormalsOff()
         normals.SplittingOff()
         normals.ConsistencyOn()
-        normals.AutoOrientNormalsOn()       # outward
+        normals.AutoOrientNormalsOn()       # outward (the surface closed and in one piece)
         normals.Update()
         poly = normals.GetOutput()
         points = numpy_support.vtk_to_numpy(poly.GetPoints().GetData()).astype(np.float64)
         pointNormals = numpy_support.vtk_to_numpy(poly.GetPointData().GetNormals()).astype(np.float64)
-        cells = numpy_support.vtk_to_numpy(poly.GetPolys().GetData()).reshape(-1, 4)[:, 1:]
-        return {"points": points, "normals": pointNormals, "triangles": cells.astype(np.int64)}
+        polys = poly.GetPolys()
+        if hasattr(polys, "GetConnectivityArray"):
+            cells = numpy_support.vtk_to_numpy(polys.GetConnectivityArray()).reshape(-1, 3)
+        else:
+            cells = numpy_support.vtk_to_numpy(polys.GetData()).reshape(-1, 4)[:, 1:]
+        out = {"points": points, "normals": pointNormals, "triangles": cells.astype(np.int64)}
+        openEdges = ssp.openEdges(out["triangles"])
+        if openEdges:
+            logging.warning(f"Static Neuro: the 3D-SSP surface has {openEdges} open edges")
+        return out
 
     @classmethod
     def reviewSurface(cls, mask, gridNode, targetPoints=SSP_TARGET_POINTS, hemispheres=None):
