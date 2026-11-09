@@ -214,10 +214,12 @@ _REFERENCE_OVERLAPS = {normaldb.REF_PONS: ("Pons", "Brainstem"), normaldb.REF_BR
 def isReferenceRegion(name, referenceKey=None):
     """Whether a region (segment name) is the normalization's reference region, left out of the region table: a
     "... (reference)" segment, or a region of the reference structures of the database's reference key (the pons
-    and the brainstem together)."""
+    and the brainstem together), of both sides ("Pons R", "Pons L")."""
     text = str(name or "").strip().lower()
     if text.endswith(REFERENCE_MARK):
         return True
+    if text[-2:] in (" r", " l"):
+        text = text[:-2].rstrip()
     structures = _REFERENCE_OVERLAPS.get(referenceKey) or normaldb.referenceStructures(referenceKey) or ()
     return text in {s.lower() for s in structures}
 

@@ -185,6 +185,9 @@ def test_reference_regions_left_out():
     assert nr.isReferenceRegion("Cerebellum White Matter", "cerebellum")
     assert nr.isReferenceRegion("Brainstem", "pons") and nr.isReferenceRegion("Pons", "brainstem")
     assert not nr.isReferenceRegion("Brainstem", "cerebellumGM")
+    assert nr.isReferenceRegion("Pons R", "pons") and nr.isReferenceRegion("Brainstem L", "pons")
+    assert nr.isReferenceRegion("Cerebellum Gray Matter L", "cerebellumGM")
+    assert not nr.isReferenceRegion("Putamen R", "pons")
     assert not nr.isReferenceRegion("Precuneus", "global") and not nr.isReferenceRegion("Precuneus")
 
 
