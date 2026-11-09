@@ -177,6 +177,17 @@ def test_score_color_tables():
     assert nr.colorTable("SSP-PET-DICOM")[63].tolist() == pytest.approx([0, 0, 0.8])
 
 
+def test_reference_regions_left_out():
+    assert nr.isReferenceRegion("Cerebellum Gray Matter (reference)")
+    assert nr.isReferenceRegion("My mask (Reference)", "custom")
+    assert nr.isReferenceRegion("Cerebellum Gray Matter", "cerebellumGM")
+    assert not nr.isReferenceRegion("Cerebellum White Matter", "cerebellumGM")
+    assert nr.isReferenceRegion("Cerebellum White Matter", "cerebellum")
+    assert nr.isReferenceRegion("Brainstem", "pons") and nr.isReferenceRegion("Pons", "brainstem")
+    assert not nr.isReferenceRegion("Brainstem", "cerebellumGM")
+    assert not nr.isReferenceRegion("Precuneus", "global") and not nr.isReferenceRegion("Precuneus")
+
+
 def test_layout_xml():
     document = xml.dom.minidom.parseString(nr.layoutXml())
     tags = [v.getAttribute("singletontag") for v in document.getElementsByTagName("view")]

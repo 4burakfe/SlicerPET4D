@@ -688,7 +688,8 @@ steps, on the toolbar like the Dynamic Neuro Receptor PET:
      matter (or uptake) mask. **Show the region outlines** (1 px, on the PET and the score slices). The name of the
      region under the mouse is shown on its left, also with the outlines hidden. **Show the color
      legends**: one on the left of each row.
-   - **Region table**: the region color, SUVmean, the value of the database's map type (SUVR / ratio), the normals'
+   - **Region table** (the reference region of the normalization left out: the "(reference)" segment and the
+     database's reference structures, the pons and the brainstem together): the region color, SUVmean, the value of the database's map type (SUVR / ratio), the normals'
      mean, SD and n, and the score; as wide as its content. Click a column header to sort (by name or by value);
      click a region to show it alone on the slices for 5 s, the slices moved through it.
    - **3D-SSP** (Minoshima et al. 1995): the surface of all the regions together; each vertex takes the maximum of

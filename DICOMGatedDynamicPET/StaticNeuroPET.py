@@ -2430,6 +2430,8 @@ class StaticNeuroPETWidget(DynamicNeuroPETWidget):
         reference = {k: [v[0], v[1], v[2] if len(v) > 2 and v[2] is not None else n]
                      for k, v in (result.get("reference") or {}).items()}
         rows = nr.tableRows(result["values"], result["suv"], reference, kind)
+        referenceKey = (result.get("header") or {}).get("referenceRegion")
+        rows = [row for row in rows if not nr.isReferenceRegion(row[0], referenceKey)]     # the reference left out
         units = result["header"].get("mapType") if result.get("header") else "SUVR"
         compared = result.get("ratio") and units in (normaldb.MAP_SUVR, normaldb.MAP_RATIO, "SUVR")
         columns = ["Region", "SUVmean"] + ([units or "SUVR"] if compared else [])

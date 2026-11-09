@@ -206,6 +206,22 @@ def isDroppedSegment(name):
     return any(word in text for word in DROPPED_SEGMENT_WORDS)
 
 
+REFERENCE_MARK = "(reference)"      # the end of a reference segment's name (DynamicNeuroPET.REFERENCE_SUFFIX)
+# the structures that overlap a reference region: the pons is part of the brainstem
+_REFERENCE_OVERLAPS = {normaldb.REF_PONS: ("Pons", "Brainstem"), normaldb.REF_BRAINSTEM: ("Pons", "Brainstem")}
+
+
+def isReferenceRegion(name, referenceKey=None):
+    """Whether a region (segment name) is the normalization's reference region, left out of the region table: a
+    "... (reference)" segment, or a region of the reference structures of the database's reference key (the pons
+    and the brainstem together)."""
+    text = str(name or "").strip().lower()
+    if text.endswith(REFERENCE_MARK):
+        return True
+    structures = _REFERENCE_OVERLAPS.get(referenceKey) or normaldb.referenceStructures(referenceKey) or ()
+    return text in {s.lower() for s in structures}
+
+
 def regionMeans(values, masks):
     """{name: mean of the finite values in the mask} (NaN when the mask holds none)."""
     values = np.asarray(values, dtype=np.float32)
