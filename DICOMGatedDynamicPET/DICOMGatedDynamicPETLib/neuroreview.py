@@ -485,8 +485,8 @@ def maskedScores(scores, mask, factor=1.0, hideBelow=0.0):
 # Layouts (the views of equal, fixed size: no splitters between them, so a maximized view restores to its size;
 # only the table's width can be dragged): rows 1-2 slice views (PET with the region outlines; the score map), rows 3-4 the 3D-SSP views, the
 # region table on the right. Single monitor: all of it; dual monitor: the slices and the table in the main window,
-# the 3D-SSP views in a floating window placed on the second screen; and the slices (with the table) or the 3D-SSP
-# views alone. The "+ low scores" variants add a second set of the 3D-SSP views below the first: the scores below
+# the 3D-SSP views in a floating window placed on the second screen; and the slices or the 3D-SSP views, each with
+# the table. The "+ low scores" variants add a second set of the 3D-SSP views below the first: the scores below
 # the threshold only (colors reversed), 16 views in all.
 LAYOUT_ID = LAYOUT_SINGLE = 7810
 LAYOUT_DUAL = 7811
@@ -498,8 +498,8 @@ LAYOUTS = ((LAYOUT_SINGLE, "Single monitor (slices, 3D-SSP, table)"),
            (LAYOUT_DUAL, "Dual monitor (3D-SSP on the second screen)"),
            (LAYOUT_DUAL_LOW, "Dual monitor, 3D-SSP + low scores (16 views)"),
            (LAYOUT_SLICES, "Slices and table"),
-           (LAYOUT_SSP, "3D-SSP only"),
-           (LAYOUT_SSP_LOW, "3D-SSP + low scores only (16 views)"))
+           (LAYOUT_SSP, "3D-SSP and table"),
+           (LAYOUT_SSP_LOW, "3D-SSP + low scores and table (16 views)"))
 DUAL_LAYOUTS = (LAYOUT_DUAL, LAYOUT_DUAL_LOW)
 LAYOUT_IDS = tuple(k for k, _ in LAYOUTS)
 MONITOR2_TITLE = "Static Neuro - 3D-SSP (Monitor 2)"
@@ -572,7 +572,7 @@ def layoutXml(layoutId=LAYOUT_SINGLE, mainViewportAttributes=""):
         return _withTable(_sliceRows())
     sspRows = _sspRows() + (_sspRows(SSP_LOW) if layoutId in (LAYOUT_DUAL_LOW, LAYOUT_SSP_LOW) else [])
     if layoutId in (LAYOUT_SSP, LAYOUT_SSP_LOW):
-        return f'<layout type="vertical" split="false">{"".join(sspRows)}</layout>'
+        return _withTable(sspRows)
     if layoutId in DUAL_LAYOUTS:
         main = _withTable(_sliceRows())
         main = main.replace('<layout type="horizontal" split="true">',

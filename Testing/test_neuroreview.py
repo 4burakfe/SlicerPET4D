@@ -220,16 +220,17 @@ def test_layout_xml():
     floating = [l for l in layouts if l.getAttribute("dockable") == "true"]
     assert len(floating) == 1 and len(floating[0].getElementsByTagName("view")) == 8
     assert len(xml.dom.minidom.parseString(nr.layoutXml(nr.LAYOUT_SLICES)).getElementsByTagName("view")) == 7
-    assert len(xml.dom.minidom.parseString(nr.layoutXml(nr.LAYOUT_SSP)).getElementsByTagName("view")) == 8
+    sspTags = [v.getAttribute("singletontag")
+               for v in xml.dom.minidom.parseString(nr.layoutXml(nr.LAYOUT_SSP)).getElementsByTagName("view")]
+    assert len(sspTags) == 9 and nr.TABLE_VIEW in sspTags
     low = xml.dom.minidom.parseString(nr.layoutXml(nr.LAYOUT_SSP_LOW))
     lowTags = [v.getAttribute("singletontag") for v in low.getElementsByTagName("view")]
-    assert len(lowTags) == 16 and nr.sspViewName("RightMedial", nr.SSP_LOW) in lowTags
-    assert set(lowTags) == set(nr.sspViewTags())
+    assert len(lowTags) == 17 and nr.sspViewName("RightMedial", nr.SSP_LOW) in lowTags
+    assert set(lowTags) == set(nr.sspViewTags()) | {nr.TABLE_VIEW}
     assert nr.sspViewTags()[nr.sspViewName("Top", nr.SSP_LOW)] == (nr.SSP_LOW, "Top")
     dualLow = xml.dom.minidom.parseString(nr.layoutXml(nr.LAYOUT_DUAL_LOW, ' name="main"'))
     floating = [l for l in dualLow.getElementsByTagName("layout") if l.getAttribute("dockable") == "true"]
     assert len(floating) == 1 and len(floating[0].getElementsByTagName("view")) == 16
     for layoutId in nr.LAYOUT_IDS:          # only the table's splitter: the views keep equal sizes
-        alone = layoutId in (nr.LAYOUT_SSP, nr.LAYOUT_SSP_LOW)
-        assert nr.layoutXml(layoutId).count('split="true"') == (0 if alone else 1)
+        assert nr.layoutXml(layoutId).count('split="true"') == 1
     assert nr.defaultLayout(2) == nr.LAYOUT_DUAL and nr.defaultLayout(1) == nr.LAYOUT_SINGLE

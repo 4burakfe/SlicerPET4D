@@ -658,8 +658,8 @@ steps, on the toolbar like the Dynamic Neuro Receptor PET:
    PET axial / coronal / sagittal with the region outlines, below it the **voxel score map**, then the eight **3D-SSP**
    views (superior, anterior, left, left medial / inferior, posterior, right, right medial), the **region table** on
    the right), *Dual monitor* (the default with two screens: the slices and the table in the main window, the 3D-SSP
-   views in a window maximized on the second screen), *Slices and table* or *3D-SSP only*. *Dual monitor, 3D-SSP +
-   low scores* and *3D-SSP + low scores only* add a second set of the eight 3D-SSP views below the first (16 views):
+   views in a window maximized on the second screen), *Slices and table* or *3D-SSP and table*. *Dual monitor, 3D-SSP
+   + low scores* and *3D-SSP + low scores and table* add a second set of the eight 3D-SSP views below the first (16 views):
    the scores below the threshold only, colors reversed, the rest grey. The slice views are linked and have no title bars. Settings on the left:
    - **Normals**: automatically the patient's age group (the master when the age is not known or its group has no
      maps), or picked by hand. **Score**: z = (patient - normal mean) / SD or the Crawford-Howell t = z /
