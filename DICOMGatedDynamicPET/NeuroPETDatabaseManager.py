@@ -321,6 +321,8 @@ class NeuroPETDatabaseManagerLogic(ScriptedLoadableModuleLogic):
             notes.append(regionNote)
         regionValues = {}
         sspAccumulators = {k: normaldb.RunningStatistics() for k in groups} if surface is not None else None
+        # the brain the 3D-SSP rays stop at: the union of the regions, on the grid of the subjects' maps
+        brain = nr.unionMask(masks, next(iter(masks.values())).shape) if masks and surface is not None else None
         geometry = None
         for index, subject in enumerate(subjects):
             if progress is not None and not progress(index, len(subjects), f"{subject['id']} ({index + 1} / "
@@ -349,9 +351,15 @@ class NeuroPETDatabaseManagerLogic(ScriptedLoadableModuleLogic):
                 for key in membership.get(subject["id"], []):
                     accumulators[key].add(smoothed)
                 if sspAccumulators is not None:      # 3D-SSP: the smoothed map projected on the regions' surface
-                    projected = ssp.project(smoothed, _ijkToRasOf(node), surface["points"], surface["normals"])
-                    for key in membership.get(subject["id"], []):
-                        sspAccumulators[key].add(projected)
+                    if brain is not None and brain.shape != smoothed.shape:
+                        notes.append(f"No 3D-SSP projections: subject '{subject['id']}' is not on the grid of the "
+                                     f"regions.")
+                        sspAccumulators = None
+                    else:
+                        projected = ssp.project(smoothed, _ijkToRasOf(node), surface["points"], surface["normals"],
+                                                mask=brain)
+                        for key in membership.get(subject["id"], []):
+                            sspAccumulators[key].add(projected)
             finally:
                 slicer.mrmlScene.RemoveNode(node)
         output = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLScalarVolumeNode", "normal database map")
@@ -395,7 +403,8 @@ class NeuroPETDatabaseManagerLogic(ScriptedLoadableModuleLogic):
         if sspAccumulators is not None:
             sspGroups = {k: {"mean": a.mean(), "sd": a.sd(), "n": a.n, "name": groups[k]["name"]}
                          for k, a in sspAccumulators.items() if a.n >= 2}
-            ssp.write(sspFile, surface, sspGroups, {"depthMm": ssp.DEPTH_MM, "stepMm": ssp.STEP_MM, "fwhmMm": fwhm,
+            ssp.write(sspFile, surface, sspGroups, {"depthMm": ssp.DEPTH_MM, "stepMm": ssp.STEP_MM,
+                                                    "clipToBrain": True, "fwhmMm": fwhm,
                                                     "maps": mapKey, "version": header.get("version", 1)})
             header["statistics"]["ssp"] = ssp.SSP_FILE
         elif os.path.isfile(sspFile):

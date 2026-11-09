@@ -4,8 +4,9 @@
     surface     the brain surface (the union of the regions, made in Slicer with VTK): its vertices (RAS mm), outward
                 normals and triangles (an .npz made for the medial views, since dropped, also holds the two
                 hemispheres' surfaces after the brain's, each vertex's part in "parts": only the brain's is used)
-    projection  each vertex takes the maximum of a map along its inward normal, from the surface to DEPTH_MM (13.5 mm,
-                six 2.25 mm voxels as in the original), sampled every STEP_MM with trilinear interpolation
+    projection  each vertex takes the maximum of a map along its inward normal, from the surface to DEPTH_MM (20 mm),
+                sampled every STEP_MM with trilinear interpolation; the ray stops where it leaves the brain (the
+                union of the regions, when given): no samples beyond it
     scores      Minoshima: every normal's map (smoothed as the voxel maps) is projected, and the patient's projection
                 is scored against the vertex-wise mean / SD of the normals' projections (z, or the Crawford-Howell t);
                 voxel: the voxel score map itself projected (the most extreme score along the normal), quicker and
@@ -22,7 +23,7 @@ import numpy as np
 
 from . import neuroreview as nr
 
-DEPTH_MM = 13.5
+DEPTH_MM = 20.0
 STEP_MM = 1.0
 SOURCE_MINOSHIMA, SOURCE_VOXEL = "minoshima", "voxel"
 SOURCES = ((SOURCE_MINOSHIMA, "Minoshima (normals' projections)"), (SOURCE_VOXEL, "Voxel score map projected"))
@@ -87,12 +88,19 @@ def rasToIjk(points, ijkToRas):
     return points @ inverse[:3, :3].T + inverse[:3, 3]
 
 
-def project(array, ijkToRas, points, outwardNormals, mode="max", depthMm=DEPTH_MM, stepMm=STEP_MM, chunk=20000):
+def project(array, ijkToRas, points, outwardNormals, mode="max", depthMm=DEPTH_MM, stepMm=STEP_MM, chunk=20000,
+            mask=None):
     """Vertex values of a map (numpy array (k, j, i) on the grid ijkToRas): along each vertex's inward normal (the
     outward normals negated, unit length), the maximum (mode "max") or the value of the largest magnitude ("extreme",
-    for signed score maps). Outside the grid the map is 0; NaN is taken as 0."""
+    for signed score maps). Outside the grid the map is 0; NaN is taken as 0. mask (boolean, the brain, on the same
+    grid): each ray stops where it first leaves the mask after entering it (the samples before it enters are kept;
+    the first sample always counts)."""
     from scipy import ndimage
     array = np.nan_to_num(np.asarray(array, dtype=np.float32))
+    if mask is not None:
+        mask = np.asarray(mask, dtype=np.float32)
+        if mask.shape != array.shape:
+            raise ValueError(f"The mask {mask.shape} is not on the grid of the map {array.shape}.")
     points = np.asarray(points, dtype=np.float64)
     normals = np.asarray(outwardNormals, dtype=np.float64)
     lengths = np.linalg.norm(normals, axis=1)
@@ -108,10 +116,20 @@ def project(array, ijkToRas, points, outwardNormals, mode="max", depthMm=DEPTH_M
         coordinates = ijk[:, ::-1].T                                                 # (k, j, i) rows
         values = ndimage.map_coordinates(array, coordinates, order=1, mode="constant", cval=0.0)
         values = values.reshape(len(p), len(distances))
+        if mask is not None:                                                        # stop where the ray leaves it
+            inside = ndimage.map_coordinates(mask, coordinates, order=0, mode="constant", cval=0.0)
+            inside = inside.reshape(len(p), len(distances)) > 0
+            started = np.maximum.accumulate(inside, axis=1)
+            valid = ~np.maximum.accumulate(started & ~inside, axis=1)
+            valid[:, 0] = True
         if mode == "extreme":
+            if mask is not None:
+                values = np.where(valid, values, 0.0)
             index = np.argmax(np.abs(values), axis=1)
             out[start:start + chunk] = values[np.arange(len(p)), index]
         else:
+            if mask is not None:
+                values = np.where(valid, values, -np.inf)
             out[start:start + chunk] = values.max(axis=1)
     return out
 

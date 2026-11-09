@@ -734,14 +734,16 @@ class StaticNeuroPETLogic(DynamicNeuroPETLogic):
             poly.GetPointData().SetActiveScalars(name)
         return poly
 
-    def sspFromSubjects(self, folder, header, surface, fwhm, progress=None):
+    def sspFromSubjects(self, folder, header, surface, fwhm, progress=None, mask=None):
         """{group key: {"mean", "sd", "n", "name"}} of the normals' projections on a surface: each subject's map
-        (SUVR or SUV by the map type) smoothed with fwhm and projected; cached in <database>/cache/ (key: the surface,
+        (SUVR or SUV by the map type) smoothed with fwhm and projected (each ray stopped where it leaves mask, the
+        union of the regions on the database's grid); cached in <database>/cache/ (key: the surface,
         the projection, the FWHM, the map type, the database version and the subjects). None when stopped."""
         subjects = normaldb.readSubjects(folder)
         mapKey = normaldb.subjectMapKey(header)
         key = ssp.signature(surface["points"], surface["normals"], ssp.DEPTH_MM, ssp.STEP_MM,
-                            extra=(fwhm, mapKey, header.get("version", 1), sorted(s.get("id", "") for s in subjects)))
+                            extra=(fwhm, mapKey, header.get("version", 1), sorted(s.get("id", "") for s in subjects),
+                                   "clip-brain"))
         cache = ssp.cachePath(folder, key)
         cached = ssp.read(cache)
         if cached is not None:
@@ -760,7 +762,10 @@ class StaticNeuroPETLogic(DynamicNeuroPETLogic):
             try:
                 smoothed = normaldb.smoothMap(slicer.util.arrayFromVolume(node), fwhm,
                                               tuple(float(x) for x in node.GetSpacing())[::-1])
-                projected = ssp.project(smoothed, _ijkToRas(node), surface["points"], surface["normals"])
+                clip = mask if mask is not None and np.shape(mask) == np.shape(smoothed) else None
+                if mask is not None and clip is None:
+                    logging.warning(f"Static Neuro: {subject['id']} is not on the regions' grid: 3D-SSP not clipped")
+                projected = ssp.project(smoothed, _ijkToRas(node), surface["points"], surface["normals"], mask=clip)
             finally:
                 slicer.mrmlScene.RemoveNode(node)
             for groupKey, group in groups.items():
@@ -769,7 +774,8 @@ class StaticNeuroPETLogic(DynamicNeuroPETLogic):
         out = {k: {"mean": a.mean(), "sd": a.sd(), "n": a.n, "name": groups[k]["name"]}
                for k, a in accumulators.items() if a.n >= 2}
         try:
-            ssp.write(cache, surface, out, {"depthMm": ssp.DEPTH_MM, "stepMm": ssp.STEP_MM, "fwhmMm": fwhm,
+            ssp.write(cache, surface, out, {"depthMm": ssp.DEPTH_MM, "stepMm": ssp.STEP_MM, "clipToBrain": True,
+                                            "fwhmMm": fwhm,
                                             "maps": mapKey, "version": header.get("version", 1)})
         except OSError:
             logging.warning(f"Static Neuro: could not write {cache}", exc_info=True)
@@ -787,8 +793,12 @@ class StaticNeuroPETLogic(DynamicNeuroPETLogic):
         surface = groups = None
         mapKey = normaldb.subjectMapKey(header) if header is not None else ""
         path = ssp.sspPath(folder, header) if header is not None else None
+        outdated = False
         if path and locked:
             read = ssp.read(path)
+            if read is not None and read[2].get("maps") == mapKey and not (
+                    abs(float(read[2].get("depthMm") or 0) - ssp.DEPTH_MM) < 1e-6 and read[2].get("clipToBrain")):
+                outdated, read = True, None         # an older projection (13.5 mm, not stopped at the brain's edge)
             if read is not None and read[2].get("maps") == mapKey:
                 surface, groups, meta = read
                 surface, index = ssp.brainPart(surface)     # an .npz with the (dropped) medial hemispheres
@@ -801,17 +811,25 @@ class StaticNeuroPETLogic(DynamicNeuroPETLogic):
             surface = self.brainSurface(result["union"], grid)
         out["surface"] = surface
         ijkToRas = _ijkToRas(grid)
-        out["patient"] = ssp.project(result["smoothed"], ijkToRas, surface["points"], surface["normals"])
+        brain = result["union"]                     # each ray stops where it leaves the brain
+        out["patient"] = ssp.project(result["smoothed"], ijkToRas, surface["points"], surface["normals"], mask=brain)
         if header is None:
             return out
         if groups is None and header.get("kind") == normaldb.USER_DEFINED and normaldb.readSubjects(folder):
-            groups = self.sspFromSubjects(folder, header, surface, result["fwhm"], progress)
+            groups = self.sspFromSubjects(folder, header, surface, result["fwhm"], progress, mask=brain)
             if groups is None:
                 return None
             out["source"] = "the database's subjects projected on these regions"
+            if outdated:
+                notes.append("The database's 3D-SSP projections were made with another depth: projected from its "
+                             "subjects now; compute the mean / SD again in the Neuro PET Database Manager to store "
+                             "them.")
         group = (groups or {}).get(groupKey)
         if group is not None:
             out.update(mean=group["mean"], sd=group["sd"], n=group.get("n") or result.get("n"))
+        elif outdated:
+            notes.append("The database's 3D-SSP projections are from an older version (another depth, not stopped at "
+                         "the brain's edge): the 3D-SSP shows the voxel score map projected.")
         else:
             notes.append("No surface projections of the normals for this database: the 3D-SSP shows the voxel score "
                          "map projected.")
@@ -822,7 +840,7 @@ class StaticNeuroPETLogic(DynamicNeuroPETLogic):
             else:
                 shown = nr.uptakeMask(result["mean"], result["mask"])
             out["voxel"] = ssp.project(np.where(shown, result["z"], 0.0), ijkToRas, surface["points"],
-                                       surface["normals"], mode="extreme")
+                                       surface["normals"], mode="extreme", mask=brain)
         return out
 
     # --- batch: many normal subjects into a database ----------------------------------------------

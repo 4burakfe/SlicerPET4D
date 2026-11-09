@@ -591,7 +591,7 @@ database:
   settings (atlas, growth, reference mask; the optic chiasm left out), each subject's regional mean (unsmoothed
   maps) and their mean, SD and n per group (master and age groups); and the **3D-SSP projections**
   (`stats/ssp.npz`): the brain surface (union of those regions) and, per group, the vertex mean / SD of every
-  subject's smoothed map projected on it (Minoshima: the maximum along the inward normal, 0-13.5 mm). Both are
+  subject's smoothed map projected on it (Minoshima: the maximum along the inward normal, 0-20 mm, the ray stopped where it leaves the regions). Both are
   exported with the database, so a predefined database carries them too.
 - **Use mean as template** (a study specific template, iterated): the master mean map is copied as
   `template.nii.gz` and the database's normalization becomes PET to PET. Run **Batch add subjects...** again with
@@ -685,7 +685,8 @@ steps, on the toolbar like the Dynamic Neuro Receptor PET:
      mean, SD and n, and the score; as wide as its content. Click a column header to sort (by name or by value);
      click a region to show it alone on the slices for 5 s, the slices moved through it.
    - **3D-SSP** (Minoshima et al. 1995): the surface of all the regions together; each vertex takes the maximum of
-     the patient's smoothed map along its inward normal (0-13.5 mm, 1 mm steps). **Map**: the score (default) or the
+     the patient's smoothed map along its inward normal (0-20 mm, 1 mm steps; the ray stops where it leaves the
+     brain, the regions, and takes nothing beyond). **Map**: the score (default) or the
      patient's projected values (SUVR for an SUVR database, else SUV; smoothed). **Score from**: *Minoshima*
      (default; against the same projection of every normal: the database's `stats/ssp.npz` when the regions are the
      database's, else computed from the subjects of a user defined database and cached), or *Voxel score map

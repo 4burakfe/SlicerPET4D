@@ -38,6 +38,33 @@ def test_project_max_and_extreme():
     assert ssp.project(coarse, matrix, np.array([[20.0, 4.0, 4.0]]), outward)[0] == pytest.approx(7.0)
 
 
+def test_project_stops_at_mask():
+    # the ray goes from x = 20 towards x = 0; the brain is x = 12..19, beyond it (x <= 11) larger values
+    array = np.zeros((10, 10, 40), dtype=np.float32)
+    array[:, :, 15] = 4.0
+    array[:, :, 8] = 50.0                                        # 12 mm deep: outside the brain
+    signed = np.zeros_like(array)
+    signed[:, :, 14] = -2.0
+    signed[:, :, 6] = -40.0                                      # outside the brain
+    mask = np.zeros(array.shape, dtype=bool)
+    mask[:, :, 12:20] = True
+    points = np.array([[20.0, 5.0, 5.0]])                        # just outside the brain: the ray enters it at 1 mm
+    outward = np.array([[1.0, 0.0, 0.0]])
+    assert ssp.DEPTH_MM == pytest.approx(20.0)
+    assert ssp.project(array, np.eye(4), points, outward) == pytest.approx([50.0])            # unchanged without mask
+    assert ssp.project(signed, np.eye(4), points, outward, mode="extreme") == pytest.approx([-40.0])
+    assert ssp.project(array, np.eye(4), points, outward, mask=mask) == pytest.approx([4.0])
+    assert ssp.project(signed, np.eye(4), points, outward, mode="extreme", mask=mask) == pytest.approx([-2.0])
+    # a ray that re-enters the mask after leaving it takes nothing from the second part
+    again = mask.copy()
+    again[:, :, 5:9] = True
+    assert ssp.project(array, np.eye(4), points, outward, mask=again) == pytest.approx([4.0])
+    # a ray that never enters the mask keeps all its samples
+    assert ssp.project(array, np.eye(4), points, outward, mask=np.zeros_like(mask)) == pytest.approx([50.0])
+    with pytest.raises(ValueError):
+        ssp.project(array, np.eye(4), points, outward, mask=mask[:, :, :20])
+
+
 def test_scores():
     z = ssp.scores([3.0, 5.0], [5.0, 5.0], [1.0, 1.0], kind=nr.SCORE_Z)
     assert z.tolist() == pytest.approx([-2.0, 0.0])
