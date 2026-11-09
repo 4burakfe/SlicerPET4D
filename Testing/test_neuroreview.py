@@ -233,4 +233,8 @@ def test_layout_xml():
     assert len(floating) == 1 and len(floating[0].getElementsByTagName("view")) == 16
     for layoutId in nr.LAYOUT_IDS:          # only the table's splitter: the views keep equal sizes
         assert nr.layoutXml(layoutId).count('split="true"') == 1
+    plain = xml.dom.minidom.parseString(nr.layoutXml(nr.LAYOUT_SSP_LOW, medial=False))
+    plainTags = [v.getAttribute("singletontag") for v in plain.getElementsByTagName("view")]
+    assert len(plainTags) == 13 and nr.sspViewName("LeftMedial") not in plainTags      # 2 x (2 x 3) and the table
+    assert nr.sspViews(False)[1] == 3 and len(nr.sspViews(False)[0]) == 6
     assert nr.defaultLayout(2) == nr.LAYOUT_DUAL and nr.defaultLayout(1) == nr.LAYOUT_SINGLE

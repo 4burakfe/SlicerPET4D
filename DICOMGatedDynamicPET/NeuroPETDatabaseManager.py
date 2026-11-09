@@ -439,8 +439,8 @@ class NeuroPETDatabaseManagerLogic(ScriptedLoadableModuleLogic):
                 return None, None, "No regional statistics: the regions are empty."
             try:
                 shape = next(iter(masks.values())).shape
-                surface = logic.reviewSurface(nr.unionMask(masks, shape), gridNode, hemispheres=ssp.hemisphereMasks(
-                    masks, shape, _ijkToRasOf(gridNode)))
+                surface = logic.reviewSurface(nr.unionMask(masks, shape), gridNode,
+                                              hemispheres=ssp.hemisphereMasks(masks, shape))
             except Exception as error:
                 logging.exception("Neuro DB: could not make the 3D-SSP surface")
                 return masks, None, f"No 3D-SSP projections: the surface could not be made ({error})."

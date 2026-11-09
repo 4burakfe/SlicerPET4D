@@ -133,18 +133,19 @@ def test_hemispheres_and_parts():
 
 
 def test_hemisphere_masks():
-    ijkToRas = np.diag([1.0, 1.0, 1.0, 1.0])
-    ijkToRas[0, 3] = -3.0                       # x = i - 3: i 0-2 left, 3-5 right
     shape = (1, 1, 6)
     region = np.zeros(shape, bool)
     region[0, 0, 1:5] = True                    # across the midline: on the side of its name
+    other = np.zeros(shape, bool)
+    other[0, 0, 5] = True
     bilateral = np.zeros(shape, bool)
-    bilateral[0, 0, [0, 5]] = True
-    left, right = ssp.hemisphereMasks({"Precuneus L": region, "Pons (reference)": bilateral}, shape, ijkToRas)
-    assert left[0, 0].tolist() == [True, True, True, True, True, False]
+    bilateral[0, 0, 0] = True
+    left, right = ssp.hemisphereMasks({"Precuneus L": region, "Precuneus R (reference)": other,
+                                       "Pons (reference)": bilateral}, shape)
+    assert left[0, 0].tolist() == [False, True, True, True, True, False]       # the bilateral one left out
     assert right[0, 0].tolist() == [False, False, False, False, False, True]
-    left, right = ssp.hemisphereMasks({"Precuneus R (reference)": region}, shape, ijkToRas)
-    assert right[0, 0, 1:5].all() and not left.any()
+    assert ssp.hemisphereMasks({"Precuneus": region, "Pons": bilateral}, shape) is None     # bilateral: no medial
+    assert ssp.hemisphereMasks({"Precuneus L": region}, shape) is None                     # one side only
     assert ssp.regionSide("Cuneus L") == "L" and ssp.regionSide("Prefrontal") is None
 
 

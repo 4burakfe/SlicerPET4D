@@ -510,6 +510,7 @@ VIEW_GROUP = 93
 SSP_VIEWS = (("Top", "Superior"), ("Ant", "Anterior"), ("Left", "Left"), ("LeftMedial", "Left medial"),
              ("Bottom", "Inferior"), ("Post", "Posterior"), ("Right", "Right"), ("RightMedial", "Right medial"))
 SSP_COLUMNS = 4
+MEDIAL_KEYS = ("LeftMedial", "RightMedial")     # only with regions with sides (R / L): 2 x 3 views without them
 # the sets of 3D-SSP views: the main one (as set in the 3D-SSP box) and the low scores' (below the threshold)
 SSP_MAIN, SSP_LOW = "", "Low"
 TABLE_VIEW = VIEW_PREFIX + "Table"
@@ -546,15 +547,23 @@ def _sliceRows():
         for row, prefix in ((PET_ROW, ""), (SCORE_ROW, "S"))]
 
 
-def _sspRows(viewSet=SSP_MAIN):
+def sspViews(medial=True):
+    """(the 3D-SSP views (key, title), columns): 2 x 4 with the medial views, else 2 x 3."""
+    if medial:
+        return SSP_VIEWS, SSP_COLUMNS
+    return tuple(v for v in SSP_VIEWS if v[0] not in MEDIAL_KEYS), SSP_COLUMNS - 1
+
+
+def _sspRows(viewSet=SSP_MAIN, medial=True):
     def threeD(key, title):
         return (f'<item><view class="vtkMRMLViewNode" singletontag="{sspViewName(key, viewSet)}">'
                 f'<property name="viewlabel" action="default">{title}{" (low)" if viewSet else ""}</property>'
                 f'<property name="viewgroup" action="default">{VIEW_GROUP + 1}</property>'
                 '</view></item>')
+    views, columns = sspViews(medial)
     return ['<item><layout type="horizontal" split="false">' + "".join(
-        threeD(k, t) for k, t in SSP_VIEWS[start:start + SSP_COLUMNS]) + '</layout></item>'
-        for start in range(0, len(SSP_VIEWS), SSP_COLUMNS)]
+        threeD(k, t) for k, t in views[start:start + columns]) + '</layout></item>'
+        for start in range(0, len(views), columns)]
 
 
 def _withTable(rows):
@@ -565,12 +574,14 @@ def _withTable(rows):
             f'<item splitSize="250">{table}</item></layout>')
 
 
-def layoutXml(layoutId=LAYOUT_SINGLE, mainViewportAttributes=""):
+def layoutXml(layoutId=LAYOUT_SINGLE, mainViewportAttributes="", medial=True):
     """The layout description of a review layout. mainViewportAttributes: XML attributes of the main window viewport
-    of the dual monitor layout (as in Slicer's own dual monitor layouts)."""
+    of the dual monitor layout (as in Slicer's own dual monitor layouts); medial: the medial 3D-SSP views (regions
+    with sides)."""
     if layoutId == LAYOUT_SLICES:
         return _withTable(_sliceRows())
-    sspRows = _sspRows() + (_sspRows(SSP_LOW) if layoutId in (LAYOUT_DUAL_LOW, LAYOUT_SSP_LOW) else [])
+    sspRows = _sspRows(SSP_MAIN, medial) + (_sspRows(SSP_LOW, medial) if layoutId in (LAYOUT_DUAL_LOW, LAYOUT_SSP_LOW)
+                                            else [])
     if layoutId in (LAYOUT_SSP, LAYOUT_SSP_LOW):
         return _withTable(sspRows)
     if layoutId in DUAL_LAYOUTS:
@@ -580,4 +591,4 @@ def layoutXml(layoutId=LAYOUT_SINGLE, mainViewportAttributes=""):
         return ('<viewports>' + main
                 + f'<layout name="StaticNeuroMonitor2" type="vertical" split="false" label="{MONITOR2_TITLE}" '
                   'dockable="true" dockPosition="floating">' + "".join(sspRows) + '</layout></viewports>')
-    return _withTable(_sliceRows() + _sspRows())
+    return _withTable(_sliceRows() + _sspRows(SSP_MAIN, medial))

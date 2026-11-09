@@ -656,7 +656,8 @@ steps, on the toolbar like the Dynamic Neuro Receptor PET:
    image, regions and database; **Compare with the database** again by hand, or *Compute the regional values*
    without a database: SUV and SUVR to the reference region). **Layout** (left): *Single monitor* (the normalized
    PET axial / coronal / sagittal with the region outlines, below it the **voxel score map**, then the eight **3D-SSP**
-   views (superior, anterior, left, left medial / inferior, posterior, right, right medial), the **region table** on
+   views (superior, anterior, left, left medial / inferior, posterior, right, right medial; the six without the medial
+   ones when the regions are bilateral), the **region table** on
    the right), *Dual monitor* (the default with two screens: the slices and the table in the main window, the 3D-SSP
    views in a window maximized on the second screen), *Slices and table* or *3D-SSP and table*. *Dual monitor, 3D-SSP
    + low scores* and *3D-SSP + low scores and table* add a second set of the eight 3D-SSP views below the first (16 views):
@@ -696,9 +697,11 @@ steps, on the toolbar like the Dynamic Neuro Receptor PET:
      mean, SD and n, and the score; as wide as its content. Click a column header to sort (by name or by value);
      click a region to show it alone on the slices for 5 s, the slices moved through it.
    - **3D-SSP** (Minoshima et al. 1995): the surface of all the regions together, and for the medial views each
-     hemisphere's (each made from its own mask, not by cutting a mesh: the regions with a side, "... L" / "... R", on
-     theirs, bilateral regions cut at the midline, x = 0 in MNI space; stored with the brain's in `ssp.npz`; an older
-     `ssp.npz` without them is not used: compute the mean / SD again); each vertex takes the maximum of
+     hemisphere's: only with regions with sides ("... L" / "... R"), each hemisphere's surface made from its own
+     regions (not cut at the midline; a bilateral reference left out); with bilateral regions no medial views and
+     2 x 3 views. Stored with the brain's in `ssp.npz` (a database with bilateral regions has no medial surfaces:
+     with an R / L segmentation its subjects are projected on the hemispheres on the fly and cached; an older
+     `ssp.npz` is not used: compute the mean / SD again); each vertex takes the maximum of
      the patient's smoothed map along its inward normal (0-20 mm, 1 mm steps; the ray stops where it leaves the
      brain, the regions, and takes nothing beyond). **Map**: the score (default) or the
      patient's projected values (SUVR for an SUVR database, else SUV; smoothed). **Score from**: *Minoshima*

@@ -605,7 +605,7 @@ class StaticNeuroPETLogic(DynamicNeuroPETLogic):
                     ratio = None
             result.setdefault("values", result["suv"])
             result.update(smoothed=ratio if result["ratio"] else values, union=nr.unionMask(masks, values.shape),
-                          hemispheres=ssp.hemisphereMasks(masks, values.shape, _ijkToRas(grid)))
+                          hemispheres=ssp.hemisphereMasks(masks, values.shape))
             return result
         grid = self.loadAtlasVolume(os.path.join(folder, group["mean"]), name=f"{header['name']} mean ({groupKey})")
         sdNode = self.loadAtlasVolume(os.path.join(folder, group["sd"]), name=f"{header['name']} SD ({groupKey})")
@@ -652,7 +652,7 @@ class StaticNeuroPETLogic(DynamicNeuroPETLogic):
         mask = nr.scoreMask(mean, brain)
         smoothed = normaldb.smoothMap(values, fwhm, spacing)
         result.update(smoothed=smoothed, union=nr.unionMask(masks, mean.shape),
-                      hemispheres=ssp.hemisphereMasks(masks, mean.shape, _ijkToRas(grid)))
+                      hemispheres=ssp.hemisphereMasks(masks, mean.shape))
         result["z"] = nr.scoreMap(smoothed, mean, sd, mask, nr.SCORE_Z)
         result["brightness"] = nr.petBrightness(values)     # the patient's map (not smoothed) as brightness
         result["gm"] = None         # the MNI grey matter probability on the grid: the score slices' default mask
@@ -732,12 +732,14 @@ class StaticNeuroPETLogic(DynamicNeuroPETLogic):
     @classmethod
     def reviewSurface(cls, mask, gridNode, targetPoints=SSP_TARGET_POINTS, hemispheres=None):
         """The 3D-SSP surface of a brain mask: the whole brain's and, for the medial views, each hemisphere's in one
-        surface (ssp.combine). hemispheres: (left, right) masks (ssp.hemisphereMasks: the regions' own sides);
-        None: the mask cut at the midline, x = 0 in MNI space. Each made from its own mask (no cut of a mesh)."""
+        surface (ssp.combine). hemispheres: (left, right) masks of the regions' own sides (ssp.hemisphereMasks), each
+        hemisphere's surface made from its own mask; None (bilateral regions): the brain's only, no medial views."""
         brain = cls.brainSurface(mask, gridNode, targetPoints)
+        if hemispheres is None:
+            return brain
         mask = np.asarray(mask, dtype=bool)
         halves = []
-        for half in (hemispheres or ssp.hemispheres(mask.shape, _ijkToRas(gridNode))):
+        for half in hemispheres:
             try:
                 halves.append(cls.brainSurface(mask & np.asarray(half, dtype=bool), gridNode, targetPoints // 2))
             except ValueError:          # nothing on that side
@@ -826,16 +828,23 @@ class StaticNeuroPETLogic(DynamicNeuroPETLogic):
         surface = groups = None
         mapKey = normaldb.subjectMapKey(header) if header is not None else ""
         path = ssp.sspPath(folder, header) if header is not None else None
-        outdated = False
+        outdated = noMedial = False
+        medial = result.get("hemispheres") is not None      # the segmentation's regions with sides (R / L)
         if path and locked:
             read = ssp.read(path)
             if read is not None and read[2].get("maps") == mapKey and not (
                     abs(float(read[2].get("depthMm") or 0) - ssp.DEPTH_MM) < 1e-6 and read[2].get("clipToBrain")
-                    and ssp.hasMedial(read[0]) and int(read[2].get("surface") or 0) >= ssp.SURFACE_VERSION):
+                    and int(read[2].get("surface") or 0) >= ssp.SURFACE_VERSION):
                 outdated, read = True, None         # an older projection (13.5 mm, not stopped at the brain's edge,
-                #                                     without the hemispheres of the medial views, an older surface)
+                #                                     an older surface)
+            if read is not None and read[2].get("maps") == mapKey and medial and not ssp.hasMedial(read[0]):
+                noMedial, read = True, None         # the database's regions bilateral, the segmentation's R / L
             if read is not None and read[2].get("maps") == mapKey:
                 surface, groups, meta = read
+                if not medial and ssp.hasPart(surface, ssp.PART_LEFT):      # bilateral regions: no medial views
+                    surface, index = ssp.brainPart(surface)
+                    groups = {k: dict(g, mean=np.asarray(g["mean"])[index], sd=np.asarray(g["sd"])[index])
+                              for k, g in groups.items()}
                 out["source"] = "the database's surface projections"
                 if abs(float(meta.get("fwhmMm") or 0) - result["fwhm"]) > 1e-6:
                     notes.append("The database's surface projections were made with another smoothing.")
@@ -853,12 +862,19 @@ class StaticNeuroPETLogic(DynamicNeuroPETLogic):
                 return None
             out["source"] = "the database's subjects projected on these regions"
             if outdated:
-                notes.append("The database's 3D-SSP projections were made by an older version (another depth, or "
-                             "no medial surfaces): projected from its subjects now; compute the mean / SD again in "
-                             "the Neuro PET Database Manager to store them.")
+                notes.append("The database's 3D-SSP projections were made by an older version (another depth or "
+                             "surface): projected from its subjects now; compute the mean / SD again in the Neuro "
+                             "PET Database Manager to store them.")
+            elif noMedial:
+                notes.append("The database's 3D-SSP projections have no medial surfaces (its regions are "
+                             "bilateral): its subjects projected on the hemispheres of these R / L regions now "
+                             "(cached).")
         group = (groups or {}).get(groupKey)
         if group is not None:
             out.update(mean=group["mean"], sd=group["sd"], n=group.get("n") or result.get("n"))
+        elif noMedial:
+            notes.append("The database's 3D-SSP projections have no medial surfaces (its regions are bilateral) and "
+                         "it has no subjects: the 3D-SSP shows the voxel score map projected.")
         elif outdated:
             notes.append("The database's 3D-SSP projections are from an older version (another depth, not stopped at "
                          "the brain's edge, or no medial surfaces): the 3D-SSP shows the voxel score map projected.")
@@ -3351,12 +3367,23 @@ class StaticNeuroPETWidget(DynamicNeuroPETWidget):
         """The review layouts in Slicer (a description updated only when that layout is not on screen)."""
         layoutNode = layoutManager.layoutLogic().GetLayoutNode()
         attributes = _mainViewportAttributes()
+        medial = self._sspMedial()
         for layoutId in nr.LAYOUT_IDS:
-            description = nr.layoutXml(layoutId, attributes)
+            description = nr.layoutXml(layoutId, attributes, medial)
             if not layoutNode.IsLayoutDescription(layoutId):
                 layoutNode.AddLayoutDescription(layoutId, description)
-            elif layoutManager.layout != layoutId and layoutNode.GetLayoutDescription(layoutId) != description:
+            elif layoutNode.GetLayoutDescription(layoutId) != description:
+                if layoutManager.layout == layoutId:      # with or without the medial views: left and built again
+                    layoutManager.setLayout(self._reviewPreviousLayout
+                                            or slicer.vtkMRMLLayoutNode.SlicerLayoutFourUpView)
+                    slicer.app.processEvents()
                 layoutNode.SetLayoutDescription(layoutId, description)
+
+    def _sspMedial(self):
+        """Whether the 3D-SSP has the medial views (the regions with sides, R / L): the layouts' 2 x 4 views, else
+        2 x 3."""
+        data = (self.reviewResult or {}).get("ssp")
+        return ssp.hasMedial(data["surface"]) if data else True
 
     def _enterReviewViews(self):
         if self.volume() is None:

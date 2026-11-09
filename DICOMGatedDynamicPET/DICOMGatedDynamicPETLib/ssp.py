@@ -31,9 +31,9 @@ DEFAULT_SOURCE = SOURCE_MINOSHIMA
 MAP_SCORE, MAP_PATIENT = "score", "patient"
 MAPS = ((MAP_SCORE, "Score (z / t)"), (MAP_PATIENT, "Patient (projected values)"))
 SSP_FILE = "stats/ssp.npz"
-# the surface's version in the .npz meta: 2, the triangles split to short edges after the decimation (the
-# hemispheres' flat midline faces were long triangles); an older stored surface is not used
-SURFACE_VERSION = 2
+# the surface's version in the .npz meta: 3, the triangles split to short edges after the decimation, the
+# hemispheres (medial views) only from regions with sides; an older stored surface is not used
+SURFACE_VERSION = 3
 
 PART_BRAIN, PART_LEFT, PART_RIGHT = 0, 1, 2
 # camera of each view: (direction from the brain centre to the camera, view up), RAS; the medial views look at one
@@ -92,22 +92,20 @@ def regionSide(name):
     return side[1] if side in (" L", " R") else None
 
 
-def hemisphereMasks(masks, shape, ijkToRas, midlineX=0.0):
-    """(left, right) boolean arrays of the regions {name: mask}: the regions named with a side ("... L" / "... R")
-    on theirs, the others cut at the midline (all of them for bilateral regions); a voxel of both sides left."""
-    cutLeft, cutRight = hemispheres(shape, ijkToRas, midlineX)
+def hemisphereMasks(masks, shape):
+    """(left, right) boolean arrays of the regions {name: mask} named with a side ("... L" / "... R"; the others,
+    e.g. a bilateral reference, left out; a voxel of both sides left): the hemispheres of the medial views. None for
+    bilateral regions (no medial views: the brain is not cut at the midline)."""
     left = np.zeros(shape, dtype=bool)
     right = np.zeros(shape, dtype=bool)
     for name, mask in masks.items():
-        mask = np.asarray(mask, dtype=bool)
         side = regionSide(name)
         if side == "L":
-            left |= mask
+            left |= np.asarray(mask, dtype=bool)
         elif side == "R":
-            right |= mask
-        else:
-            left |= mask & cutLeft
-            right |= mask & cutRight
+            right |= np.asarray(mask, dtype=bool)
+    if not left.any() or not right.any():
+        return None
     return left, right & ~left
 
 
