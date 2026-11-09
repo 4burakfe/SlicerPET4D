@@ -164,6 +164,16 @@ def test_score_color_tables():
     assert np.allclose(nr.colorTable("Viridis")[-1], (0xfd / 255, 0xe7 / 255, 0x25 / 255))
     assert nr.colorTable("ColdToHotRainbow") is None
     assert {"Plasma", "Viridis"} <= set(nr.SCORE_COLORMAPS)
+    assert nr.SCORE_COLORMAPS[0] == "SSP_Rainbow" and nr.DEFAULT_MAXIMUM == 4.0
+    for label in ("SSP_Rainbow", "SSP_Hel", "SSP_Tamu", "SSP_Jet"):
+        table = nr.colorTable(label)
+        assert label in nr.SCORE_COLORMAPS
+        assert table.shape == (256, 3) and table.min() >= 0 and table.max() <= 1
+    rainbow = nr.colorTable("SSP_Rainbow")
+    assert rainbow[0].tolist() == pytest.approx([0.25098, 0, 0.501961])
+    assert rainbow[85].tolist() == pytest.approx([0, 0, 1]) and rainbow[127].tolist() == pytest.approx([0, 1, 0])
+    assert nr.colorTable("SSP_Tamu")[-1].tolist() == pytest.approx([1, 0, 0])     # beyond the last point: its colour
+    assert nr.colorTable("SSP_Jet")[-1].tolist() == pytest.approx([0.5, 0, 0])
 
 
 def test_layout_xml():

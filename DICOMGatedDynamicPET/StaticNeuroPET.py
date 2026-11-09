@@ -70,7 +70,8 @@ NORMALIZATION_ATTRIBUTE = NEURO_PREFIX + "Normalization"    # JSON of the settin
 REGISTERED_SUFFIX = " registered"
 ICON_PATH = os.path.join(_MODULE_DIR, "Resources", "Icons", "StaticNeuroPET.png")
 WARNING_STYLE = "<span style='color:#c0392b'>{}</span>"
-REVIEW_PET_COLORMAP = "PET-DICOM"
+REVIEW_PET_COLORMAP = "Inferno"                  # the top row (the normalized PET / SPECT)
+REVIEW_SSP_PATIENT_COLORMAP = "PET-DICOM"       # the 3D-SSP of the patient's projected values
 REVIEW_SCORE_COLORMAP = nr.SCORE_COLORMAPS[0]     # diverging: below the normals cold, above hot
 SCORE_COLOR_NODE = "Neuro review score colors"
 REVIEW_FUSION_OPACITY = 0.6
@@ -2781,7 +2782,7 @@ class StaticNeuroPETWidget(DynamicNeuroPETWidget):
         for key, title in ssp.SOURCES:
             self.sspSourceCombo.addItem(title, key)
         self.sspSourceCombo.toolTip = (
-            "Minoshima: the patient's maximum along the inward normal (0 - 13.5 mm) scored against the same projection "
+            "Minoshima: the patient's maximum along the inward normal (0 - 20 mm, stopped at the brain's edge) scored against the same projection "
             "of every normal (vertex mean / SD). Voxel: the voxel score map projected (its most extreme score along the "
             "normal); used when the database has no projections of its normals (predefined).")
         form.addRow("Score from:", self.sspSourceCombo)
@@ -2791,7 +2792,7 @@ class StaticNeuroPETWidget(DynamicNeuroPETWidget):
             self.sspColorCombo.addItem(label)
         for label in colormaps.LABELS:
             self.sspPatientColorCombo.addItem(label)
-        self.sspPatientColorCombo.setCurrentIndex(max(0, self.sspPatientColorCombo.findText(REVIEW_PET_COLORMAP)))
+        self.sspPatientColorCombo.setCurrentIndex(max(0, self.sspPatientColorCombo.findText(REVIEW_SSP_PATIENT_COLORMAP)))
         form.addRow("Score colors:", self.sspColorCombo)
         self.sspMaximumSpin = qt.QDoubleSpinBox()
         self.sspMaximumSpin.setRange(0.5, 50.0)

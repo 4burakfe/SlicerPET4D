@@ -42,8 +42,21 @@ BRIGHTNESS_PERCENTILE = 99.5    # the PET brightness: full at this percentile of
 BRIGHTNESS_GAMMA = 0.8
 SCORE_MASKS = ((MASK_GM, "Grey matter (MNI probability)"), (MASK_UPTAKE, "High normal uptake"))
 SD_FLOOR_FRACTION = 0.2         # SD floor: 20 % of the median SD in the mask
-DEFAULT_MAXIMUM = 5.0           # score window: -5 ... +5, 0 in the middle
-SCORE_COLORMAPS = ("ColdToHotRainbow", "DivergingBlueRed", "Plasma", "Viridis")     # the first is the default
+DEFAULT_MAXIMUM = 4.0           # score window: -4 ... +4, 0 in the middle
+# the score colour maps made here: (position 0..255, R, G, B 0..1) points, linear between them (Slicer's procedural
+# color files); SSP_Jet a copy of the jet colour map
+_POINTS = {
+    "SSP_Rainbow": ((0, 0.25098, 0, 0.501961), (42.6, 0, 0, 0.501961), (85, 0, 0, 1), (127, 0, 1, 0),
+                    (170, 1, 1, 0), (212, 1, 0.501961, 0), (255, 1, 0.0117647, 0)),
+    "SSP_Hel": ((0, 0.25098, 0, 0.501961), (42.6, 0, 0, 0.501961), (85, 0.403922, 0.486275, 0.752941),
+                (127, 0.407843, 0.501961, 0.494118), (170, 1, 1, 0), (212, 1, 0.501961, 0), (255, 1, 0.0117647, 0)),
+    "SSP_Tamu": ((0, 0.25098, 0, 0.501961), (67, 0, 0, 0.752941), (125, 0.752941, 0.752941, 0.752941),
+                 (192, 1, 0.678431, 0.415686), (251.66, 1, 0, 0)),
+    "SSP_Jet": ((0, 0, 0, 0.5), (31.875, 0, 0, 1), (95.625, 0, 1, 1), (159.375, 1, 1, 0), (223.125, 1, 0, 0),
+                (255, 0.5, 0, 0)),
+}
+SCORE_COLORMAPS = ("SSP_Rainbow", "SSP_Hel", "SSP_Tamu", "SSP_Jet", "ColdToHotRainbow", "DivergingBlueRed", "Plasma",
+                   "Viridis")     # the first is the default
 # Plasma and Viridis (matplotlib, CC0): 17 anchors, interpolated to 256 (the others are Slicer's colour tables)
 _ANCHORS = {
     "Plasma": "0d08873105974c02a16600a77e03a89511a1aa2395bc3587cc4778da5a6ae66c5cf0804ef89540fdac33fdc527f8df25f0f921",
@@ -337,7 +350,12 @@ def tableRows(patientValues, patientSuv, reference, kind=DEFAULT_SCORE):
 # Display
 # ---------------------------------------------------------------------------
 def colorTable(label, count=256):
-    """count x 3 RGB (0..1) of Plasma / Viridis; None for the other colour maps (Slicer's)."""
+    """count x 3 RGB (0..1) of the SSP_ maps, Plasma and Viridis; None for the other colour maps (Slicer's)."""
+    points = _POINTS.get(label)
+    if points is not None:
+        points = np.asarray(points, dtype=float)
+        at = np.linspace(0.0, 255.0, count)
+        return np.stack([np.interp(at, points[:, 0], points[:, c]) for c in (1, 2, 3)], axis=1)
     anchors = _ANCHORS.get(label)
     if anchors is None:
         return None
