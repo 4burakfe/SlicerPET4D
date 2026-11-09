@@ -64,6 +64,7 @@ METHODS = ((METHOD_PET, "PET/SPECT to MR template (T1)"),
            (METHOD_PET_TEMPLATE, "PET/SPECT to PET template (normal database mean)"))
 SETTINGS_DB_ROOT = "DICOMGatedDynamicPET/NeuroDatabase/RootFolder"     # shared with the Neuro PET Database Manager
 SETTINGS_IMPORT_FOLDER = "DICOMGatedDynamicPET/StaticNeuro/ImportFolder"
+SETTINGS_DISPLAY = "DICOMGatedDynamicPET/StaticNeuro/DisplaySettings"     # JSON of the saved review display settings
 AGE_ATTRIBUTE, SEX_ATTRIBUTE = NEURO_PREFIX + "PatientAge", NEURO_PREFIX + "PatientSex"
 DATABASE_PARAMETER = NEURO_PREFIX + "Database"
 NORMALIZATION_ATTRIBUTE = NEURO_PREFIX + "Normalization"    # JSON of the settings the image was normalized with
@@ -2077,6 +2078,18 @@ class StaticNeuroPETWidget(DynamicNeuroPETWidget):
         self.anatomyWindowRange.toolTip = "Display range of the MR / CT (grey)"
         fusion.addRow("MR window:", self.anatomyWindowRange)
         layout.addWidget(fusionBox)
+        settingsRow = qt.QHBoxLayout()
+        self.saveDisplayButton = _button("Save display settings")
+        self.saveDisplayButton.toolTip = ("Keep the display, 3D-SSP and fusion settings (colors, score windows, score "
+                                          "slices, outlines, legends, opacities; not the image windows or the layout) "
+                                          "as the defaults of the next sessions")
+        self.restoreDisplayButton = _button("Restore defaults", "revert")
+        self.restoreDisplayButton.toolTip = "The display settings back to the saved ones (the factory ones if none)"
+        self.factoryDisplayButton = _button("Restore factory", "revert")
+        self.factoryDisplayButton.toolTip = "The display settings back to the module's own; the saved ones forgotten"
+        for button in (self.saveDisplayButton, self.restoreDisplayButton, self.factoryDisplayButton):
+            settingsRow.addWidget(button)
+        layout.addLayout(settingsRow)
 
         self.compareButton.connect("clicked()", self.onCompare)
         self.groupCombo.connect("activated(int)", lambda i: setattr(self, "_groupChosen", True))
@@ -2112,6 +2125,80 @@ class StaticNeuroPETWidget(DynamicNeuroPETWidget):
         self._regionTableHost = None
         self._flash = None                  # (token, {segment ID: visible}) while a region is shown alone
         self._autoCompared = None
+        self._factoryDisplay = self._displayValues()
+        saved = self._savedDisplay()
+        if saved:
+            self._setDisplayValues(saved, quiet=True)
+        self.saveDisplayButton.connect("clicked()", self.onSaveDisplay)
+        self.restoreDisplayButton.connect("clicked()", self.onRestoreDisplay)
+        self.factoryDisplayButton.connect("clicked()", self.onFactoryDisplay)
+
+    # saved display settings
+    def _displayWidgets(self):
+        """{key: widget} of the review display settings that are saved (not the image windows or the layout)."""
+        return {"petColors": self.petColorCombo, "scoreColors": self.scoreColorCombo,
+                "scoreMaximum": self.scoreMaximumSpin, "hypoOnly": self.hypoOnlyCheck,
+                "scoreStyle": self.scoreStyleCombo, "scoreMask": self.scoreMaskCombo, "greyMatter": self.gmSpin,
+                "uptake": self.uptakeSpin, "hideBelow": self.hideBelowSpin,
+                "scoreBackground": self.scoreBackgroundCombo, "outlines": self.outlineCheck,
+                "legends": self.legendCheck, "sspMap": self.sspMapCombo, "sspSource": self.sspSourceCombo,
+                "sspColors": self.sspColorCombo, "sspMaximum": self.sspMaximumSpin,
+                "sspPatientColors": self.sspPatientColorCombo, "sspLighting": self.sspLightingCheck,
+                "fusionOpacity": self.fusionOpacity, "scoreOpacity": self.scoreOpacity}
+
+    def _displayValues(self):
+        values = {}
+        for key, widget in self._displayWidgets().items():
+            if isinstance(widget, qt.QComboBox):
+                values[key] = widget.currentText
+            elif isinstance(widget, qt.QCheckBox):
+                values[key] = bool(widget.checked)
+            else:
+                values[key] = widget.value
+        return values
+
+    def _setDisplayValues(self, values, quiet=False):
+        """The display widgets set to values (unknown keys and labels skipped); quiet: without their signals."""
+        for key, widget in self._displayWidgets().items():
+            if key not in values:
+                continue
+            value = values[key]
+            if quiet:
+                widget.blockSignals(True)
+            try:
+                if isinstance(widget, qt.QComboBox):
+                    index = widget.findText(str(value))
+                    if index >= 0:
+                        widget.setCurrentIndex(index)
+                elif isinstance(widget, qt.QCheckBox):
+                    widget.checked = bool(value)
+                elif isinstance(widget, qt.QSpinBox):
+                    widget.value = int(value)
+                else:
+                    widget.value = float(value)
+            except (TypeError, ValueError):
+                logging.warning(f"Static Neuro: display setting {key} = {value!r} skipped")
+            finally:
+                if quiet:
+                    widget.blockSignals(False)
+
+    @staticmethod
+    def _savedDisplay():
+        try:
+            return json.loads(str(qt.QSettings().value(SETTINGS_DISPLAY) or "") or "{}")
+        except ValueError:
+            return {}
+
+    def onSaveDisplay(self):
+        qt.QSettings().setValue(SETTINGS_DISPLAY, json.dumps(self._displayValues()))
+        slicer.util.showStatusMessage("Static Neuro: display settings saved as the defaults", 3000)
+
+    def onRestoreDisplay(self):
+        self._setDisplayValues(self._savedDisplay() or self._factoryDisplay)
+
+    def onFactoryDisplay(self):
+        qt.QSettings().remove(SETTINGS_DISPLAY)
+        self._setDisplayValues(self._factoryDisplay)
 
     def _updateReviewInfo(self, volume, segmentation, header, age, sex):
         lines = [f"Image: {volume.GetName() if volume else 'none'}"

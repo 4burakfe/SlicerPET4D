@@ -164,7 +164,7 @@ def test_score_color_tables():
     assert np.allclose(nr.colorTable("Viridis")[-1], (0xfd / 255, 0xe7 / 255, 0x25 / 255))
     assert nr.colorTable("ColdToHotRainbow") is None
     assert {"Plasma", "Viridis"} <= set(nr.SCORE_COLORMAPS)
-    assert nr.SCORE_COLORMAPS[0] == "SSP_Rainbow" and nr.DEFAULT_MAXIMUM == 4.0
+    assert nr.SCORE_COLORMAPS[:2] == ("SSP_Turbo", "SSP_IceFire") and nr.DEFAULT_MAXIMUM == 4.0
     for label in [label for label in nr.SCORE_COLORMAPS if label.startswith("SSP")]:
         table = nr.colorTable(label)
         assert table.shape == (256, 3) and table.min() >= 0 and table.max() <= 1, label

@@ -75,8 +75,8 @@ _STEPS = {
     "SSP_Rainbow10": ((0, 0, 0), (0.3, 0, 0.5), (0, 0, 1), (0, 0.7, 1), (0, 1, 0), (0.6, 1, 0), (1, 1, 0),
                       (1, 0.5, 0), (1, 0, 0), (1, 1, 1)),
 }
-SCORE_COLORMAPS = ("SSP_Rainbow", "SSP_Rainbow10", "SSP-PET-DICOM", "SSP_HotIron", "SSP_Inferno", "SSP_Viridis",
-                   "SSP_Turbo", "SSP_IceFire", "SSP_CoolWarm", "SSP_GreyZero", "SSP_PurpleOrange", "ColdToHotRainbow",
+SCORE_COLORMAPS = ("SSP_Turbo", "SSP_IceFire", "SSP_Rainbow", "SSP_Rainbow10", "SSP-PET-DICOM", "SSP_HotIron",
+                   "SSP_Inferno", "SSP_Viridis", "SSP_CoolWarm", "SSP_GreyZero", "SSP_PurpleOrange", "ColdToHotRainbow",
                    "DivergingBlueRed", "Plasma", "Viridis")     # the first is the default
 # Plasma and Viridis (matplotlib, CC0): 17 anchors, interpolated to 256 (the others are Slicer's colour tables)
 _ANCHORS = {
