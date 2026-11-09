@@ -59,6 +59,9 @@ def test_brightness_colors():
     assert rgb[1].tolist() == [0, 64, 0]                    # 0: green, a quarter bright
     assert rgb[2].tolist() == [128, 0, 0]                   # above the window: red
     assert rgb[3].tolist() == [255, 0, 0]
+    # a window of -5 .. 0 (below the normals only): 0 at its top end
+    low = nr.brightnessColors(np.array([-5.0, 0.0, 3.0]), np.ones(3), rgba, 0.0, -5.0)
+    assert low[0].tolist() == [0, 0, 255] and low[1].tolist() == [255, 0, 0] and low[2].tolist() == [255, 0, 0]
 
 
 def test_voxel_scores_sign_and_t():
@@ -153,6 +156,16 @@ def test_score_colors():
     hypo = nr.divergingColors(ramp, hypoOnly=True, count=5)
     assert hypo[3, :3].tolist() == list(nr.GREY) and hypo[4, :3].tolist() == list(nr.GREY)
     assert hypo[2, :3].tolist() == pytest.approx([0.5, 0.5, 0.5], abs=0.01)    # 0 keeps its colour
+    same, window = nr.scoreColors(ramp, nr.SIDE_ALL, 4.0, count=5)
+    assert window == (-4.0, 4.0) and np.allclose(same, rgba)
+    below, window = nr.scoreColors(ramp, nr.SIDE_BELOW, 4.0, count=5)     # -4, -3, -2, -1, 0
+    assert window == (-4.0, 0.0)
+    assert below[0, :3].tolist() == [1, 1, 1] and below[3, :3].tolist() == pytest.approx([0.25] * 3, abs=0.01)
+    assert below[4, :3].tolist() == list(nr.GREY)        # 0 (and above, clamped) grey
+    low, _ = nr.scoreColors(ramp, nr.SIDE_THRESHOLD, 4.0, -2.0, count=5)
+    assert low[1, :3].tolist() == pytest.approx([0.75] * 3, abs=0.01) and low[2, :3].tolist() == pytest.approx(
+        [0.5] * 3, abs=0.01)                               # -2 itself colored
+    assert low[3, :3].tolist() == list(nr.GREY) and low[4, :3].tolist() == list(nr.GREY)
     masked = nr.maskedScores(np.array([2.0, -4.0]), np.array([True, False]), 2.0)
     assert masked.tolist() == [1.0, nr.OUTSIDE]
 
@@ -176,7 +189,7 @@ def test_score_color_tables():
     assert steps[26].tolist() == [0.3, 0, 0.5] and steps[-1].tolist() == [1, 1, 1]
     assert nr.colorTable("SSP-PET-DICOM")[63].tolist() == pytest.approx([0, 0, 0.8])
     ice = nr.colorTable("SSP_IceFire")
-    assert ice[0].tolist() == [0.6, 0, 1] and ice[127].tolist() == pytest.approx([0, 0, 0.1])
+    assert ice[0].tolist() == [0.36, 0, 0.85] and ice[127].tolist() == pytest.approx([0, 0, 0.1])
     assert np.all(ice[40:128, :2] == 0) and np.all(ice[:128, 1] == 0)     # blue, purple at the lowest end
 
 
@@ -197,16 +210,26 @@ def test_reference_regions_left_out():
 def test_layout_xml():
     document = xml.dom.minidom.parseString(nr.layoutXml())
     tags = [v.getAttribute("singletontag") for v in document.getElementsByTagName("view")]
-    assert len(tags) == 13 and nr.TABLE_VIEW in tags
+    assert len(tags) == 15 and nr.TABLE_VIEW in tags
     assert nr.sliceViewName(nr.SCORE_ROW, "Sagittal") in tags and nr.sspViewName("Right") in tags
+    assert nr.sspViewName("LeftMedial") in tags and nr.sspViewName("RightMedial") in tags
     dual = xml.dom.minidom.parseString(nr.layoutXml(nr.LAYOUT_DUAL, ' name="main"'))
     layouts = dual.documentElement.getElementsByTagName("layout")
     assert dual.documentElement.tagName == "viewports"
     assert layouts[0].getAttribute("name") == "main"
     floating = [l for l in layouts if l.getAttribute("dockable") == "true"]
-    assert len(floating) == 1 and len(floating[0].getElementsByTagName("view")) == 6
+    assert len(floating) == 1 and len(floating[0].getElementsByTagName("view")) == 8
     assert len(xml.dom.minidom.parseString(nr.layoutXml(nr.LAYOUT_SLICES)).getElementsByTagName("view")) == 7
-    assert len(xml.dom.minidom.parseString(nr.layoutXml(nr.LAYOUT_SSP)).getElementsByTagName("view")) == 6
+    assert len(xml.dom.minidom.parseString(nr.layoutXml(nr.LAYOUT_SSP)).getElementsByTagName("view")) == 8
+    low = xml.dom.minidom.parseString(nr.layoutXml(nr.LAYOUT_SSP_LOW))
+    lowTags = [v.getAttribute("singletontag") for v in low.getElementsByTagName("view")]
+    assert len(lowTags) == 16 and nr.sspViewName("RightMedial", nr.SSP_LOW) in lowTags
+    assert set(lowTags) == set(nr.sspViewTags())
+    assert nr.sspViewTags()[nr.sspViewName("Top", nr.SSP_LOW)] == (nr.SSP_LOW, "Top")
+    dualLow = xml.dom.minidom.parseString(nr.layoutXml(nr.LAYOUT_DUAL_LOW, ' name="main"'))
+    floating = [l for l in dualLow.getElementsByTagName("layout") if l.getAttribute("dockable") == "true"]
+    assert len(floating) == 1 and len(floating[0].getElementsByTagName("view")) == 16
     for layoutId in nr.LAYOUT_IDS:          # only the table's splitter: the views keep equal sizes
-        assert nr.layoutXml(layoutId).count('split="true"') == (0 if layoutId == nr.LAYOUT_SSP else 1)
+        alone = layoutId in (nr.LAYOUT_SSP, nr.LAYOUT_SSP_LOW)
+        assert nr.layoutXml(layoutId).count('split="true"') == (0 if alone else 1)
     assert nr.defaultLayout(2) == nr.LAYOUT_DUAL and nr.defaultLayout(1) == nr.LAYOUT_SINGLE

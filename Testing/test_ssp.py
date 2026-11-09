@@ -113,6 +113,32 @@ def test_brain_part():
     assert ssp.hasPart(whole, ssp.PART_LEFT) and not ssp.hasPart(plain, ssp.PART_LEFT)
 
 
+def test_hemispheres_and_parts():
+    ijkToRas = np.diag([1.0, 1.0, 1.0, 1.0])
+    ijkToRas[0, 3] = -2.0                       # x = i - 2
+    left, right = ssp.hemispheres((2, 3, 4), ijkToRas)
+    assert left[0, 0].tolist() == [True, True, False, False]
+    assert (left ^ right).all()
+    tri = {"points": np.zeros((3, 3)), "normals": np.ones((3, 3)), "triangles": np.array([[0, 1, 2]])}
+    whole = ssp.combine(tri, tri, None)
+    assert whole["parts"].tolist() == [0, 0, 0, 1, 1, 1]
+    assert whole["triangles"].tolist() == [[0, 1, 2], [3, 4, 5]]
+    assert ssp.hasPart(whole, ssp.PART_LEFT) and not ssp.hasMedial(whole)
+    assert ssp.hasMedial(ssp.combine(tri, tri, tri)) and not ssp.hasMedial(tri)
+    piece, index = ssp.piece(whole, ssp.PART_LEFT)
+    assert index.tolist() == [3, 4, 5] and piece["triangles"].tolist() == [[0, 1, 2]]
+    assert ssp.viewPart("LeftMedial") == ssp.PART_LEFT and ssp.viewPart("RightMedial") == ssp.PART_RIGHT
+    assert ssp.viewPart("Top") == ssp.PART_BRAIN
+    assert set(ssp.CAMERAS) >= {"LeftMedial", "RightMedial"}
+
+
+def test_clipping_range():
+    points = np.array([[0.0, 0.0, 0.0], [80.0, 0.0, 0.0], [-80.0, 0.0, 0.0]])
+    near, far = ssp.clippingRange(points, (0.0, 0.0, 0.0), 600.0, margin=20.0)
+    assert (near, far) == pytest.approx((500.0, 700.0))
+    assert ssp.clippingRange(points, (0.0, 0.0, 0.0), 50.0)[0] == pytest.approx(0.1)
+
+
 def test_parts_roundtrip(tmp_path):
     path = str(tmp_path / "s.npz")
     ssp.write(path, _withParts(), {}, {"maps": "suvr"})

@@ -44,7 +44,7 @@ SCORE_MASKS = ((MASK_GM, "Grey matter (MNI probability)"), (MASK_UPTAKE, "High n
 SD_FLOOR_FRACTION = 0.2         # SD floor: 20 % of the median SD in the mask
 DEFAULT_MAXIMUM = 4.0           # score window: -4 ... +4, 0 in the middle
 # the score colour maps made here: (position 0..255, R, G, B 0..1) points, linear between them. From the CAT12
-# colours: SSP_Rainbow, SSP-PET-DICOM (GE Col), SSP_HotIron, SSP_Inferno, SSP_Viridis; SSP_Rainbow10 has ten flat
+# colours: SSP_Rainbow, SSP-PET-DICOM, SSP_HotIron, SSP_Inferno, SSP_Viridis; SSP_Rainbow10 has ten flat
 # steps (_STEPS). Diverging, for scores (0 in the middle): SSP_Turbo (a smooth rainbow), SSP_IceFire (black at 0:
 # only the abnormal coloured), SSP_CoolWarm (blue - light grey - red), SSP_GreyZero (the rainbow with a grey band
 # around 0, about +/- 0.5 of a +/- 4 window), SSP_PurpleOrange
@@ -61,8 +61,9 @@ _POINTS = {
     "SSP_Turbo": ((0, 0.190, 0.072, 0.232), (32, 0.268, 0.416, 0.936), (64, 0.148, 0.743, 0.879),
                   (96, 0.253, 0.954, 0.569), (128, 0.595, 0.981, 0.310), (160, 0.936, 0.809, 0.175),
                   (192, 1.0, 0.494, 0.113), (224, 0.777, 0.168, 0.045), (255, 0.480, 0.016, 0.011)),
-    # the cold side blue, from B = 0.1 next to 0 to full blue, then purple at the lowest scores (no white)
-    "SSP_IceFire": ((0, 0.6, 0, 1), (40, 0, 0, 1), (127, 0, 0, 0.1), (128, 0.05, 0.05, 0.05), (160, 0.6, 0.1, 0), (208, 1, 0.5, 0),
+    # the cold side blue, from B = 0.1 next to 0 to full blue, then a dark purple as bright as that blue (the same
+    # luminance) at the lowest scores; no white
+    "SSP_IceFire": ((0, 0.36, 0, 0.85), (40, 0, 0, 1), (127, 0, 0, 0.1), (128, 0.05, 0.05, 0.05), (160, 0.6, 0.1, 0), (208, 1, 0.5, 0),
                     (255, 1, 1, 0.6)),
     "SSP_CoolWarm": ((0, 0.230, 0.299, 0.754), (64, 0.552, 0.690, 0.996), (128, 0.865, 0.865, 0.865),
                      (192, 0.958, 0.604, 0.483), (255, 0.706, 0.016, 0.150)),
@@ -84,7 +85,14 @@ _ANCHORS = {
     "Plasma": "0d08873105974c02a16600a77e03a89511a1aa2395bc3587cc4778da5a6ae66c5cf0804ef89540fdac33fdc527f8df25f0f921",
     "Viridis": "44015448186a472d7b4240863b528b33638d2c728e26828e21918c1fa08828ae803fbc735ec96284d44baddc30d8e219fde725",
 }
-GREY = (0.62, 0.62, 0.62)       # the side above the normals with "below the normals only"
+GREY = (0.62, 0.62, 0.62)       # the scores not shown (above the normals, or above the threshold)
+# which scores are colored: all (the colour table across -maximum .. maximum, 0 in the middle); or only those below
+# the normals / below a threshold (the colour table reversed across -maximum .. 0, the lowest scores at its top end
+# as in other 3D-SSP software; the rest grey)
+SIDE_ALL, SIDE_BELOW, SIDE_THRESHOLD = "all", "below", "threshold"
+SCORE_SIDES = ((SIDE_ALL, "All scores"), (SIDE_BELOW, "Below the normals only (colors reversed)"),
+               (SIDE_THRESHOLD, "Below the threshold only (colors reversed)"))
+DEFAULT_THRESHOLD = -2.0
 OUTSIDE = -1.0e6                # score map voxels outside the scored mask (shown black: below the display threshold)
 REGIONS_FILE = normaldb.STATS_DIR + "/regions.json"
 CACHE_DIR = "cache"
@@ -422,6 +430,24 @@ def divergingColors(table, hypoOnly=False, count=256, grey=GREY):
     return rgba
 
 
+def scoreColors(table, side=SIDE_ALL, maximum=DEFAULT_MAXIMUM, threshold=DEFAULT_THRESHOLD, count=256, grey=GREY):
+    """(count x 4 RGBA, (low, high) window) of a score map by its side (SCORE_SIDES): all: the colour table across
+    -maximum .. maximum; below / threshold: the table reversed across -maximum .. 0 (-maximum its top end), grey at
+    0 (the scores above it clamped there) and, for threshold, above the threshold (a negative score)."""
+    maximum = float(maximum)
+    if side not in (SIDE_BELOW, SIDE_THRESHOLD):
+        return divergingColors(table, count=count, grey=grey), (-maximum, maximum)
+    table = np.asarray(table, dtype=float)
+    index = np.clip(np.rint(np.linspace(len(table) - 1, 0, count)).astype(int), 0, len(table) - 1)
+    rgba = np.ones((count, 4), dtype=float)
+    rgba[:, :3] = table[index]
+    values = np.linspace(-maximum, 0.0, count)
+    rgba[-1, :3] = grey
+    if side == SIDE_THRESHOLD:
+        rgba[values > min(float(threshold), 0.0) + 1e-9, :3] = grey
+    return rgba, (-maximum, 0.0)
+
+
 def petBrightness(values, percentile=BRIGHTNESS_PERCENTILE, gamma=BRIGHTNESS_GAMMA):
     """0..1 brightness of the patient's map: its values over the percentile of the positive ones, to a gamma."""
     values = np.nan_to_num(np.asarray(values, dtype=np.float32))
@@ -431,13 +457,16 @@ def petBrightness(values, percentile=BRIGHTNESS_PERCENTILE, gamma=BRIGHTNESS_GAM
     return out ** np.float32(gamma) if gamma != 1.0 else out
 
 
-def brightnessColors(scores, brightness, rgba, maximum):
-    """uint8 RGB (shape + (3,)) of a score map in color (the colour table rgba over -maximum .. maximum, 0 in the
-    middle) times the brightness (0..1): the PET's own pattern lit in the score's colors, no threshold or mask."""
+def brightnessColors(scores, brightness, rgba, maximum, low=None):
+    """uint8 RGB (shape + (3,)) of a score map in color (the colour table rgba over low .. maximum; low -maximum
+    when not given, 0 in the middle) times the brightness (0..1): the PET's own pattern lit in the score's colors, no
+    threshold or mask."""
     rgba = np.asarray(rgba, dtype=np.float32)
     count = len(rgba)
+    low = -maximum if low is None else low
+    span = (maximum - low) or 1.0
     scores = np.nan_to_num(np.asarray(scores, dtype=np.float32))
-    index = np.clip(np.rint((scores + maximum) / (2.0 * maximum) * (count - 1)), 0, count - 1).astype(np.int32)
+    index = np.clip(np.rint((scores - low) / span * (count - 1)), 0, count - 1).astype(np.int32)
     rgb = rgba[index, :3] * np.asarray(brightness, dtype=np.float32)[..., None]
     return np.clip(np.rint(rgb * 255.0), 0, 255).astype(np.uint8)
 
@@ -457,24 +486,32 @@ def maskedScores(scores, mask, factor=1.0, hideBelow=0.0):
 # only the table's width can be dragged): rows 1-2 slice views (PET with the region outlines; the score map), rows 3-4 the 3D-SSP views, the
 # region table on the right. Single monitor: all of it; dual monitor: the slices and the table in the main window,
 # the 3D-SSP views in a floating window placed on the second screen; and the slices (with the table) or the 3D-SSP
-# views alone.
+# views alone. The "+ low scores" variants add a second set of the 3D-SSP views below the first: the scores below
+# the threshold only (colors reversed), 16 views in all.
 LAYOUT_ID = LAYOUT_SINGLE = 7810
 LAYOUT_DUAL = 7811
 LAYOUT_SLICES = 7812
 LAYOUT_SSP = 7813
+LAYOUT_DUAL_LOW = 7814
+LAYOUT_SSP_LOW = 7815
 LAYOUTS = ((LAYOUT_SINGLE, "Single monitor (slices, 3D-SSP, table)"),
            (LAYOUT_DUAL, "Dual monitor (3D-SSP on the second screen)"),
+           (LAYOUT_DUAL_LOW, "Dual monitor, 3D-SSP + low scores (16 views)"),
            (LAYOUT_SLICES, "Slices and table"),
-           (LAYOUT_SSP, "3D-SSP only"))
+           (LAYOUT_SSP, "3D-SSP only"),
+           (LAYOUT_SSP_LOW, "3D-SSP + low scores only (16 views)"))
+DUAL_LAYOUTS = (LAYOUT_DUAL, LAYOUT_DUAL_LOW)
 LAYOUT_IDS = tuple(k for k, _ in LAYOUTS)
 MONITOR2_TITLE = "Static Neuro - 3D-SSP (Monitor 2)"
 ORIENTATIONS = (("Axial", "#F34A33"), ("Coronal", "#6EB04B"), ("Sagittal", "#EDD54C"))
 PET_ROW, SCORE_ROW = "PET", "Score"
 VIEW_PREFIX = "NeuroRev"
 VIEW_GROUP = 93
-SSP_VIEWS = (("Top", "Superior"), ("Ant", "Anterior"), ("Left", "Left"),
-             ("Bottom", "Inferior"), ("Post", "Posterior"), ("Right", "Right"))
-SSP_COLUMNS = 3
+SSP_VIEWS = (("Top", "Superior"), ("Ant", "Anterior"), ("Left", "Left"), ("LeftMedial", "Left medial"),
+             ("Bottom", "Inferior"), ("Post", "Posterior"), ("Right", "Right"), ("RightMedial", "Right medial"))
+SSP_COLUMNS = 4
+# the sets of 3D-SSP views: the main one (as set in the 3D-SSP box) and the low scores' (below the threshold)
+SSP_MAIN, SSP_LOW = "", "Low"
 TABLE_VIEW = VIEW_PREFIX + "Table"
 
 
@@ -482,8 +519,13 @@ def sliceViewName(row, orientation):
     return f"{VIEW_PREFIX}{row}{orientation}"
 
 
-def sspViewName(key):
-    return f"{VIEW_PREFIX}SSP{key}"
+def sspViewName(key, viewSet=SSP_MAIN):
+    return f"{VIEW_PREFIX}SSP{viewSet}{key}"
+
+
+def sspViewTags():
+    """{singleton tag: (view set, view key)} of every 3D-SSP view."""
+    return {sspViewName(key, viewSet): (viewSet, key) for viewSet in (SSP_MAIN, SSP_LOW) for key, _ in SSP_VIEWS}
 
 
 def defaultLayout(screens):
@@ -504,10 +546,10 @@ def _sliceRows():
         for row, prefix in ((PET_ROW, ""), (SCORE_ROW, "S"))]
 
 
-def _sspRows():
+def _sspRows(viewSet=SSP_MAIN):
     def threeD(key, title):
-        return (f'<item><view class="vtkMRMLViewNode" singletontag="{sspViewName(key)}">'
-                f'<property name="viewlabel" action="default">{title}</property>'
+        return (f'<item><view class="vtkMRMLViewNode" singletontag="{sspViewName(key, viewSet)}">'
+                f'<property name="viewlabel" action="default">{title}{" (low)" if viewSet else ""}</property>'
                 f'<property name="viewgroup" action="default">{VIEW_GROUP + 1}</property>'
                 '</view></item>')
     return ['<item><layout type="horizontal" split="false">' + "".join(
@@ -528,13 +570,14 @@ def layoutXml(layoutId=LAYOUT_SINGLE, mainViewportAttributes=""):
     of the dual monitor layout (as in Slicer's own dual monitor layouts)."""
     if layoutId == LAYOUT_SLICES:
         return _withTable(_sliceRows())
-    if layoutId == LAYOUT_SSP:
-        return f'<layout type="vertical" split="false">{"".join(_sspRows())}</layout>'
-    if layoutId == LAYOUT_DUAL:
+    sspRows = _sspRows() + (_sspRows(SSP_LOW) if layoutId in (LAYOUT_DUAL_LOW, LAYOUT_SSP_LOW) else [])
+    if layoutId in (LAYOUT_SSP, LAYOUT_SSP_LOW):
+        return f'<layout type="vertical" split="false">{"".join(sspRows)}</layout>'
+    if layoutId in DUAL_LAYOUTS:
         main = _withTable(_sliceRows())
         main = main.replace('<layout type="horizontal" split="true">',
                             f'<layout type="horizontal" split="true"{mainViewportAttributes}>', 1)
         return ('<viewports>' + main
                 + f'<layout name="StaticNeuroMonitor2" type="vertical" split="false" label="{MONITOR2_TITLE}" '
-                  'dockable="true" dockPosition="floating">' + "".join(_sspRows()) + '</layout></viewports>')
+                  'dockable="true" dockPosition="floating">' + "".join(sspRows) + '</layout></viewports>')
     return _withTable(_sliceRows() + _sspRows())

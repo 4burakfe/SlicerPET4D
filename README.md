@@ -655,10 +655,12 @@ steps, on the toolbar like the Dynamic Neuro Receptor PET:
 5. **Review**: the patient compared with the normal database. Entering the step compares automatically (once per
    image, regions and database; **Compare with the database** again by hand, or *Compute the regional values*
    without a database: SUV and SUVR to the reference region). **Layout** (left): *Single monitor* (the normalized
-   PET axial / coronal / sagittal with the region outlines, below it the **voxel score map**, then the six **3D-SSP**
-   views (superior, anterior, left / inferior, posterior, right), the **region table** on the right), *Dual monitor* (the default with two screens: the slices and the table
-   in the main window, the 3D-SSP views in a window maximized on the second screen), *Slices and table* or
-   *3D-SSP only*. The slice views are linked and have no title bars. Settings on the left:
+   PET axial / coronal / sagittal with the region outlines, below it the **voxel score map**, then the eight **3D-SSP**
+   views (superior, anterior, left, left medial / inferior, posterior, right, right medial), the **region table** on
+   the right), *Dual monitor* (the default with two screens: the slices and the table in the main window, the 3D-SSP
+   views in a window maximized on the second screen), *Slices and table* or *3D-SSP only*. *Dual monitor, 3D-SSP +
+   low scores* and *3D-SSP + low scores only* add a second set of the eight 3D-SSP views below the first (16 views):
+   the scores below the threshold only, colors reversed, the rest grey. The slice views are linked and have no title bars. Settings on the left:
    - **Normals**: automatically the patient's age group (the master when the age is not known or its group has no
      maps), or picked by hand. **Score**: z = (patient - normal mean) / SD or the Crawford-Howell t = z /
      sqrt(1 + 1/n) (default); negative means below the normals (hypometabolism / hypoperfusion).
@@ -674,8 +676,9 @@ steps, on the toolbar like the Dynamic Neuro Receptor PET:
      around 0) and SSP_PurpleOrange, or Slicer's ColdToHotRainbow, DivergingBlueRed, Plasma or
      Viridis: below the normals the low end, above them the high end, 0 in the middle;
      the same choice for the score slices and the 3D-SSP) over a window symmetric about 0 (default +/- 4); PET colors
-     default Inferno; *Below the
-     normals only* greys the positive side. **Save display settings** keeps the display, 3D-SSP and fusion settings
+     default Inferno. **Scores colored**: all (default); *below the normals only*; or *below the threshold only*
+     (**Threshold**, default -2). In the last two the color scale is reversed across minus the window .. 0 (the
+     lowest scores at its top end) and the other scores are grey. **Save display settings** keeps the display, 3D-SSP and fusion settings
      (colors, score windows, score slices, outlines, legends, opacities; not the image windows or the layout) as
      the defaults of the next sessions; **Restore defaults** goes back to them, **Restore factory** to the module's
      own (and forgets the saved ones). **Score slices**: *Score as color, PET as brightness* (default: each voxel
@@ -692,7 +695,9 @@ steps, on the toolbar like the Dynamic Neuro Receptor PET:
      database's reference structures, the pons and the brainstem together): the region color, SUVmean, the value of the database's map type (SUVR / ratio), the normals'
      mean, SD and n, and the score; as wide as its content. Click a column header to sort (by name or by value);
      click a region to show it alone on the slices for 5 s, the slices moved through it.
-   - **3D-SSP** (Minoshima et al. 1995): the surface of all the regions together; each vertex takes the maximum of
+   - **3D-SSP** (Minoshima et al. 1995): the surface of all the regions together, and for the medial views each
+     hemisphere's (the regions cut at the midline, x = 0 in MNI space, stored with the brain's in `ssp.npz`; an older
+     `ssp.npz` without them is not used: compute the mean / SD again); each vertex takes the maximum of
      the patient's smoothed map along its inward normal (0-20 mm, 1 mm steps; the ray stops where it leaves the
      brain, the regions, and takes nothing beyond). **Map**: the score (default) or the
      patient's projected values (SUVR for an SUVR database, else SUV; smoothed). **Score from**: *Minoshima*
