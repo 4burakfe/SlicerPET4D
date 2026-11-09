@@ -132,6 +132,12 @@ def test_hemispheres_and_parts():
     assert set(ssp.CAMERAS) >= {"LeftMedial", "RightMedial"}
 
 
+def test_side_labels():
+    assert ssp.sideLabels("Top") == ("L", "R") and ssp.sideLabels("Post") == ("L", "R")
+    assert ssp.sideLabels("Bottom") == ("R", "L") and ssp.sideLabels("Ant") == ("R", "L")
+    assert all(ssp.sideLabels(k) is None for k in ("Left", "Right", "LeftMedial", "RightMedial"))
+
+
 def test_clipping_range():
     points = np.array([[0.0, 0.0, 0.0], [80.0, 0.0, 0.0], [-80.0, 0.0, 0.0]])
     near, far = ssp.clippingRange(points, (0.0, 0.0, 0.0), 600.0, margin=20.0)

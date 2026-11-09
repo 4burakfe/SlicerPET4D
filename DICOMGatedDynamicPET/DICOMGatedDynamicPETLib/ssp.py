@@ -57,6 +57,16 @@ def offsets(depthMm=DEPTH_MM, stepMm=STEP_MM):
     return np.array(values, dtype=np.float64)
 
 
+def sideLabels(key):
+    """("R" / "L" on the left of the view, on the right) of a view whose screen left / right is the patient's right /
+    left (the superior, inferior, anterior and posterior views, as their cameras are set); None for the others."""
+    direction, up = CAMERAS[key]
+    right = np.cross(-np.asarray(direction, np.float64), np.asarray(up, np.float64))     # VTK: the screen's right
+    if abs(right[0]) < 0.9:
+        return None
+    return ("L", "R") if right[0] > 0 else ("R", "L")
+
+
 def viewPart(key):
     return VIEW_PARTS.get(key, PART_BRAIN)
 

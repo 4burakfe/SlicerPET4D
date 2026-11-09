@@ -705,7 +705,8 @@ steps, on the toolbar like the Dynamic Neuro Receptor PET:
      database's, else computed from the subjects of a user defined database and cached), or *Voxel score map
      projected* (the most extreme voxel score along the normal; used automatically when the normals' projections are
      not there, e.g. an older predefined database). Its own score colors and window, patient colors and window.
-     Black background, parallel projection, a box orientation marker, **Lighting** (on by default; off: flat colors);
+     Black background, parallel projection, a box orientation marker, R / L markers on the sides of the superior,
+     inferior, anterior and posterior views (for their default direction), **Lighting** (on by default; off: flat colors);
      zoom and pan are shared by the views, rotation is not. **Restore 3D views** puts back the default direction, zoom
      and position.
    - **MR fusion**: the PET and the scores over the MNI template T1, or over the patient's CT / MR when the

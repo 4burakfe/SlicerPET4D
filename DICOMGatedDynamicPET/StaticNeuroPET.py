@@ -85,6 +85,8 @@ SSP_MODEL_NAME = "Neuro 3D-SSP surface"
 SSP_COLOR_NODE = "Neuro 3D-SSP colors"
 SSP_LOW_COLOR_NODE = "Neuro 3D-SSP low score colors"
 SSP_CAMERA_DISTANCE = 600.0             # mm from the brain centre (parallel projection)
+SSP_SIDE_MARKER_X = (0.17, 0.92)        # the R / L markers of the 3D-SSP views (normalized x; the left one right of
+#                                         the color legend), at mid height
 SSP_SETUP_DELAY_MS = 500                # the 3D-SSP cameras set again once the new layout's views are drawn
 
 
@@ -3224,6 +3226,40 @@ class StaticNeuroPETWidget(DynamicNeuroPETWidget):
         except AttributeError:
             pass
 
+    def _sspSideMarkers(self, widget, viewNode, key):
+        """The R / L markers on the left and right of a superior, inferior, anterior or posterior 3D-SSP view (text
+        actors in its renderer, made once per view)."""
+        labels = ssp.sideLabels(key)
+        markers = getattr(self, "_sspMarkers", None)
+        if markers is None:
+            markers = self._sspMarkers = {}
+        try:
+            renderer = widget.threeDView().renderWindow().GetRenderers().GetFirstRenderer()
+        except Exception:
+            return
+        old = markers.get(viewNode.GetID())
+        if old is not None and (old[0] is not renderer or old[2] != labels):
+            for actor in old[1]:
+                old[0].RemoveViewProp(actor)
+            old = None
+        if old is not None or labels is None or renderer is None:
+            return
+        actors = []
+        for text, x in zip(labels, SSP_SIDE_MARKER_X):
+            actor = vtk.vtkTextActor()
+            actor.SetInput(text)
+            prop = actor.GetTextProperty()
+            prop.SetFontSize(20)
+            prop.BoldOn()
+            prop.SetColor(1.0, 1.0, 1.0)
+            prop.SetJustificationToCentered()
+            prop.SetVerticalJustificationToCentered()
+            actor.GetPositionCoordinate().SetCoordinateSystemToNormalizedViewport()
+            actor.SetPosition(x, 0.5)
+            renderer.AddViewProp(actor)
+            actors.append(actor)
+        markers[viewNode.GetID()] = (renderer, actors, labels)
+
     def _setupSspViews(self, fit=False):
         """The 3D-SSP views: black, no box, parallel projection, a box orientation marker, each camera looking at
         the surface from its side (top and bottom with the front up, the others with the top up; the medial views at
@@ -3274,6 +3310,7 @@ class StaticNeuroPETWidget(DynamicNeuroPETWidget):
                     camera.SetPosition(*(center + SSP_CAMERA_DISTANCE * np.asarray(direction)))
                     camera.SetParallelScale(scale)
                 self._clipSspCamera(widget, camera)
+                self._sspSideMarkers(widget, viewNode, key[1])
                 widget.threeDView().forceRender()
         finally:
             self._syncingCameras = False
