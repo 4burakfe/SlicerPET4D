@@ -1,0 +1,101 @@
+Licenses of the atlas files in this folder
+==========================================
+
+These files come with the extension so that the Neuro workflows run without a download. They are not covered by the
+extension's own license (MIT, see LICENSE at the top of the repository): each keeps the license of its source, given
+below. The files are unchanged copies of the originals (the NIfTI files only gzip compressed), except where noted.
+
+
+1. MNI ICBM 152 2009c Nonlinear Symmetric atlas
+-----------------------------------------------
+
+Files:
+    mni_icbm152_t1_tal_nlin_sym_09c.nii.gz         T1 template
+    mni_icbm152_t1_tal_nlin_sym_09c_mask.nii.gz    brain mask
+    mni_icbm152_gm_tal_nlin_sym_09c.nii.gz         grey matter probability map
+    mni_icbm152_wm_tal_nlin_sym_09c.nii.gz         white matter probability map
+
+Source: https://nist.mni.mcgill.ca/icbm-152-nonlinear-atlases-2009/
+
+License (as given on that page):
+
+    Copyright (C) 1993-2004 Louis Collins, McConnell Brain Imaging Centre, Montreal Neurological Institute, McGill
+    University. Permission to use, copy, modify, and distribute this software and its documentation for any purpose
+    and without fee is hereby granted, provided that the above copyright notice appear in all copies. The authors and
+    McGill University make no representations about the suitability of this software for any purpose. It is provided
+    "as is" without express or implied warranty. The authors are not responsible for any data loss, equipment damage,
+    property loss, or injury to subjects or patients resulting from the use or misuse of this software package.
+
+Please cite:
+    VS Fonov, AC Evans, K Botteron, CR Almli, RC McKinstry, DL Collins and BDCG. Unbiased average age-appropriate
+    atlases for pediatric studies. NeuroImage 2011;54(1):313-327. DOI: 10.1016/j.neuroimage.2010.07.033
+    VS Fonov, AC Evans, RC McKinstry, CR Almli and DL Collins. Unbiased nonlinear average age-appropriate brain
+    templates from birth to adulthood. NeuroImage 2009;47(Suppl 1):S102. DOI: 10.1016/S1053-8119(09)70884-5
+
+
+2. CerebrA
+----------
+
+Files:
+    mni_icbm152_CerebrA_tal_nlin_sym_09c.nii.gz    CerebrA labels
+    CerebrA_LabelDetails.csv                       the names of the labels
+
+Source: https://nist.mni.mcgill.ca/cerebra/ ; dataset DOI: 10.12751/g-node.be5e62
+
+License: Creative Commons CC0 1.0 Public Domain Dedication (as stated on the dataset's DOI page,
+https://doi.gin.g-node.org/10.12751/g-node.be5e62/ ; https://creativecommons.org/publicdomain/zero/1.0/).
+
+Please cite:
+    AL Manera, M Dadar, V Fonov, DL Collins. CerebrA, registration and manual label correction of Mindboggle-101
+    atlas for MNI-ICBM152 template. Scientific Data 2020;7:237.
+
+
+3. CerebrA with pons (made for this extension)
+----------------------------------------------
+
+Files:
+    mni_icbm152_CerebrA_tal_nlin_sym_09c_wpons.seg.nrrd
+    mni_icbm152_CerebrA_tal_nlin_sym_09c_wpons.csv
+
+The CerebrA labels (2) with the pons added as a structure of its own, inside the brainstem, by the extension's
+author. A derivative of CerebrA; the addition is given under the same terms (CC0 1.0). Cite CerebrA (2).
+
+CerebrA_groups.csv (the broad regions of the grouped atlases) is part of the extension (MIT).
+
+
+4. Chinese Brain PET Template (CNPET) - not in this folder
+----------------------------------------------------------
+
+No CNPET file comes with the extension. Normal databases shared for the Neuro workflows (mean / SD maps, regional
+statistics and surface projections made with the Neuro PET Database Manager) may be built from the normal [18F]FDG
+brain PET images of this dataset; its license is kept here for them.
+
+Source: https://www.nitrc.org/projects/cnpet ; https://github.com/DlutMedimgGroup/Chinese-Brain-PET-Template
+
+License:
+
+    MIT License
+
+    Copyright (c) 2021 DlutMedimgGroup
+
+    Permission is hereby granted, free of charge, to any person obtaining a copy
+    of this software and associated documentation files (the "Software"), to deal
+    in the Software without restriction, including without limitation the rights
+    to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+    copies of the Software, and to permit persons to whom the Software is
+    furnished to do so, subject to the following conditions:
+
+    The above copyright notice and this permission notice shall be included in all
+    copies or substantial portions of the Software.
+
+    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+    IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+    FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+    AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+    LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+    OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+    SOFTWARE.
+
+Please cite:
+    H Wang, Y Tian, Y Liu, et al. Population-specific brain [18F]-FDG PET templates of Chinese subjects for
+    statistical parametric mapping. Scientific Data 2021;8(1):305.

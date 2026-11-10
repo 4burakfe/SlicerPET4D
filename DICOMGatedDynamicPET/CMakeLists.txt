@@ -27,6 +27,7 @@ set(MODULE_PYTHON_SCRIPTS
   ${MODULE_NAME}Lib/normaldb.py
   ${MODULE_NAME}Lib/ssp.py
   ${MODULE_NAME}Lib/staticneuro.py
+  ${MODULE_NAME}Lib/templatebuild.py
   )
 
 set(MODULE_PYTHON_RESOURCES
@@ -135,6 +136,16 @@ slicerMacroBuildScriptedModule(
   RESOURCES
     Resources/Icons/${NEURO_MODULE_NAME}.png
     Resources/Atlas/CerebrA_groups.csv
+    # the atlas files that come with the extension (their licenses: Resources/Atlas/LICENSE.txt)
+    Resources/Atlas/LICENSE.txt
+    Resources/Atlas/mni_icbm152_t1_tal_nlin_sym_09c.nii.gz
+    Resources/Atlas/mni_icbm152_t1_tal_nlin_sym_09c_mask.nii.gz
+    Resources/Atlas/mni_icbm152_gm_tal_nlin_sym_09c.nii.gz
+    Resources/Atlas/mni_icbm152_wm_tal_nlin_sym_09c.nii.gz
+    Resources/Atlas/mni_icbm152_CerebrA_tal_nlin_sym_09c.nii.gz
+    Resources/Atlas/CerebrA_LabelDetails.csv
+    Resources/Atlas/mni_icbm152_CerebrA_tal_nlin_sym_09c_wpons.seg.nrrd
+    Resources/Atlas/mni_icbm152_CerebrA_tal_nlin_sym_09c_wpons.csv
   WITH_GENERIC_TESTS
   )
 

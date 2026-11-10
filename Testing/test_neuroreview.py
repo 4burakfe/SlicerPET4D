@@ -166,6 +166,10 @@ def test_score_colors():
     assert low[1, :3].tolist() == pytest.approx([0.75] * 3, abs=0.01) and low[2, :3].tolist() == pytest.approx(
         [0.5] * 3, abs=0.01)                               # -2 itself colored
     assert low[3, :3].tolist() == list(nr.GREY) and low[4, :3].tolist() == list(nr.GREY)
+    ramp5 = np.linspace(0, 1, 5)[:, None] * np.ones((1, 3))
+    kept, window = nr.scoreColors(ramp5, nr.SIDE_THRESHOLD, 4.0, -2.0, count=5, neutralMidpoint=True)
+    assert window == (-4.0, 4.0) and kept[0, :3].tolist() == [0, 0, 0] and kept[1, :3].tolist() == [0.25] * 3
+    assert all(kept[i, :3].tolist() == list(nr.GREY) for i in (2, 3, 4))
     masked = nr.maskedScores(np.array([2.0, -4.0]), np.array([True, False]), 2.0)
     assert masked.tolist() == [1.0, nr.OUTSIDE]
 
@@ -189,8 +193,12 @@ def test_score_color_tables():
     assert steps[26].tolist() == [0.3, 0, 0.5] and steps[-1].tolist() == [1, 1, 1]
     assert nr.colorTable("SSP-PET-DICOM")[63].tolist() == pytest.approx([0, 0, 0.8])
     ice = nr.colorTable("SSP_IceFire")
-    assert ice[0].tolist() == [0.36, 0, 0.85] and ice[127].tolist() == pytest.approx([0, 0, 0.1])
-    assert np.all(ice[40:128, :2] == 0) and np.all(ice[:128, 1] == 0)     # blue, purple at the lowest end
+    assert ice[0].tolist() == [0, 1, 1] and ice[127].tolist() == [0, 0, 0]          # cyan, black at 0
+    assert ice[-1].tolist() == pytest.approx([1, 1, 0.752941])
+    fire = nr.colorTable("SSP_IceFire2")
+    assert fire[0].tolist() == [1, 1, 1] and fire[128].tolist() == pytest.approx([0.25098] * 3)
+    assert fire[-1].tolist() == [1, 1, 0] and "SSP_IceFire2" in nr.SCORE_COLORMAPS
+    assert set(nr.NEUTRAL_MIDPOINT_COLORMAPS) <= set(nr.SCORE_COLORMAPS)
 
 
 def test_reference_regions_left_out():
@@ -238,3 +246,20 @@ def test_layout_xml():
     assert len(plainTags) == 13 and nr.sspViewName("LeftMedial") not in plainTags      # 2 x (2 x 3) and the table
     assert nr.sspViews(False)[1] == 3 and len(nr.sspViews(False)[0]) == 6
     assert nr.defaultLayout(2) == nr.LAYOUT_DUAL_LOW and nr.defaultLayout(1) == nr.LAYOUT_SINGLE
+
+
+def test_fastBrightnessColors_matches_brightnessColors():
+    rng = np.random.default_rng(1)
+    scores = (rng.standard_normal((6, 7, 8)) * 3).astype(np.float32)
+    scores[0, 0, 0] = np.nan
+    brightness = rng.random((6, 7, 8)).astype(np.float32)
+    x = np.linspace(0, 1, 256)
+    rgba = np.stack([x, x ** 2, 1 - x, np.ones(256)], axis=1)
+    slow = nr.brightnessColors(scores, brightness, rgba, 4.0)
+    quantized = nr.quantizedBrightness(scores, brightness)
+    fast = nr.fastBrightnessColors(quantized, rgba, 4.0)
+    assert fast.shape == slow.shape and fast.dtype == np.uint8
+    assert np.abs(fast.astype(int) - slow.astype(int)).max() <= 3
+    out = np.zeros_like(slow)
+    nr.fastBrightnessColors(quantized, rgba, 2.0, low=-1.0, out=out)
+    assert np.array_equal(out, nr.fastBrightnessColors(quantized, rgba, 2.0, low=-1.0))

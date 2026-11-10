@@ -98,6 +98,14 @@ NORMALIZATION_ITERATIVE_GRID_MM = 30.0     # iterative engine: last control-poin
 NORMALIZATION_BRAIN_MASK = {METHOD_PET: True, METHOD_ANATOMY: False, METHOD_PET_TEMPLATE: True}
 NORMALIZATION_INITIALIZATION = {METHOD_PET: "useMomentsAlign", METHOD_ANATOMY: "useGeometryAlign",
                                 METHOD_PET_TEMPLATE: "useMomentsAlign"}
+# A CT (CT/MR method): its brain only (skull stripped, brain window) on a grid of about this voxel size, registered to
+# the skull-stripped template from the centres of mass; fewer ml inside the skull is taken as no brain found
+CT_BRAIN_WORKING_MM = 1.0
+CT_SKULL_STRIP = False      # Burak 2026-11-09: the skull-stripped CT fit badly; try the whole CT clipped at CT_CLIP_HU
+CT_CLIP_HU = 100.0
+CT_BONE_HU = 100.0          # above this (bone) set to CT_BONE_VALUE: dark as the bone in the MR (Burak 2026-11-09)
+CT_BONE_VALUE = -1000.0
+CT_BRAIN_MIN_ML = 300.0
 # Harden: the template's field of view with the PET voxel size (default), the template grid (1 mm), or custom
 NORMALIZATION_GRIDS = (("Keep the PET voxel size (over the template field of view)", reg.OUTPUT_PET_SPACING),
                        ("Resample to the template grid (1 mm)", reg.OUTPUT_FIXED_GRID),
@@ -299,11 +307,15 @@ class DynamicNeuroPETLogic(ScriptedLoadableModuleLogic):
         return settings
 
     def normalize(self, sequence, template, method=METHOD_PET, anatomy=None, settings=None, mask=None,
-                  progress=None):
+                  progress=None, ctTemplate=None, ctCorrection=None):
         """Register the PET reference image (METHOD_PET) or the CT/MR (METHOD_ANATOMY) to the template; the result
-        of DynamicPETRegistrationLogic.register() (linear matrix, B-spline node, ...) plus "moving"."""
+        of DynamicPETRegistrationLogic.register() (linear matrix, B-spline node, ...) plus "moving". A CT with a CT
+        template (in the MNI space, e.g. scct_unsmooth) is registered to that template instead (CT to CT, both
+        stretched by neuro.ctStretch, no brain mask), then moved by ctCorrection (4x4, the CT template's space to the
+        ICBM 152 2009c, see ctTemplateCorrection); the result is still on the template's grid."""
         from DynamicPETRegistration import DynamicPETRegistrationLogic
         settings = dict(settings or self.defaultSettings(method))
+        ctBrain = None
         if method == METHOD_ANATOMY:
             if anatomy is None:
                 raise ValueError("Pick the CT/MR in step 1 to normalize it.")
@@ -313,15 +325,142 @@ class DynamicNeuroPETLogic(ScriptedLoadableModuleLogic):
             moving = self.referenceImage(sequence)
         if moving.GetParentTransformNode() is not None:
             raise ValueError(f"'{moving.GetName()}' is under a transform. Harden or remove it first.")
-        fixed = self.brainOnly(template, mask) if mask is not None else template
+        isCt = method == METHOD_ANATOMY and neuro.looksLikeCt(slicer.util.arrayFromVolume(anatomy))
+        ctFixed = None
+        if isCt and ctTemplate is not None:
+            # a CT to the CT template (same modality, the skull fits the skull)
+            ctBrain = self.ctStretched(anatomy)
+            ctFixed = self.ctStretched(ctTemplate, workingMm=0.0) \
+                if neuro.looksLikeCt(slicer.util.arrayFromVolume(ctTemplate)) else None
+            mask = None
+        elif isCt and not CT_SKULL_STRIP:
+            # a CT: the whole head clipped at CT_CLIP_HU, its bone set to CT_BONE_VALUE (dark as in the MR)
+            ctBrain = self.ctClipped(anatomy)
+        elif isCt:
+            # a CT: its brain (skull stripped, brain window) to the skull-stripped template, centres of mass first
+            if mask is None:
+                raise ValueError("A CT is normalized as its brain only: tick 'Skull-stripped template (brain mask)' "
+                                 "(the brain mask must be in the atlas folder).")
+            ctBrain = self.ctBrainOnly(anatomy)
+            if settings.get("initialization") == "useGeometryAlign":
+                settings["initialization"] = "useMomentsAlign"
+        if ctTemplate is not None and isCt:
+            fixed = ctFixed if ctFixed is not None else ctTemplate
+        else:
+            fixed = self.brainOnly(template, mask) if mask is not None else template
         try:
-            result = DynamicPETRegistrationLogic().register(fixed, moving, settings, progress)
+            registered = ctBrain if ctBrain is not None else moving
+            result = DynamicPETRegistrationLogic().register(fixed, registered, settings, progress)
         finally:
-            if fixed is not template:
-                slicer.mrmlScene.RemoveNode(fixed)
+            for helper in (fixed if fixed not in (template, ctTemplate) else None, ctBrain):
+                if helper is not None:
+                    slicer.mrmlScene.RemoveNode(helper)
+        if ctTemplate is not None and isCt and ctCorrection is not None:
+            if result.get("bspline") is not None:
+                slicer.mrmlScene.RemoveNode(result["bspline"])
+                result["bspline"], result["deformation"] = None, None
+                result.setdefault("notes", []).append("CT to CT template: linear only (the deformable part dropped).")
+            result["linear"] = np.asarray(ctCorrection, dtype=float) @ np.asarray(result["linear"], dtype=float)
+        if ctTemplate is not None and isCt:
+            logging.info(f"Neuro: the CT '{anatomy.GetName()}' registered to the CT template '{ctTemplate.GetName()}'")
         result["moving"] = moving
         result["masked"] = mask is not None
+        result["ctBrain"] = ctBrain is not None
+        result["ctTemplate"] = ctTemplate is not None and isCt
         return result
+
+    def ctTemplateCorrection(self, templateGm, icbmGm, cachePath=None, ctTemplate=None, correctedPath=None):
+        """4x4 (world, to parent) from the CT template's MNI space to the ICBM 152 2009c: its grey matter map
+        registered (affine, iterative engine, centres of mass first) to the 2009c grey matter map. Read from cachePath
+        when it is there (and written to it). The CT template moved by it is saved to correctedPath (when it is not
+        there yet) to be looked at."""
+        import json
+        if cachePath and os.path.isfile(cachePath):
+            try:
+                with open(cachePath) as f:
+                    matrix = np.asarray(json.load(f)["matrix"], dtype=float).reshape(4, 4)
+                self.saveCorrectedCtTemplate(ctTemplate, matrix, correctedPath)
+                return matrix
+            except (OSError, ValueError, KeyError):
+                logging.warning(f"Neuro: could not read {cachePath}, registering again")
+        from DynamicPETRegistration import DynamicPETRegistrationLogic
+        settings = self.defaultSettings(METHOD_PET)
+        settings.update(engine=reg.ENGINE_ITERATIVE, iterativeLinear="Affine", iterativeDeformable=False,
+                        initialization="useMomentsAlign", movingFunctional=False,
+                        steps=reg.iterativeSteps("Affine", False))
+        matrix = np.asarray(DynamicPETRegistrationLogic().register(icbmGm, templateGm, settings)["linear"], dtype=float)
+        if cachePath:
+            try:
+                with open(cachePath, "w") as f:
+                    json.dump({"from": os.path.basename(cachePath), "matrix": matrix.ravel().tolist()}, f)
+            except OSError:
+                logging.warning(f"Neuro: could not write {cachePath}")
+        logging.info(f"Neuro: CT template space to ICBM 152 2009c: {matrix.round(4).tolist()}")
+        self.saveCorrectedCtTemplate(ctTemplate, matrix, correctedPath)
+        return matrix
+
+    @staticmethod
+    def saveCorrectedCtTemplate(ctTemplate, matrix, path):
+        """The CT template with its geometry moved by matrix (lossless, no resampling) saved to path, unless it is
+        already there."""
+        if ctTemplate is None or not path or os.path.exists(path):
+            return
+        copy = slicer.modules.volumes.logic().CloneVolume(slicer.mrmlScene, ctTemplate, "CT template on 2009c")
+        try:
+            copy.SetIJKToRASMatrix(_vtkMatrix(np.asarray(matrix, dtype=float) @ _ijkToRas(ctTemplate)))
+            if slicer.util.saveNode(copy, path):
+                logging.info(f"Neuro: the CT template on the ICBM 152 2009c saved to {path}")
+            else:
+                logging.warning(f"Neuro: could not save {path}")
+        finally:
+            slicer.mrmlScene.RemoveNode(copy)
+
+    @staticmethod
+    def ctStretched(ct, workingMm=CT_BRAIN_WORKING_MM):
+        """A hidden copy of a CT (Hounsfield units) with neuro.ctStretch intensities (soft tissue spread over the
+        histogram), averaged down to about workingMm (0: its own grid); same place in space as the CT."""
+        from DynamicPETRegistration import DynamicPETRegistrationLogic
+        voxels, matrix = slicer.util.arrayFromVolume(ct), _ijkToRas(ct)
+        if workingMm > 0:
+            voxels, matrix = reg.poolToSpacing(voxels, matrix, workingMm)
+        helper = DynamicPETRegistrationLogic.helperVolume(f"{ct.GetName()} stretched")
+        helper.SetIJKToRASMatrix(_vtkMatrix(np.asarray(matrix, dtype=float)))
+        slicer.util.updateVolumeFromArray(helper, neuro.ctStretch(voxels))
+        return helper
+
+    @staticmethod
+    def ctClipped(ct, upperHu=None, workingMm=CT_BRAIN_WORKING_MM):
+        """A hidden copy of a CT clipped at upperHu (CT_CLIP_HU) with its bone (above CT_BONE_HU) set to
+        CT_BONE_VALUE (dark, as in the MR), averaged down to about workingMm; same place in space as the CT."""
+        from DynamicPETRegistration import DynamicPETRegistrationLogic
+        # the bone replaced on the CT's own grid first, so averaging down leaves no bright rim at its edges
+        full = slicer.util.arrayFromVolume(ct)
+        full = np.where(full > CT_BONE_HU, np.float32(CT_BONE_VALUE), full.astype(np.float32, copy=False))
+        voxels, matrix = reg.poolToSpacing(full, _ijkToRas(ct), workingMm)
+        image = np.minimum(np.asarray(voxels, dtype=np.float32), float(CT_CLIP_HU if upperHu is None else upperHu))
+        helper = DynamicPETRegistrationLogic.helperVolume(f"{ct.GetName()} clipped")
+        helper.SetIJKToRASMatrix(_vtkMatrix(np.asarray(matrix, dtype=float)))
+        slicer.util.updateVolumeFromArray(helper, image)
+        return helper
+
+    @staticmethod
+    def ctBrainOnly(ct, workingMm=CT_BRAIN_WORKING_MM):
+        """A hidden copy of a head CT with its brain only (neuro.ctBrainImage: skull stripped, brain window, 0
+        outside), averaged down to about workingMm: the MR template shows no skull, so the CT's bone must not pull the
+        fit. Same place in space as the CT (its own grid)."""
+        from DynamicPETRegistration import DynamicPETRegistrationLogic
+        voxels, matrix = reg.poolToSpacing(slicer.util.arrayFromVolume(ct), _ijkToRas(ct), workingMm)
+        spacing = np.linalg.norm(np.asarray(matrix, dtype=float)[:3, :3], axis=0)[::-1]    # numpy axes (k, j, i)
+        image, count = neuro.ctBrainImage(voxels, spacing)
+        if count * float(np.prod(spacing)) < CT_BRAIN_MIN_ML * 1000.0:
+            raise ValueError(f"No brain found in the CT '{ct.GetName()}' ({count * float(np.prod(spacing)) / 1000:.0f}"
+                             " ml inside the skull). Is it a head CT in Hounsfield units?")
+        logging.info(f"Neuro: brain of the CT '{ct.GetName()}' for the normalization: "
+                     f"{count * float(np.prod(spacing)) / 1000:.0f} ml")
+        helper = DynamicPETRegistrationLogic.helperVolume(f"{ct.GetName()} brain")
+        helper.SetIJKToRASMatrix(_vtkMatrix(np.asarray(matrix, dtype=float)))
+        slicer.util.updateVolumeFromArray(helper, image)
+        return helper
 
     @staticmethod
     def brainOnly(template, mask):
@@ -1014,6 +1153,7 @@ class DynamicNeuroPETWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         button.setCheckable(True)
         button.setFocusPolicy(qt.Qt.NoFocus)
         button.toolTip = f"{index + 1}. {title}: {explanation}"
+        button.setProperty("stepTip", button.toolTip)
         button.connect("clicked(bool)", lambda checked, k=key: self.showStep(k))
         self.stepButtons[key] = button
         return button
@@ -1253,6 +1393,8 @@ class DynamicNeuroPETWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.templateCombo = qt.QComboBox()
         for key, title, _ in neuro.TEMPLATES:
             self.templateCombo.addItem(title, key)
+        # a CT to the CT template of the atlas folder (scct_unsmooth); the result still on the 2009c T1's grid
+        self.templateCombo.addItem(neuro.CT_TEMPLATE_TITLE, neuro.CT_TEMPLATE)
         self.templateCombo.toolTip = ("Template image registered to. T1 by default; with the CT/MR method the template "
                                       "of the MR contrast (T2, PD) is picked by itself. Grey matter probability or the "
                                       "synthetic PET (GM + 0.3 WM, smoothed 6 mm; made on first use) may fit an FDG "
@@ -1266,7 +1408,8 @@ class DynamicNeuroPETWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.maskCheck.checked = NORMALIZATION_BRAIN_MASK[METHOD_PET]
         self.maskCheck.toolTip = ("Register to the template with the voxels outside its brain mask "
                                   "(mni_icbm152_t1_tal_nlin_sym_09c_mask) set to 0, so the scalp and the neck do not "
-                                  "pull the fit. On by default when the PET is registered, off for the CT/MR method.")
+                                  "pull the fit. On by default when the PET or a CT is registered (a CT as its brain "
+                                  "only), off for an MR.")
         form.addRow(self.maskCheck)
         from DynamicPETRegistration import iterativeOptions
         self.normEngineCombo = qt.QComboBox()
@@ -1449,15 +1592,22 @@ class DynamicNeuroPETWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             self.atlasPath.blockSignals(True)
             self.atlasPath.currentPath = folder
             self.atlasPath.blockSignals(False)
-        self.atlas = neuro.findAtlasFiles(folder) if folder else {}
-        if not folder:
+        self.atlas = neuro.atlasFiles(folder)       # the folder's files, the extension's own for the rest
+        own = neuro.bundledKeys(self.atlas)
+        if not self.atlas:
             self.atlasInfo.text = ("Pick the folder that holds the MNI ICBM 152 2009c files (e.g. "
                                    "mni_icbm152_t1_tal_nlin_sym_09c.nii) and the CerebrA labels "
                                    "(mni_icbm152_CerebrA_tal_nlin_sym_09c.nii, CerebrA_LabelDetails.csv).")
         else:
             missing = neuro.missingFiles(self.atlas)
             found = len(self.atlas)
-            text = f"{found} atlas file(s) found."
+            if not folder:
+                text = (f"The atlas files of the extension are used ({found}: MNI ICBM 152 2009c T1, brain mask, "
+                        "grey / white matter, CerebrA). Pick a folder only to use your own files.")
+                missing = []
+            else:
+                text = f"{found} atlas file(s) found" + (f" ({len(own)} of them the extension's own)." if own
+                                                         else ".")
             if missing:
                 text += " Missing: " + ", ".join(missing) + "."
             if neuro.hasPons(self.atlas):
@@ -1476,10 +1626,35 @@ class DynamicNeuroPETWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
     def method(self):
         return self.methodCombo.currentData or METHOD_PET
 
+    def _anatomyIsCt(self):
+        return self.anatomy() is not None and self.contrast()[0] == "CT"
+
+    def _normalizationDefaults(self, method):
+        """(initialization, brain mask) of a method; a CT (CT/MR method) is registered as its brain to the
+        skull-stripped template from the centres of mass."""
+        if method == METHOD_ANATOMY and self._anatomyIsCt() and CT_SKULL_STRIP:
+            return "useMomentsAlign", True
+        return NORMALIZATION_INITIALIZATION[method], NORMALIZATION_BRAIN_MASK[method]
+
+    def _syncCtDefaults(self):
+        """The CT/MR method's initialization and brain mask set again when the CT/MR changes between a CT and an MR
+        (not while a normalization is pending)."""
+        if not hasattr(self, "maskCheck") or self.normResult is not None:
+            return
+        isCt = self.method() == METHOD_ANATOMY and self._anatomyIsCt()
+        if getattr(self, "_defaultsForCt", None) == isCt:
+            return
+        self._defaultsForCt = isCt
+        initialization, masked = self._normalizationDefaults(self.method())
+        self.normInitCombo.setCurrentIndex(self.normInitCombo.findData(initialization))
+        self.maskCheck.checked = masked
+
     def onMethodChanged(self, *args):
         method = self.method()
-        self.normInitCombo.setCurrentIndex(self.normInitCombo.findData(NORMALIZATION_INITIALIZATION[method]))
-        self.maskCheck.checked = NORMALIZATION_BRAIN_MASK[method]
+        self._defaultsForCt = method == METHOD_ANATOMY and self._anatomyIsCt()
+        initialization, masked = self._normalizationDefaults(method)
+        self.normInitCombo.setCurrentIndex(self.normInitCombo.findData(initialization))
+        self.maskCheck.checked = masked
         self._templateChosen = False        # another method: its default template again
         self._updateTemplateChoice()
         self._clearNormalization()
@@ -1568,11 +1743,15 @@ class DynamicNeuroPETWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.normThreadsSpin.value = options["numberOfThreads"]
 
     def _template(self):
+        """The template the result lies on (its grid); with the CT template the 2009c T1 (the CT is registered to
+        the CT template, see _ctTemplate)."""
         key = self.templateCombo.currentData
+        if key == neuro.CT_TEMPLATE:
+            key = neuro.DEFAULT_TEMPLATE
         path = self.atlas.get(key)
         if not path and key == neuro.PSEUDO_PET and neuro.canMakeTemplate(self.atlas, key):
             path = self.logic.ensurePseudoPet(self.atlas)
-            self.atlas = neuro.findAtlasFiles(self.logic.atlasFolder()) or self.atlas
+            self.atlas = neuro.atlasFiles(self.logic.atlasFolder()) or self.atlas
         if not path:
             raise ValueError("Pick the atlas folder: the template file "
                              f"{dict((k, s) for k, _, s in neuro.TEMPLATES)[key]}.nii was not found.")
@@ -1584,6 +1763,32 @@ class DynamicNeuroPETWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         if not self.maskCheck.checked or neuro.BRAIN_MASK not in self.atlas:
             return None
         return self.logic.loadAtlasVolume(self.atlas[neuro.BRAIN_MASK], name="MNI ICBM152 2009c brain mask")
+
+    def _ctTemplate(self):
+        """The CT template of the atlas folder (scct_unsmooth / scct) when a CT is normalized (CT/MR method), else
+        None."""
+        if self.templateCombo.currentData != neuro.CT_TEMPLATE or neuro.CT_TEMPLATE not in self.atlas:
+            return None
+        if self.method() != METHOD_ANATOMY or not self._anatomyIsCt():
+            raise ValueError("The CT template is for a CT with the 'CT/MR to MR template' method; pick another "
+                             "template.")
+        return self.logic.loadAtlasVolume(self.atlas[neuro.CT_TEMPLATE], name="MNI CT template")
+
+    def _ctCorrection(self, ctTemplate=None):
+        """The CT template's space to the ICBM 152 2009c (4x4): its grey matter map (scgrey) registered to the 2009c
+        grey matter map once (cached next to the CT template); identity without the two maps."""
+        if neuro.CT_TEMPLATE_GM not in self.atlas or "GM" not in self.atlas:
+            logging.warning("Neuro: scgrey (or the 2009c grey matter map) not in the atlas folder: the CT template's "
+                            "MNI space is taken as the ICBM 152 2009c")
+            return None
+        templateGm = self.logic.loadAtlasVolume(self.atlas[neuro.CT_TEMPLATE_GM], name="MNI CT template grey matter")
+        icbmGm = self.logic.loadAtlasVolume(self.atlas["GM"], name="MNI ICBM152 2009c GM")
+        qt.QApplication.setOverrideCursor(qt.Qt.WaitCursor)
+        try:
+            return self.logic.ctTemplateCorrection(templateGm, icbmGm, neuro.ctCorrectionPath(self.atlas), ctTemplate,
+                                                   neuro.ctCorrectedPath(self.atlas))
+        finally:
+            qt.QApplication.restoreOverrideCursor()
 
     def onNormalize(self):
         sequence, anatomy, method = self.sequence(), self.anatomy(), self.method()
@@ -1604,6 +1809,8 @@ class DynamicNeuroPETWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             settings = self.normSettings()
             template = self._template()
             mask = self._mask()
+            ctTemplate = self._ctTemplate()
+            ctCorrection = self._ctCorrection(ctTemplate) if ctTemplate is not None else None
         except Exception as error:
             slicer.util.errorDisplay(str(error), windowTitle="Normalization")
             return
@@ -1619,7 +1826,8 @@ class DynamicNeuroPETWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
 
         qt.QApplication.setOverrideCursor(qt.Qt.WaitCursor)
         try:
-            self.normResult = self.logic.normalize(sequence, template, method, anatomy, settings, mask, progress)
+            self.normResult = self.logic.normalize(sequence, template, method, anatomy, settings, mask, progress,
+                                                   ctTemplate=ctTemplate, ctCorrection=ctCorrection)
         except Exception as error:
             logging.exception("Neuro: normalization failed")
             slicer.util.errorDisplay(f"Normalization failed:\n{error}")
@@ -1942,7 +2150,7 @@ class DynamicNeuroPETWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.setNode("Segmentation", segmentation)
         self.regionsTargetSelector.setCurrentNode(segmentation)
         self._parameter().SetParameter(NEURO_PREFIX + "ReferenceSegment", referenceId or "")
-        self.atlas = neuro.findAtlasFiles(self.logic.atlasFolder()) or self.atlas   # the bilateral files are new
+        self.atlas = neuro.atlasFiles(self.logic.atlasFolder()) or self.atlas   # the bilateral files are new
         count = len(self.logic.segmentIds(segmentation))
         reference = segmentation.GetSegmentation().GetSegment(referenceId).GetName() if referenceId else None
         self.regionsLabel.text = (f"'{segmentation.GetName()}': {count} segments"
@@ -2141,10 +2349,41 @@ class DynamicNeuroPETWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             self._scrollToTop()
 
     def moveStep(self, delta):
+        key = self._neighbourStep(delta)
+        if key is not None:
+            self.showStep(key)
+
+    # --- which steps can be opened: the steps they need done first ---------------------------------
+    STEP_NEEDS = {STEP_MC: "Pick the image in step 1 (Data) first.",
+                  STEP_REG: "Pick the image and its CT / MR in step 1 (Data) first.",
+                  STEP_NORM: "Pick the image in step 1 (Data) first.",
+                  STEP_REGIONS: "Normalize the image first (Normalization step).",
+                  STEP_MODEL: "Load the regions first (Regions step)."}
+
+    def stepAllowed(self, key, states=None):
+        """Whether step key can be opened: the data step and the shown step always, another step once the steps it
+        needs are done (its state is not 'waiting'): an image for the CT/MR registration (with a CT / MR) and the
+        normalization (the registration is never needed), the normalization for the regions, the regions for the
+        steps after them."""
+        if key == STEP_DATA or key == getattr(self, "current", None):
+            return True
+        states = states if states is not None else self.stepStates()
+        return states.get(key) != STATE_WAITING
+
+    def _skipStep(self, key):
+        """Whether Back / Next pass over step key (none here)."""
+        return False
+
+    def _neighbourStep(self, delta, states=None):
+        """The step Back (delta -1) / Next (+1) goes to (passing over the skipped steps); None when there is none or
+        it cannot be opened yet."""
         keys = [k for k, _, _, _ in self.STEPS]
         index = keys.index(self.current) + delta
-        if 0 <= index < len(keys):
-            self.showStep(keys[index])
+        while 0 <= index < len(keys) and self._skipStep(keys[index]):
+            index += 1 if delta > 0 else -1
+        if not 0 <= index < len(keys):
+            return None
+        return keys[index] if self.stepAllowed(keys[index], states) else None
 
     # --- state ---------------------------------------------------------------------------------------
     def stepStates(self):
@@ -2189,17 +2428,26 @@ class DynamicNeuroPETWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         if not hasattr(self, "stepButtons"):
             return
         self._defaultMethod()
+        self._syncCtDefaults()
         states = self.stepStates()
         for number, (key, _, title, explanation) in enumerate(self.STEPS, start=1):
             button = self.stepButtons[key]
             button.setIcon(self._stepIcon(key, states[key], number))
             button.checked = key == self.current
+            allowed = self.stepAllowed(key, states)
+            button.enabled = allowed
+            tip = button.property("stepTip") or f"{number}. {title}: {explanation}"
+            need = self.STEP_NEEDS.get(key)
+            button.toolTip = tip if allowed or not need else f"{tip}\n{need}"
             if key == self.current:
                 self.titleLabel.text = f"<b>{number}. {title}</b> - {explanation}"
+        self.backButton.enabled = self._neighbourStep(-1, states) is not None
+        following = self._neighbourStep(1, states)
+        self.nextButton.enabled = following is not None
         keys = [k for k, _, _, _ in self.STEPS]
-        index = keys.index(self.current)
-        self.backButton.enabled = index > 0
-        self.nextButton.enabled = index < len(keys) - 1
+        later = [k for k in keys[keys.index(self.current) + 1:] if not self._skipStep(k)]
+        need = self.STEP_NEEDS.get(later[0]) if later and following is None else None
+        self.nextButton.toolTip = need or ""
         if self.current == STEP_DATA:
             self._updateDataInfo()
         self._updateNormButtons()

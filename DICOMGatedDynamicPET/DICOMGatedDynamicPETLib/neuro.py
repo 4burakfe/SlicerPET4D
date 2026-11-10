@@ -65,6 +65,25 @@ GROUPED_OVERLAY, GROUPED_BILATERAL_OVERLAY = "cerebraGroupedOverlay", "cerebraGr
 GROUPED_STEM = "mni_icbm152_CerebrA_grouped" + TEMPLATE_SUFFIX
 GROUPED_BILATERAL_STEM = "mni_icbm152_CerebrA_grouped_bilateral" + TEMPLATE_SUFFIX
 GROUPED_CSV_NAME = "CerebrA_grouped_LabelDetails.csv"
+CT_TEMPLATE = "ctTemplate"      # a CT template in the MNI space: a patient's CT is registered to it (CT to CT)
+CT_TEMPLATE_GM = "ctTemplateGm" # the grey matter map in the CT template's space (its MNI is not quite the 2009c)
+CT_CORRECTION_SUFFIX = "_to_icbm152_2009c.json"     # the CT template to 2009c matrix, cached next to the CT template
+
+
+def ctCorrectionPath(found):
+    """Where the CT template to ICBM 152 2009c matrix is kept (next to the CT template), None without one."""
+    path = found.get(CT_TEMPLATE)
+    if not path:
+        return None
+    stem = _stem(os.path.basename(path)) or os.path.basename(path)
+    return os.path.join(os.path.dirname(path), stem + CT_CORRECTION_SUFFIX)
+
+
+def ctCorrectedPath(found):
+    """Where the CT template moved onto the ICBM 152 2009c is saved (to look at; its geometry carries the
+    correction), None without a CT template."""
+    path = ctCorrectionPath(found)
+    return path[:-len(".json")] + ".nii" if path else None
 GROUPED_BILATERAL_CSV_NAME = "CerebrA_grouped_bilateral_LabelDetails.csv"
 EXTRA_FILES = (
     (BRAIN_MASK, "mni_icbm152_t1" + TEMPLATE_SUFFIX + "_mask"),
@@ -77,6 +96,9 @@ EXTRA_FILES = (
     (GROUPED_BILATERAL_LABELS, GROUPED_BILATERAL_STEM),
     (GROUPED_OVERLAY, GROUPED_STEM + "_overlay"),
     (GROUPED_BILATERAL_OVERLAY, GROUPED_BILATERAL_STEM + "_overlay"),
+    (CT_TEMPLATE, "scct_unsmooth"),     # optional: the CT template of the SPM Clinical Toolbox (Rorden et al. 2012,
+    (CT_TEMPLATE, "scct"),              # BSD-2-Clause), put in the atlas folder by the user
+    (CT_TEMPLATE_GM, "scgrey"),         # its grey matter map: puts its MNI space onto the ICBM 152 2009c
 )
 CSV_NAME = "CerebrA_LabelDetails.csv"
 BILATERAL_CSV_NAME = "CerebrA_bilateral_LabelDetails.csv"
@@ -84,7 +106,8 @@ GENERATED = (PSEUDO_PET, BILATERAL_LABELS, BILATERAL_CSV, PONS_OVERLAY,     # ma
              PONS_BILATERAL_OVERLAY,
              GROUPED_LABELS, GROUPED_CSV, GROUPED_BILATERAL_LABELS, GROUPED_BILATERAL_CSV, GROUPED_OVERLAY,
              GROUPED_BILATERAL_OVERLAY)
-OPTIONAL = (PONS_LABELS, PONS_CSV, GROUPS_CSV)    # never reported missing (the groups: the extension's table)
+# never reported missing (the groups: the extension's table)
+OPTIONAL = (PONS_LABELS, PONS_CSV, GROUPS_CSV, CT_TEMPLATE, CT_TEMPLATE_GM)
 IMAGE_EXTENSIONS = (".seg.nrrd", ".nii", ".nii.gz", ".nrrd", ".mnc")
 MAX_SEARCH_DEPTH = 4
 REQUIRED = (DEFAULT_TEMPLATE,)       # without these the normalization cannot run
@@ -96,6 +119,77 @@ def _stem(fileName):
         if lower.endswith(ext):
             return fileName[:-len(ext)]
     return None
+
+
+# The atlas files that come with the extension (Resources/Atlas: the MNI ICBM 152 2009c T1, brain mask, grey and white
+# matter maps, CerebrA and the CerebrA with pons; their licenses in LICENSE.txt there). The files of the user's atlas
+# folder come first (atlasFiles). What the workflow makes from the extension's files (GENERATED) is written into
+# generatedFolder(), not into the extension.
+BUNDLED_FOLDER = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "Resources", "Atlas")
+GENERATED_FOLDER_VARIABLE = "PET4D_NEURO_ATLAS_CACHE"
+
+
+def generatedFolder():
+    """Where the files made from the extension's atlas files are kept: $PET4D_NEURO_ATLAS_CACHE, else
+    ~/.PET4D/NeuroAtlas."""
+    return os.environ.get(GENERATED_FOLDER_VARIABLE) or os.path.join(os.path.expanduser("~"), ".PET4D", "NeuroAtlas")
+
+
+def _sameFolder(a, b):
+    return os.path.normcase(os.path.realpath(a)) == os.path.normcase(os.path.realpath(b))
+
+
+def outputFolder(source):
+    """The folder the files made from the atlas file source are written to: next to it; generatedFolder() (made
+    when missing) for a file of the extension."""
+    folder = os.path.dirname(source)
+    if not _sameFolder(folder, BUNDLED_FOLDER):
+        return folder
+    target = generatedFolder()
+    try:
+        os.makedirs(target, exist_ok=True)
+    except OSError:
+        pass        # the workflow then saves in Slicer's temporary folder
+    return target
+
+
+# keys that belong together (made from one another): taken from one place
+_CEREBRA_KEYS = (CEREBRA_LABELS, CEREBRA_CSV, BILATERAL_LABELS, BILATERAL_CSV, PONS_LABELS, PONS_CSV, PONS_OVERLAY,
+                 PONS_BILATERAL_OVERLAY, GROUPED_LABELS, GROUPED_CSV, GROUPED_BILATERAL_LABELS,
+                 GROUPED_BILATERAL_CSV, GROUPED_OVERLAY, GROUPED_BILATERAL_OVERLAY)
+_TISSUE_KEYS = ("GM", "WM", PSEUDO_PET)
+
+
+def atlasFiles(folder=None, bundled=None):
+    """{key: path} of the atlas files the workflows use: those of the user's atlas folder (findAtlasFiles) and, for
+    what it lacks, the extension's own (bundled: BUNDLED_FOLDER by default) with the files made from them
+    (generatedFolder()). The CerebrA files are taken together from the user's folder when it has the CerebrA labels
+    (else all from the extension), the grey / white matter maps and the synthetic PET together from the user's folder
+    when it has both maps; the other files one by one."""
+    bundled = BUNDLED_FOLDER if bundled is None else bundled
+    own = findAtlasFiles(bundled, maxDepth=1) if bundled else {}
+    if own:
+        made = findAtlasFiles(generatedFolder(), maxDepth=1)
+        own.update({k: v for k, v in made.items() if k in GENERATED and k not in own})
+    user = findAtlasFiles(folder) if folder else {}
+    found = dict(own)
+    userCerebra = CEREBRA_LABELS in user
+    userTissue = "GM" in user and "WM" in user
+    for keys, fromUser in ((_CEREBRA_KEYS, userCerebra), (_TISSUE_KEYS, userTissue)):
+        if fromUser:
+            for key in keys:
+                found.pop(key, None)
+    for key, path in user.items():
+        if (key in _CEREBRA_KEYS and not userCerebra) or (key in _TISSUE_KEYS and not userTissue):
+            continue
+        found[key] = path
+    return found
+
+
+def bundledKeys(found):
+    """The keys of found (atlasFiles) that are the extension's own files (or made from them)."""
+    folders = (BUNDLED_FOLDER, generatedFolder())
+    return [k for k, p in found.items() if any(_sameFolder(os.path.dirname(p), f) for f in folders)]
 
 
 def findAtlasFiles(folder, maxDepth=MAX_SEARCH_DEPTH):
@@ -146,7 +240,7 @@ def bilateralPaths(found):
     source = found.get(CEREBRA_LABELS)
     if not source:
         return None, None
-    folder = os.path.dirname(source)
+    folder = outputFolder(source)
     return os.path.join(folder, BILATERAL_STEM + ".nii"), os.path.join(folder, BILATERAL_CSV_NAME)
 
 
@@ -158,7 +252,7 @@ def pseudoPetPath(found):
     if "GM" not in found or "WM" not in found:
         return None
     stem = next(s for k, _, s in TEMPLATES if k == PSEUDO_PET)
-    return os.path.join(os.path.dirname(found["GM"]), stem + ".nii")
+    return os.path.join(outputFolder(found["GM"]), stem + ".nii")
 
 
 def canMakeTemplate(found, key):
@@ -205,7 +299,7 @@ def ponsOverlayPaths(found):
     written (next to the segmentation file), or (None, None) without it."""
     if not hasPons(found):
         return None, None
-    folder = os.path.dirname(found[PONS_LABELS])
+    folder = outputFolder(found[PONS_LABELS])
     return (found.get(PONS_OVERLAY) or os.path.join(folder, PONS_OVERLAY_STEM + ".nii"),
             found.get(PONS_BILATERAL_OVERLAY) or os.path.join(folder, PONS_BILATERAL_OVERLAY_STEM + ".nii"))
 
@@ -225,7 +319,12 @@ def overlayValues(structures, mergeSides=False):
     return out
 
 
+CT_TEMPLATE_TITLE = "CT template (scct, CT to CT)"
+
+
 def templateTitle(key):
+    if key == CT_TEMPLATE:
+        return CT_TEMPLATE_TITLE
     return next((title for k, title, _ in TEMPLATES if k == key), key)
 
 
@@ -287,8 +386,96 @@ def classifyAnatomy(modality=None, texts=(), repetitionTime=None, echoTime=None,
 
 
 def templateForContrast(contrast):
-    """Template key that fits a contrast: T2 and PD their own template, T1, CT and unknown the T1."""
+    """Template key that fits a contrast: T2 and PD their own template, a CT the CT template (CT_TEMPLATE; the T1
+    when it is not in the atlas folder), T1 and unknown the T1."""
+    if contrast == "CT":
+        return CT_TEMPLATE
     return contrast if contrast in ("T2", "PD") else DEFAULT_TEMPLATE
+
+
+# ---------------------------------------------------------------------------
+# A CT for the MR template: the brain only (numpy + scipy)
+# ---------------------------------------------------------------------------
+# The MR shows no skull (cortical bone has no signal) and the T1's scalp is bright fat, while the CT's bone is its
+# brightest and its brain lies in a few HU; on the whole CT range a mutual information histogram holds the brain in
+# one bin. So a CT is normalized as its brain only, in a brain window, to the skull-stripped template.
+CT_BONE_HU = 200.0              # bone at and above this
+CT_BRAIN_HU = (-10.0, 100.0)    # brain, CSF and blood (a haemorrhage too) between these
+CT_BRAIN_WINDOW = (0.0, 80.0)   # the brain image clipped to this window
+CT_SKULL_CLOSE_MM = 2.0         # the bone grown by this much first (thin bone, sutures, partial volume)
+CT_BRAIN_ERODE_MM = 4.0         # the brain eroded by this much to cut it from the orbits and the neck, then grown back
+
+
+def looksLikeCt(voxels):
+    """Whether an image is in Hounsfield units (air at about -1000)."""
+    array = np.asarray(voxels)
+    return bool(array.size) and float(np.nanmin(array[::2, ::2, ::2])) <= -500.0
+
+
+def _ellipsoid(radiusMm, spacing):
+    """A boolean structuring element of an ellipsoid of radiusMm (numpy axes' spacing in mm)."""
+    half = [max(0, int(np.floor(radiusMm / float(s) + 1e-6))) for s in spacing]
+    grids = np.ogrid[tuple(slice(-h, h + 1) for h in half)]
+    distance = sum((g * float(s) / radiusMm) ** 2 for g, s in zip(grids, spacing))
+    return distance <= 1.0 + 1e-6
+
+
+def _enclosedPerSlice(mask, axis):
+    """The voxels enclosed by mask in the slices across one axis (holes of each slice, mask not included)."""
+    from scipy import ndimage
+    structure = np.zeros((3, 3, 3), dtype=bool)
+    index = [slice(None)] * 3
+    index[axis] = 1
+    structure[tuple(index)] = ndimage.generate_binary_structure(2, 1)
+    labels, _ = ndimage.label(~mask, structure=structure)
+    border = set()
+    for other in (a for a in range(3) if a != axis):
+        for end in (0, -1):
+            border.update(np.unique(np.take(labels, end, axis=other)).tolist())
+    border.discard(0)
+    return (labels > 0) & ~np.isin(labels, list(border))
+
+
+def ctBrainMask(hu, spacing=(1.0, 1.0, 1.0)):
+    """The brain of a head CT (Hounsfield units; numpy axes' spacing in mm): soft tissue enclosed by the skull in the
+    slices of any of the three orientations, eroded, its largest piece, grown back. Empty when nothing is found."""
+    from scipy import ndimage
+    hu = np.asarray(hu, dtype=np.float32)
+    skull = ndimage.binary_dilation(hu >= CT_BONE_HU, structure=_ellipsoid(CT_SKULL_CLOSE_MM, spacing))
+    inside = np.zeros(hu.shape, dtype=bool)
+    for axis in range(3):
+        inside |= _enclosedPerSlice(skull, axis)
+    candidate = inside & (hu >= CT_BRAIN_HU[0]) & (hu <= CT_BRAIN_HU[1])
+    ball = _ellipsoid(CT_BRAIN_ERODE_MM, spacing)
+    core = ndimage.binary_erosion(candidate, structure=ball)
+    labels, count = ndimage.label(core)
+    if count == 0:
+        return np.zeros(hu.shape, dtype=bool)
+    sizes = np.bincount(labels.ravel())
+    sizes[0] = 0
+    brain = ndimage.binary_dilation(labels == int(np.argmax(sizes)), structure=ball) & candidate
+    return ndimage.binary_fill_holes(brain)
+
+
+# CT intensities stretched for a mutual information histogram (as the Cormack units of the Clinical Toolbox): the soft
+# tissue range (CT_STRETCH_HU) gets most of the scale, air and bone a little at either end
+CT_STRETCH_HU = (-100.0, 100.0)
+CT_STRETCH_POINTS = ((-1000.0, 0.0), (CT_STRETCH_HU[0], 100.0), (CT_STRETCH_HU[1], 1100.0), (1500.0, 1200.0))
+
+
+def ctStretch(hu):
+    """A CT in Hounsfield units mapped (monotonic, piecewise linear) so that -100 ... 100 HU spans 1000 of 1200 units:
+    the brain is spread over the histogram instead of a bin or two of the whole HU range."""
+    xs, ys = zip(*CT_STRETCH_POINTS)
+    return np.interp(np.asarray(hu, dtype=np.float32), xs, ys).astype(np.float32)
+
+
+def ctBrainImage(hu, spacing=(1.0, 1.0, 1.0)):
+    """(image, brain voxel count): the CT's brain in the brain window (CT_BRAIN_WINDOW), 0 outside the brain."""
+    mask = ctBrainMask(hu, spacing)
+    image = np.clip(np.asarray(hu, dtype=np.float32), *CT_BRAIN_WINDOW)
+    image[~mask] = 0.0
+    return image, int(mask.sum())
 
 
 # ---------------------------------------------------------------------------
@@ -550,7 +737,7 @@ def groupedPaths(found, mergeSides=False):
     source = found.get(CEREBRA_LABELS)
     if not source:
         return None, None, None
-    folder = os.path.dirname(source)
+    folder = outputFolder(source)
     defaults = (os.path.join(folder, stem + ".nii"), os.path.join(folder, csvName),
                 os.path.join(folder, stem + "_overlay.nii"))
     return tuple(found.get(k) or d for k, d in zip(keys, defaults))

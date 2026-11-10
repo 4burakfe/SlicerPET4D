@@ -186,3 +186,28 @@ def test_open_edges():
     assert ssp.openEdges(tetrahedron) == 0
     assert ssp.openEdges(tetrahedron[:3]) == 3
     assert ssp.openEdges(np.zeros((0, 3), int)) == 0
+
+
+def test_vertexLabels_first_label_inward():
+    labels = np.zeros((20, 20, 20), np.int32)
+    labels[5:15, 5:15, 5:10], labels[5:15, 5:15, 10:15] = 2, 3
+    found = ssp.vertexLabels(labels, np.eye(4), [[4, 10, 10], [15, 10, 10], [0, 0, 0]],
+                             [[-1, 0, 0], [1, 0, 0], [1, 0, 0]], depthMm=5.0)
+    assert list(found) == [2, 3, 0]
+
+
+def test_label_borders_join_edge_middles():
+    points = np.array([[0, 0, 0], [2, 0, 0], [0, 2, 0], [2, 2, 0]], float)
+    triangles = np.array([[0, 1, 2], [1, 3, 2]])
+    # one label everywhere: no border
+    ends, segments = ssp.labelBorders(points, triangles, np.array([1, 1, 1, 1]))
+    assert len(ends) == 0 and len(segments) == 0
+    # vertex 0 alone: one segment in the first triangle, between the middles of its two cut edges
+    ends, segments = ssp.labelBorders(points, triangles, np.array([1, 2, 2, 2]))
+    assert segments.tolist() == [[0, 1]]
+    assert sorted(map(tuple, ends.tolist())) == [(0.0, 1.0, 0.0), (1.0, 0.0, 0.0)]
+    # three labels in the first triangle: three segments to its centre; two in the second: one segment
+    ends, segments = ssp.labelBorders(points, triangles, np.array([1, 2, 3, 3]))
+    assert len(segments) == 4
+    centre = points[[0, 1, 2]].mean(axis=0)
+    assert sum(np.allclose(end, centre) for end in ends) == 3

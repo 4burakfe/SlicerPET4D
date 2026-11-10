@@ -31,7 +31,7 @@ import zipfile
 
 import numpy as np
 
-FORMAT_VERSION = 1
+FORMAT_VERSION = 2      # 2: one folder per subject (subjects/<id>/: maps, native image, its info, transform)
 HEADER_NAME = "database.json"
 SUBJECTS_CSV = "subjects.csv"
 SUBJECTS_DIR = "subjects"
@@ -123,7 +123,11 @@ MASTER = "master"
 MASTER_TITLE = "Master (all subjects)"
 IMAGE_EXTENSIONS = (".nii.gz", ".nii", ".nrrd", ".nhdr", ".mha", ".mhd")
 SUBJECT_COLUMNS = ("id", "age", "sex", "scanDate", "added", "suvFile", "suvrFile", "referenceMean", "reference",
-                   "normalization", "source")
+                   "normalization", "source", "nativeFile")
+# How the subjects' maps are stored (shown in the Pipeline of a database; written into database.json)
+STORAGE = {"grid": "MNI ICBM 152 2009c, 1 mm (the reference mask's grid)", "interpolation": "linear",
+           "smoothing": "none (the database's FWHM is applied when the mean / SD are computed, and to the patient)",
+           "native": "the image as added (before the normalization), with its tags (subjects/<id>/<id>_native.*)"}
 
 # Normalization of the subjects to the MNI space, stored categorically (the Neuro workflows offer it as the default and
 # warn when a patient is normalized otherwise; "" / None: not specified, anything goes)
@@ -335,6 +339,7 @@ def newHeader(name, mode=STATIC, kind=USER_DEFINED, **fields):
     """Header of a new database with the defaults; fields override them (see the keys below)."""
     header = {
         "formatVersion": FORMAT_VERSION,
+        "storage": dict(STORAGE),
         "version": 1,           # database version: +1 at every new computation of the statistics
         "name": str(name).strip(),
         "mode": mode,
@@ -471,10 +476,99 @@ def writeSubjects(folder, subjects):
         f.write(out.getvalue())
 
 
+def subjectDir(subjectId):
+    """The folder of a subject, relative to the database folder: subjects/<id>."""
+    return f"{SUBJECTS_DIR}/{safeName(subjectId) or 'subject'}"
+
+
 def subjectFileNames(subjectId, extension=".nii.gz"):
     """(SUV file, SUVR file) of a subject, relative to the database folder."""
     name = safeName(subjectId) or "subject"
-    return f"{SUBJECTS_DIR}/{name}_SUV{extension}", f"{SUBJECTS_DIR}/{name}_SUVR{extension}"
+    return f"{subjectDir(subjectId)}/{name}_SUV{extension}", f"{subjectDir(subjectId)}/{name}_SUVR{extension}"
+
+
+def nativeFileName(subjectId, extension=".nii.gz"):
+    """The subject's native image (as added, before the normalization), relative to the database folder."""
+    return f"{subjectDir(subjectId)}/{safeName(subjectId) or 'subject'}_native{extension}"
+
+
+def nativeInfoName(subjectId):
+    """The tags of the native image (age, sex, scanner, source ...): a JSON next to it."""
+    return f"{subjectDir(subjectId)}/{safeName(subjectId) or 'subject'}_native.json"
+
+
+def transformName(subjectId):
+    """The subject's normalization matrices (the last one, and the passes of an iterative template)."""
+    return f"{subjectDir(subjectId)}/transform.json"
+
+
+def writeNativeInfo(folder, subjectId, info):
+    path = os.path.join(folder, nativeInfoName(subjectId))
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(info, f, indent=1, ensure_ascii=False)
+    return path
+
+
+def readNativeInfo(folder, subjectId):
+    path = os.path.join(folder, nativeInfoName(subjectId))
+    if not os.path.isfile(path):
+        return {}
+    with open(path, encoding="utf-8") as f:
+        return json.load(f)
+
+
+def nativePath(folder, subject):
+    """Absolute path of a subject row's native image, None when it has none (or the file is missing)."""
+    relative = (subject or {}).get("nativeFile")
+    path = os.path.join(folder, relative) if relative else ""
+    return path if path and os.path.isfile(path) else None
+
+
+def nativeCount(folder):
+    """(subjects with their native image, subjects)."""
+    subjects = readSubjects(folder)
+    return sum(1 for s in subjects if nativePath(folder, s)), len(subjects)
+
+
+def migrateLayout(folder):
+    """Move a database of format 1 (subjects/<id>_SUV.nii.gz, transforms/<id>.json) to the folder per subject
+    (format 2: subjects/<id>/...), updating subjects.csv; nothing for other formats or predefined databases. Returns
+    the number of files moved."""
+    header = readHeader(folder)
+    if int(header.get("formatVersion") or 1) >= FORMAT_VERSION:
+        return 0
+    moved = 0
+    subjects = readSubjects(folder)
+    for subject in subjects:
+        subjectId = subject.get("id", "")
+        targets = dict(zip(("suvFile", "suvrFile"), subjectFileNames(subjectId)))
+        for key, target in targets.items():
+            relative = subject.get(key)
+            if not relative or relative == target:
+                continue
+            source = os.path.join(folder, relative)
+            if os.path.isfile(source):
+                extension = imageExtension(source) or ".nii.gz"
+                target = target[:-len(".nii.gz")] + extension
+                os.makedirs(os.path.dirname(os.path.join(folder, target)), exist_ok=True)
+                os.replace(source, os.path.join(folder, target))
+                subject[key] = target
+                moved += 1
+        oldTransform = os.path.join(folder, "transforms", f"{safeName(subjectId) or 'subject'}.json")
+        if os.path.isfile(oldTransform):
+            target = os.path.join(folder, transformName(subjectId))
+            os.makedirs(os.path.dirname(target), exist_ok=True)
+            os.replace(oldTransform, target)
+            moved += 1
+    writeSubjects(folder, subjects)
+    oldFolder = os.path.join(folder, "transforms")
+    if os.path.isdir(oldFolder) and not os.listdir(oldFolder):
+        os.rmdir(oldFolder)
+    header["formatVersion"] = FORMAT_VERSION
+    header["storage"] = dict(STORAGE)
+    writeHeader(folder, header, touch=False)
+    return moved
 
 
 def hasSubject(folder, subjectId):
@@ -531,17 +625,54 @@ def removeSubjects(folder, subjectIds):
         return []
     subjectsRoot = os.path.realpath(os.path.join(folder, SUBJECTS_DIR))
     for subject in removed:
-        for key in ("suvFile", "suvrFile"):
+        for key in ("suvFile", "suvrFile", "nativeFile"):
             relative = subject.get(key)
             path = os.path.realpath(os.path.join(folder, relative)) if relative else ""
             if path and path.startswith(subjectsRoot + os.sep) and os.path.isfile(path):
                 os.remove(path)
+        own = os.path.realpath(os.path.join(folder, subjectDir(subject.get("id", ""))))
+        if own.startswith(subjectsRoot + os.sep) and os.path.isdir(own):
+            shutil.rmtree(own)          # the subject's folder (native info, transform)
     writeSubjects(folder, keep)
     stats = header.setdefault("statistics", {"computed": None, "stale": False, "groups": {}})
     if stats.get("computed"):
         stats["stale"] = True
     writeHeader(folder, header)
     return [s.get("id") for s in removed]
+
+
+def readSubjectTable(path):
+    """{id lower case: {"id", "age", "sex"}} of a CSV / TSV with the subjects' age and sex (columns id / subject /
+    participant_id, age, sex; comma, semicolon or tab separated); {} without a file."""
+    if not path or not os.path.isfile(path):
+        return {}
+    with open(path, newline="", encoding="utf-8-sig") as f:
+        text = f.read()
+    first = text.splitlines()[0] if text else ""
+    delimiter = max(("\t", ";", ","), key=first.count)
+    table = {}
+    for row in csv.DictReader(io.StringIO(text), delimiter=delimiter):
+        row = {str(k or "").strip().lower(): (v or "").strip() for k, v in row.items()}
+        subjectId = row.get("id") or row.get("subject") or row.get("participant_id") or row.get("subject_id")
+        if subjectId:
+            table[subjectId.lower()] = {"id": subjectId, "age": row.get("age", ""), "sex": row.get("sex", "")}
+    return table
+
+
+def matchSubject(stem, table):
+    """The row of table (readSubjectTable) for an image file stem: the ID itself, 'sub-<ID>', or an ID the stem
+    starts with (followed by '_' / '-' / '.'); None when none fits."""
+    lower = str(stem or "").lower()
+    for candidate in (lower, lower[4:] if lower.startswith("sub-") else "sub-" + lower):
+        if candidate in table:
+            return table[candidate]
+    best = None
+    for key, row in table.items():
+        for prefix in (key, "sub-" + key):
+            if lower.startswith(prefix) and len(lower) > len(prefix) and lower[len(prefix)] in "_-." \
+                    and (best is None or len(key) > len(best[0])):
+                best = (key, row)
+    return best[1] if best else None
 
 
 def subjectCount(folder, header):
@@ -609,6 +740,9 @@ EDITABLE_KEYS = ("name", "modality", "nuclide", "tracer", "acquisition", "segmen
 PREDEFINED_FIXED_KEYS = ("referenceRegion", "referenceErosionMm", "smoothingFwhmMm", "mapType", "ageStratified",
                          "ageGroups")
 STATISTICS_KEYS = ("referenceRegion", "referenceErosionMm", "smoothingFwhmMm", "ageStratified", "ageGroups")
+# of a user defined database: the regional statistics and the 3D-SSP projections (made with the mean / SD maps) are
+# those of its regions and map type
+REGION_STATISTICS_KEYS = ("regionAtlas", "regionGrowMm", "growInto", "mapType")
 
 
 def editedHeader(old, new):
@@ -633,7 +767,8 @@ def editedHeader(old, new):
         raise ValueError("\n".join(errors))
     changes = {"name": "name" in changed and safeName(header["name"]) != safeName(old.get("name", "")),
                "reference": any(k in changed for k in ("referenceRegion", "referenceErosionMm")),
-               "statistics": any(k in changed for k in STATISTICS_KEYS),
+               "statistics": any(k in changed for k in STATISTICS_KEYS) or (
+                   old.get("kind") != PREDEFINED and any(k in changed for k in REGION_STATISTICS_KEYS)),
                "normalization": "normalization" in changed, "keys": changed}
     stats = header.setdefault("statistics", {"computed": None, "stale": False, "groups": {}})
     if changes["statistics"] and stats.get("computed"):
@@ -785,9 +920,69 @@ def freezeTemplate(folder):
     relative = "template" + (imageExtension(source) or ".nii.gz")
     shutil.copyfile(source, os.path.join(folder, relative))
     previous = header.get("normalizationTemplate") or {}
-    header["normalizationTemplate"] = {"file": relative, "made": now(), "fromVersion": header.get("version", 1),
+    header["normalizationTarget"] = normalizationTarget(header)
+    header["normalizationTemplate"] = {"target": header["normalizationTarget"], "file": relative, "made": now(),
+                                       "fromVersion": header.get("version", 1),
                                        "n": master.get("n"), "smoothingFwhmMm": header.get("smoothingFwhmMm"),
                                        "iteration": int(previous.get("iteration") or 0) + 1}
+    header["normalization"] = dict(emptyNormalization(), **(header.get("normalization") or {}))
+    header["normalization"].update(method=NORM_PET_TEMPLATE, template="")
+    writeHeader(folder, header)
+    return header
+
+
+def normalizationTarget(header):
+    """The MNI template key a database's subjects are registered to first (pass 0 of a template; the PET to MR
+    template method's template): kept when the normalization becomes PET to PET; the synthetic PET when unknown."""
+    norm = dict(emptyNormalization(), **(header.get("normalization") or {}))
+    if norm.get("method") == NORM_PET and norm.get("template"):
+        return norm["template"]
+    return (header.get("normalizationTemplate") or {}).get("target") or header.get("normalizationTarget") \
+        or "pseudoPET"
+
+
+def pipelineRows(folder, header):
+    """The details of how a database's maps are made, in the order of its steps: [(label, text), ...]."""
+    rows = []
+    if header.get("kind") == USER_DEFINED:
+        storage = dict(STORAGE, **(header.get("storage") or {}))
+        have, count = nativeCount(folder)
+        rows.append(("Stored maps", f"{storage['grid']}, {storage['interpolation']} interpolation, smoothing "
+                                    f"{storage['smoothing']}"))
+        rows.append(("Native images", f"{have} of {count} subjects"
+                     + ("" if have == count else " (add the others again, replacing them)")))
+    target = normalizationTarget(header)
+    rows.append(("Normalization target (pass 0)", dict(NORM_TEMPLATES).get(target, target)))
+    frozen = header.get("normalizationTemplate") or {}
+    if frozen.get("file"):
+        how = ("iterative build, " + f"{frozen.get('passes')} passes, "
+               + ("converged" if frozen.get("converged") else "not converged")
+               if frozen.get("built") == "iterative" else "mean map used as template")
+        rows.append(("Normalization template", f"{frozen['file']} (n = {frozen.get('n')}, {how}, last pass "
+                                               f"{frozen.get('iteration', 1)}, {str(frozen.get('made', ''))[:16]})"))
+    stats = header.get("statistics") or {}
+    if header.get("kind") == USER_DEFINED:
+        state = ("not computed" if not stats.get("computed") else
+                 f"computed {str(stats.get('computed'))[:16]}" + (", out of date" if stats.get("stale") else ""))
+        rows.append(("Mean / SD", f"{state}, smoothing {header.get('smoothingFwhmMm') or 0:g} mm FWHM"))
+    return rows
+
+
+def useTemplate(folder, source, n=None, iteration=None, **details):
+    """Copy an image (e.g. the last template of an iterative build) as the database's normalization template
+    (template.<ext>) and make PET to PET its normalization method, as freezeTemplate(). Returns the header."""
+    header = readHeader(folder)
+    if not source or not os.path.isfile(source):
+        raise ValueError(f"The template {source} does not exist.")
+    relative = "template" + (imageExtension(source) or ".nii.gz")
+    shutil.copyfile(source, os.path.join(folder, relative))
+    previous = header.get("normalizationTemplate") or {}
+    header["normalizationTarget"] = normalizationTarget(header)
+    header["normalizationTemplate"] = dict({"file": relative, "made": now(), "fromVersion": header.get("version", 1),
+                                            "n": n, "smoothingFwhmMm": header.get("smoothingFwhmMm"),
+                                            "target": header["normalizationTarget"],
+                                            "iteration": int(iteration if iteration is not None else
+                                                             int(previous.get("iteration") or 0) + 1)}, **details)
     header["normalization"] = dict(emptyNormalization(), **(header.get("normalization") or {}))
     header["normalization"].update(method=NORM_PET_TEMPLATE, template="")
     writeHeader(folder, header)
@@ -853,16 +1048,131 @@ def createPredefined(root, header, maps, maskPath=None):
     return folder
 
 
+def exportCheck(folder, header=None):
+    """(errors, warnings, contents) of a user defined database before it is exported as a predefined one. errors:
+    what makes the package wrong (statistics missing or out of date, regional statistics or 3D-SSP projections of
+    other settings or of an older version): compute the mean / SD maps again. warnings: what the package lacks (the
+    Review then approximates). contents: lines on what goes in."""
+    from . import ssp
+    header = header or readHeader(folder)
+    errors, warnings, contents = [], [], []
+    if header.get("kind") != USER_DEFINED:
+        return ["Only a user defined database can be exported as a predefined one"], warnings, contents
+    stats = header.get("statistics") or {}
+    if not stats.get("computed") or not stats.get("groups"):
+        return ["Compute the mean and SD maps of the database first"], warnings, contents
+    again = "compute the mean / SD maps again (Neuro PET Database Manager)"
+    if stats.get("stale"):
+        errors.append(f"The mean / SD maps are out of date (subjects or settings changed after they were computed): "
+                      f"{again}.")
+    count = subjectCount(folder, header)
+    master = (stats["groups"].get(MASTER) or {}).get("n")
+    if master is not None and count and int(master) != int(count):
+        errors.append(f"The master mean / SD maps are of {master} subjects, the database has {count}: {again}.")
+    mapKey = subjectMapKey(header)
+    if stats.get("maps") and stats.get("maps") != mapKey:
+        errors.append(f"The mean / SD maps were made from the {stats['maps'][:-4].upper()} maps, the database's map "
+                      f"type is now {header.get('mapType')}: {again}.")
+    fwhm = float(header.get("smoothingFwhmMm") or 0)
+    for key, group in stats["groups"].items():
+        for which in ("mean", "sd"):
+            relative = group.get(which)
+            if not relative or not os.path.isfile(os.path.join(folder, relative)):
+                errors.append(f"The {which} map of '{group.get('name') or key}' is missing: {again}.")
+    contents.append("Mean / SD maps: " + ", ".join(
+        f"{MASTER_TITLE if k == MASTER else g.get('name') or k} (n = {g.get('n')})"
+        for k, g in stats["groups"].items()))
+    if header.get("referenceMask") and os.path.isfile(os.path.join(folder, header["referenceMask"])):
+        contents.append(f"Reference mask: {referenceTitle(header.get('referenceRegion'))}")
+    else:
+        warnings.append("No reference mask copy: the reference region is taken from the user's atlas folder (not "
+                        "possible for a custom or global reference).")
+    if templatePath(folder, header):
+        contents.append("Normalization template (PET to PET)")
+    elif (header.get("normalization") or {}).get("method") == NORM_PET_TEMPLATE:
+        warnings.append("No frozen normalization template: the master mean map is used as the PET template.")
+    # regional statistics
+    relative = stats.get("regions")
+    document = None
+    if relative and os.path.isfile(os.path.join(folder, relative)):
+        try:
+            with open(os.path.join(folder, relative), encoding="utf-8") as stream:
+                document = json.load(stream)
+        except (OSError, ValueError):
+            errors.append(f"{relative} cannot be read: {again}.")
+    if document is None and not errors:
+        warnings.append("No regional statistics (the atlas folder was not set when the mean / SD maps were "
+                        "computed): the Review approximates the regional normal values from the voxel maps.")
+    elif document is not None:
+        settings = document.get("settings") or {}
+        now_ = {"regionAtlas": header.get("regionAtlas") or DEFAULT_REGION_ATLAS,
+                "growMm": float(header.get("regionGrowMm") or 0.0), "growInto": growInto(header),
+                "referenceRegion": header.get("referenceRegion") or "",
+                "erodeReferenceMm": float(header.get("referenceErosionMm") or 0.0), "mapType": header.get("mapType", "")}
+        differing = [k for k, v in now_.items() if k in settings and (
+            abs(float(settings[k]) - v) > 1e-6 if isinstance(v, float) else settings[k] != v)]
+        if document.get("maps") != mapKey:
+            differing.append("maps")
+        if differing:
+            errors.append("The regional statistics were made with other settings (" + ", ".join(differing)
+                          + f"): {again}.")
+        else:
+            regions = ((document.get("groups") or {}).get(MASTER) or {}).get("regions") or {}
+            contents.append(f"Regional statistics: {len(regions)} regions "
+                            f"({regionAtlasTitle(now_['regionAtlas'])})")
+    relative = stats.get("regionsSegmentation")
+    if relative and os.path.isfile(os.path.join(folder, relative)):
+        if document is not None and document.get("version") is not None and int(document["version"]) != int(
+                header.get("version") or 1):
+            errors.append(f"The stored regions are not those of the statistics: {again}.")
+        else:
+            contents.append("Regions (segmentation; the user's atlas folder is not needed for them)")
+    else:
+        warnings.append("The regions themselves are not stored (made by an older version): they are drawn from the "
+                        f"user's atlas folder, which must hold the same CerebrA files. To put them in, {again}.")
+    # 3D-SSP projections of the normals
+    relative = stats.get("ssp")
+    read = ssp.read(os.path.join(folder, relative)) if relative else None
+    if read is None:
+        if relative:
+            errors.append(f"{relative} is missing or cannot be read: {again}.")
+        else:
+            warnings.append("No 3D-SSP projections of the normals: the Review's 3D-SSP shows the voxel scores "
+                            "projected, not the Minoshima scores.")
+    else:
+        surface, groups, meta = read
+        problems = []
+        if meta.get("maps") != mapKey:
+            problems.append("another map type")
+        if abs(float(meta.get("depthMm") or 0) - ssp.DEPTH_MM) > 1e-6 or not meta.get("clipToBrain"):
+            problems.append("another projection depth")
+        if int(meta.get("surface") or 0) < ssp.SURFACE_VERSION:
+            problems.append("an older surface")
+        if abs(float(meta.get("fwhmMm") or 0) - fwhm) > 1e-6:
+            problems.append("another smoothing")
+        if int(meta.get("version") or 0) != int(header.get("version") or 1):
+            problems.append("another version of the statistics")
+        missing = [k for k in stats["groups"] if k not in groups]
+        if missing:
+            problems.append("groups missing")
+        if problems:
+            errors.append("The 3D-SSP projections are not those of the mean / SD maps (" + ", ".join(problems)
+                          + f"): {again}.")
+        else:
+            contents.append(f"3D-SSP projections: {len(surface['points'])} vertices, "
+                            + ("with" if ssp.hasMedial(surface) else "without") + " medial views")
+    return errors, warnings, contents
+
+
 def exportPredefined(folder, zipPath):
     """Write a user defined database as a predefined one: a .zip with database.json (kind predefined, the subjects
     reduced to an age summary), the reference mask and stats/; the subject maps stay out. Needs computed
-    statistics."""
+    statistics that are up to date (exportCheck)."""
     header = readHeader(folder)
-    if header.get("kind") != USER_DEFINED:
-        raise ValueError("Only a user defined database can be exported as a predefined one")
+    errors = exportCheck(folder, header)[0]
+    if errors:
+        raise ValueError("\n".join(errors))
     stats = header.get("statistics") or {}
-    if not stats.get("computed") or not stats.get("groups"):
-        raise ValueError("Compute the mean and SD maps of the database first")
     subjects = readSubjects(folder)
     exported = dict(header, kind=PREDEFINED, exported=now(), exportedFrom=header.get("name"),
                     subjectAges=ageSummary(s.get("age") for s in subjects))
@@ -875,12 +1185,15 @@ def exportPredefined(folder, zipPath):
         exported["normalizationTemplate"] = {}
     for group in stats["groups"].values():
         files.extend(group.get(w) for w in ("mean", "sd") if group.get(w))
-    for key in ("regions", "ssp"):      # the regional statistics and the 3D-SSP projections (Review), when made
+    # the regional statistics, the 3D-SSP projections (Review) and the regions themselves, when made
+    for key in ("regions", "ssp", "regionsSegmentation"):
         if stats.get(key):
             if os.path.isfile(os.path.join(folder, stats[key])):
                 files.append(stats[key])
             else:
                 exported["statistics"].pop(key, None)
+    if "regionsSegmentation" not in exported["statistics"]:
+        exported["statistics"].pop("regionsReference", None)
     with zipfile.ZipFile(zipPath, "w", zipfile.ZIP_DEFLATED) as archive:
         archive.writestr(f"{base}/{HEADER_NAME}", json.dumps(exported, indent=2, ensure_ascii=False) + "\n")
         for relative in files:

@@ -1,2 +1,5 @@
 # Auto detect text files and perform LF normalization
 * text=auto
+# atlas files: never touched
+*.nii.gz binary
+*.nrrd binary

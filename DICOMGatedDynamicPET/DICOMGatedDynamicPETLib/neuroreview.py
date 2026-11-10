@@ -45,9 +45,10 @@ SD_FLOOR_FRACTION = 0.2         # SD floor: 20 % of the median SD in the mask
 DEFAULT_MAXIMUM = 7.0           # score window: -7 ... +7 SD, 0 in the middle
 # the score colour maps made here: (position 0..255, R, G, B 0..1) points, linear between them. From the CAT12
 # colours: SSP_Rainbow, SSP-PET-DICOM, SSP_HotIron, SSP_Inferno, SSP_Viridis; SSP_Rainbow10 has ten flat
-# steps (_STEPS). Diverging, for scores (0 in the middle): SSP_Turbo (a smooth rainbow), SSP_IceFire (black at 0:
-# only the abnormal coloured), SSP_CoolWarm (blue - light grey - red), SSP_GreyZero (the rainbow with a grey band
-# around 0, about +/- 0.5 of a +/- 4 window), SSP_PurpleOrange
+# steps (_STEPS). Diverging, for scores (0 in the middle): SSP_Turbo (a smooth rainbow), SSP_IceFire (Burak's
+# procedural map: black at 0, blue to cyan on the cold side, red - yellow - light yellow on the warm side),
+# SSP_IceFire2 (white - blue, dark grey at 0, red - yellow), SSP_CoolWarm (blue - light grey - red), SSP_GreyZero
+# (the rainbow with a grey band around 0, about +/- 0.5 of a +/- 4 window), SSP_PurpleOrange
 _POINTS = {
     "SSP_Rainbow": ((0, 0, 0, 0), (41, 0, 0, 0.5), (84, 0, 0.5, 1), (126, 0, 1, 0), (169, 1, 1, 0), (211, 1, 0, 0),
                     (255, 1, 1, 1)),
@@ -58,13 +59,18 @@ _POINTS = {
                     (153, 0.867, 0.318, 0.227), (204, 0.988, 0.647, 0.039), (255, 0.988, 1.0, 0.643)),
     "SSP_Viridis": ((0, 0.267, 0.004, 0.329), (51, 0.255, 0.267, 0.529), (102, 0.165, 0.471, 0.557),
                     (153, 0.133, 0.659, 0.518), (204, 0.478, 0.820, 0.318), (255, 0.992, 0.906, 0.145)),
-    "SSP_Turbo": ((0, 0.190, 0.072, 0.232), (32, 0.268, 0.416, 0.936), (64, 0.148, 0.743, 0.879),
+    "SSP_Turbo": ((0, 0.190, 0.072, 0.232), (32, 0.268, 0.416, 0.936), (64, 0.100, 0.620, 0.950),
                   (96, 0.253, 0.954, 0.569), (128, 0.595, 0.981, 0.310), (160, 0.936, 0.809, 0.175),
                   (192, 1.0, 0.494, 0.113), (224, 0.777, 0.168, 0.045), (255, 0.480, 0.016, 0.011)),
-    # the cold side blue, from B = 0.1 next to 0 to full blue, then a dark purple as bright as that blue (the same
-    # luminance) at the lowest scores; no white
-    "SSP_IceFire": ((0, 0.36, 0, 0.85), (40, 0, 0, 1), (127, 0, 0, 0.1), (128, 0.05, 0.05, 0.05), (160, 0.6, 0.1, 0), (208, 1, 0.5, 0),
-                    (255, 1, 1, 0.6)),
+    # Burak's procedural colour file (icefire.txt, 9 points)
+    "SSP_IceFire": ((0, 0, 1, 1), (32, 0, 0.501961, 0.752941), (64, 0, 0.12549, 0.752941), (96, 0, 0, 0.501961),
+                    (127, 0, 0, 0), (160, 0.501961, 0, 0), (192, 0.752941, 0.25098, 0),
+                    (224, 0.878431, 0.878431, 0), (255, 1, 1, 0.752941)),
+    # Burak's second procedural file (icefireCopy.txt, 9 points) turned around: white - blue at the low end, dark grey
+    # at 0, red to yellow at the high end
+    "SSP_IceFire2": ((0, 1, 1, 1), (31, 0, 0.568627, 1), (63, 0, 0.0431373, 0.870588),
+                     (95, 0.152941, 0.152941, 0.752941), (128, 0.25098, 0.25098, 0.25098), (163, 0.752941, 0, 0),
+                     (191, 1, 0.25098, 0), (223, 1, 0.501961, 0), (255, 1, 1, 0)),
     "SSP_CoolWarm": ((0, 0.230, 0.299, 0.754), (64, 0.552, 0.690, 0.996), (128, 0.865, 0.865, 0.865),
                      (192, 0.958, 0.604, 0.483), (255, 0.706, 0.016, 0.150)),
     "SSP_GreyZero": ((0, 0, 0, 0), (40, 0, 0, 0.8), (80, 0, 0.8, 1), (112, 0.55, 0.55, 0.55),
@@ -77,9 +83,13 @@ _STEPS = {
     "SSP_Rainbow10": ((0, 0, 0), (0.3, 0, 0.5), (0, 0, 1), (0, 0.7, 1), (0, 1, 0), (0.6, 1, 0), (1, 1, 0),
                       (1, 0.5, 0), (1, 0, 0), (1, 1, 1)),
 }
-SCORE_COLORMAPS = ("SSP_Turbo", "SSP_IceFire", "SSP_Rainbow", "SSP_Rainbow10", "SSP-PET-DICOM", "SSP_HotIron",
-                   "SSP_Inferno", "SSP_Viridis", "SSP_CoolWarm", "SSP_GreyZero", "SSP_PurpleOrange", "ColdToHotRainbow",
-                   "DivergingBlueRed", "Plasma", "Viridis")     # the first is the default
+SCORE_COLORMAPS = ("SSP_Turbo", "SSP_IceFire", "SSP_IceFire2", "SSP_Rainbow", "SSP_Rainbow10", "SSP-PET-DICOM",
+                   "SSP_HotIron", "SSP_Inferno", "SSP_Viridis", "SSP_CoolWarm", "SSP_GreyZero", "SSP_PurpleOrange",
+                   "ColdToHotRainbow", "DivergingBlueRed", "Plasma", "Viridis")     # the first is the default
+# the diverging maps with a neutral colour at 0: shown below the normals / the threshold they are neither reversed nor
+# rescaled (the window stays -maximum .. maximum, the other scores grey)
+NEUTRAL_MIDPOINT_COLORMAPS = ("SSP_IceFire", "SSP_IceFire2", "SSP_CoolWarm", "SSP_GreyZero", "SSP_PurpleOrange",
+                              "DivergingBlueRed")
 # Plasma and Viridis (matplotlib, CC0): 17 anchors, interpolated to 256 (the others are Slicer's colour tables)
 _ANCHORS = {
     "Plasma": "0d08873105974c02a16600a77e03a89511a1aa2395bc3587cc4778da5a6ae66c5cf0804ef89540fdac33fdc527f8df25f0f921",
@@ -95,6 +105,10 @@ SCORE_SIDES = ((SIDE_ALL, "All scores"), (SIDE_BELOW, "Below the normals only (c
 DEFAULT_THRESHOLD = -2.0
 OUTSIDE = -1.0e6                # score map voxels outside the scored mask (shown black: below the display threshold)
 REGIONS_FILE = normaldb.STATS_DIR + "/regions.json"
+# the regions the statistics were made on (a segmentation, made with the mean / SD maps): the Regions step loads them
+# as they are (the same regions for everyone, also without the atlas files); PENDING until the statistics are written
+REGIONS_SEGMENTATION_FILE = normaldb.STATS_DIR + "/regions.seg.nrrd"
+REGIONS_SEGMENTATION_PENDING = normaldb.STATS_DIR + "/regions_pending.seg.nrrd"
 CACHE_DIR = "cache"
 DROPPED_SEGMENT_WORDS = ("optic chiasm",)       # left out of the review (overlay, surface, table)
 
@@ -430,13 +444,20 @@ def divergingColors(table, hypoOnly=False, count=256, grey=GREY):
     return rgba
 
 
-def scoreColors(table, side=SIDE_ALL, maximum=DEFAULT_MAXIMUM, threshold=DEFAULT_THRESHOLD, count=256, grey=GREY):
+def scoreColors(table, side=SIDE_ALL, maximum=DEFAULT_MAXIMUM, threshold=DEFAULT_THRESHOLD, count=256, grey=GREY,
+                neutralMidpoint=False):
     """(count x 4 RGBA, (low, high) window) of a score map by its side (SCORE_SIDES): all: the colour table across
     -maximum .. maximum; below / threshold: the table reversed across -maximum .. 0 (-maximum its top end), grey at
-    0 (the scores above it clamped there) and, for threshold, above the threshold (a negative score)."""
+    0 (the scores above it clamped there) and, for threshold, above the threshold (a negative score). A table with
+    a neutral midpoint (NEUTRAL_MIDPOINT_COLORMAPS) stays as it is across -maximum .. maximum, the scores above 0 /
+    the threshold grey."""
     maximum = float(maximum)
-    if side not in (SIDE_BELOW, SIDE_THRESHOLD):
-        return divergingColors(table, count=count, grey=grey), (-maximum, maximum)
+    if side not in (SIDE_BELOW, SIDE_THRESHOLD) or neutralMidpoint:
+        rgba = divergingColors(table, count=count, grey=grey)
+        if side in (SIDE_BELOW, SIDE_THRESHOLD):
+            limit = min(float(threshold), 0.0) if side == SIDE_THRESHOLD else 0.0
+            rgba[np.linspace(-maximum, maximum, count) > limit + 1e-9 * max(maximum, 1.0), :3] = grey
+        return rgba, (-maximum, maximum)
     table = np.asarray(table, dtype=float)
     index = np.clip(np.rint(np.linspace(len(table) - 1, 0, count)).astype(int), 0, len(table) - 1)
     rgba = np.ones((count, 4), dtype=float)
@@ -469,6 +490,44 @@ def brightnessColors(scores, brightness, rgba, maximum, low=None):
     index = np.clip(np.rint((scores - low) / span * (count - 1)), 0, count - 1).astype(np.int32)
     rgb = rgba[index, :3] * np.asarray(brightness, dtype=np.float32)[..., None]
     return np.clip(np.rint(rgb * 255.0), 0, 255).astype(np.uint8)
+
+
+SCORE_QUANTUM = 0.01       # the scores' step in quantizedBrightness
+
+
+def quantizedBrightness(scores, brightness, quantum=SCORE_QUANTUM):
+    """{"flat", "first", "count", "quantum"} for fastBrightnessColors: each voxel's (score step, brightness level)
+    as one index into a (score steps x 256 levels) colour table: the score quantized to first, first + quantum, ...
+    and the brightness to 0..255. Made once; a window change then needs one look-up per voxel."""
+    scores = np.nan_to_num(np.asarray(scores, dtype=np.float32))
+    steps = np.rint(scores / np.float32(quantum)).astype(np.int32)
+    first = int(steps.min()) if steps.size else 0
+    last = int(steps.max()) if steps.size else 0
+    if last - first > 8000:             # beyond +-40 with 0.01: clipped (shown at the window's ends anyway)
+        first, last = max(first, -4000), min(last, 4000)
+        np.clip(steps, first, last, out=steps)
+    levels = np.clip(np.rint(np.asarray(brightness, dtype=np.float32) * 255.0), 0, 255).astype(np.int32)
+    steps -= first
+    steps *= 256
+    steps += levels
+    return {"flat": steps, "first": first, "count": last - first + 1, "quantum": float(quantum)}
+
+
+def fastBrightnessColors(quantized, rgba, maximum, low=None, out=None):
+    """brightnessColors() from quantizedBrightness(): the (score step x brightness level) colours made once for the
+    window, then looked up per voxel (into out, uint8 shape + (3,), when given)."""
+    rgba = np.asarray(rgba, dtype=np.float32)
+    count = len(rgba)
+    low = -maximum if low is None else low
+    span = (maximum - low) or 1.0
+    values = (quantized["first"] + np.arange(quantized["count"], dtype=np.float64)) * quantized["quantum"]
+    index = np.clip(np.rint((values - low) / span * (count - 1)), 0, count - 1).astype(np.int32)
+    colors = rgba[index, :3].astype(np.float32)                                            # (steps, 3)
+    levels = np.arange(256, dtype=np.float32) / np.float32(255.0)
+    table = np.clip(np.rint(colors[:, None, :] * levels[None, :, None] * 255.0), 0, 255).astype(np.uint8)
+    if out is not None:
+        return np.take(table.reshape(-1, 3), quantized["flat"], axis=0, out=out)
+    return np.take(table.reshape(-1, 3), quantized["flat"], axis=0)
 
 
 def maskedScores(scores, mask, factor=1.0, hideBelow=0.0):

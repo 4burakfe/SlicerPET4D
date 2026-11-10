@@ -218,6 +218,18 @@ def petTemplatePath(folder, header):
     return normaldb.templatePath(folder, header) or masterMeanPath(folder, header)
 
 
+def storedRegions(folder, header):
+    """(path, reference segment name or None) of the regions stored with a database's statistics (the segmentation
+    the regional statistics and the 3D-SSP were made on); None when it has none, or when the statistics of a user
+    defined database are out of date."""
+    stats = (header or {}).get("statistics") or {}
+    relative = stats.get("regionsSegmentation")
+    if not relative or (header.get("kind") != normaldb.PREDEFINED and stats.get("stale")):
+        return None
+    path = os.path.join(folder, relative)
+    return (path, stats.get("regionsReference") or None) if os.path.isfile(path) else None
+
+
 def referenceMaskPath(folder, header):
     """Absolute path of a database's reference mask copy, None when it has none."""
     relative = header.get("referenceMask")

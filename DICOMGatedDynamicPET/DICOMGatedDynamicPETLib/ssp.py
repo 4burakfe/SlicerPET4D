@@ -171,6 +171,31 @@ def piece(surface, part):
              "triangles": renumber[triangles[keep]]}, index)
 
 
+def labelBorders(points, triangles, labels):
+    """The borders between the labels of a labelled surface as line segments: (points (m, 3), segments (k, 2) of
+    point indices). In a triangle with two labels the segment joins the middles of its two edges with different
+    labels at their ends; with three labels the three middles are joined to the triangle's centre."""
+    points = np.asarray(points, dtype=np.float64)
+    triangles = np.asarray(triangles, dtype=np.int64).reshape(-1, 3)
+    labels = np.asarray(labels)
+    empty = np.zeros((0, 3), np.float64), np.zeros((0, 2), np.int64)
+    if not len(triangles):
+        return empty
+    corner = labels[triangles]
+    cut = np.stack([corner[:, 0] != corner[:, 1], corner[:, 1] != corner[:, 2], corner[:, 2] != corner[:, 0]], axis=1)
+    count = cut.sum(axis=1)
+    if not count.any():
+        return empty
+    middles = 0.5 * (points[triangles] + points[triangles[:, [1, 2, 0]]])      # (n, 3 edges, 3)
+    two = count == 2
+    pair = middles[two][cut[two]].reshape(-1, 2, 3)                              # the two cut edges of each
+    three = count == 3
+    centre = points[triangles[three]].mean(axis=1)
+    star = np.stack([middles[three], np.repeat(centre[:, None, :], 3, axis=1)], axis=2).reshape(-1, 2, 3)
+    ends = np.concatenate([pair, star]).reshape(-1, 3)
+    return ends, np.arange(len(ends), dtype=np.int64).reshape(-1, 2)
+
+
 def brainPart(surface):
     """(the brain's surface, its vertex indices): the whole surface, or its brain part when it has parts."""
     if surface.get("parts") is None:
@@ -228,6 +253,34 @@ def project(array, ijkToRas, points, outwardNormals, mode="max", depthMm=DEPTH_M
             if mask is not None:
                 values = np.where(valid, values, -np.inf)
             out[start:start + chunk] = values.max(axis=1)
+    return out
+
+
+def vertexLabels(labels, ijkToRas, points, outwardNormals, depthMm=DEPTH_MM, stepMm=STEP_MM, chunk=20000):
+    """The region of each vertex (for the names at the mouse on the 3D-SSP): the first label (not 0) met along its
+    inward normal, from the surface to depthMm (nearest voxel of labels, (k, j, i) on the grid ijkToRas); 0 when the
+    ray meets none."""
+    labels = np.asarray(labels)
+    points = np.asarray(points, dtype=np.float64)
+    normals = np.asarray(outwardNormals, dtype=np.float64)
+    lengths = np.linalg.norm(normals, axis=1)
+    lengths[lengths == 0] = 1.0
+    inward = -normals / lengths[:, None]
+    distances = offsets(depthMm, stepMm)
+    shape = np.array(labels.shape)
+    out = np.zeros(len(points), dtype=np.int32)
+    for start in range(0, len(points), chunk):
+        p = points[start:start + chunk]
+        d = inward[start:start + chunk]
+        samples = p[:, None, :] + distances[None, :, None] * d[:, None, :]
+        kji = np.floor(rasToIjk(samples.reshape(-1, 3), ijkToRas)[:, ::-1] + 0.5).astype(np.int64)
+        inside = np.all((kji >= 0) & (kji < shape), axis=1)
+        values = np.zeros(len(kji), dtype=np.int32)
+        values[inside] = labels[kji[inside, 0], kji[inside, 1], kji[inside, 2]]
+        values = values.reshape(len(p), len(distances))
+        found = values > 0
+        first = np.argmax(found, axis=1)
+        out[start:start + chunk] = np.where(found.any(axis=1), values[np.arange(len(p)), first], 0)
     return out
 
 

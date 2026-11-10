@@ -63,8 +63,10 @@ def test_classify(args, expected):
 def test_template_for_contrast():
     assert neuro.templateForContrast("T2") == "T2"
     assert neuro.templateForContrast("PD") == "PD"
-    for c in ("T1", "CT", None):
+    for c in ("T1", None):
         assert neuro.templateForContrast(c) == "T1"
+    assert neuro.templateForContrast("CT") == neuro.CT_TEMPLATE
+    assert neuro.templateTitle(neuro.CT_TEMPLATE) == neuro.CT_TEMPLATE_TITLE
 
 
 def test_read_labels_text_and_file(tmp_path):
@@ -354,3 +356,81 @@ def test_pseudo_pet(tmp_path):
         open(name, "w").close()
     open(tmp_path / "mni_icbm152_pseudopet_tal_nlin_sym_09c.nii", "w").close()
     assert neuro.findAtlasFiles(str(tmp_path))[neuro.PSEUDO_PET].endswith("pseudopet_tal_nlin_sym_09c.nii")
+
+
+def _head_ct(shape=(60, 120, 110), spacing=(2.0, 2.0, 2.0)):
+    """A ball head: scalp, skull, brain with ventricles, a neck under a foramen magnum, orbits, a table (HU)."""
+    z, y, x = np.ogrid[:shape[0], :shape[1], :shape[2]]
+    Z, Y, X = (z - 38) * spacing[0], (y - 60) * spacing[1], (x - 55) * spacing[2]
+    r = np.sqrt(X ** 2 + (Y / 1.15) ** 2 + (Z / 0.95) ** 2)
+    hu = np.full(shape, -1000.0, dtype=np.float32)
+    hu[r < 88], hu[r < 82], hu[r < 76], hu[r < 20] = 40, 900, 35, 8
+    hu[(np.sqrt(X ** 2 + (Y - 10) ** 2) < 45) & (Z < -40)] = 40
+    hu[(np.sqrt(X ** 2 + (Y - 10) ** 2) < 16) & (Z < -60) & (r < 84)] = 35
+    for side in (-30, 30):
+        hu[np.sqrt((X - side) ** 2 + (Y - 95) ** 2 + (Z + 10) ** 2) < 13] = 20
+    hu[(Y < -105) & (np.abs(X) < 90) & (Z < -50)] = 300
+    return hu, r < 76
+
+
+def test_ct_brain():
+    pytest.importorskip("scipy")
+    hu, brain = _head_ct()
+    assert neuro.looksLikeCt(hu) and not neuro.looksLikeCt(np.zeros((4, 4, 4)))
+    mask = neuro.ctBrainMask(hu, (2.0, 2.0, 2.0))
+    assert 2 * (mask & brain).sum() / (mask.sum() + brain.sum()) > 0.9      # the brain, not the scalp or the skull
+    assert (mask & ~brain).sum() < 0.02 * brain.sum()
+    image, count = neuro.ctBrainImage(hu, (2.0, 2.0, 2.0))
+    assert count == mask.sum() and image.max() <= neuro.CT_BRAIN_WINDOW[1] and not image[~mask].any()
+    assert not neuro.ctBrainMask(np.full((20, 20, 20), -1000.0)).any()
+
+
+def test_ct_template(tmp_path):
+    stretched = neuro.ctStretch(np.array([-2000, -1000, -100, 0, 100, 3000]))
+    assert list(stretched) == [0, 0, 100, 600, 1100, 1200] and np.all(np.diff(stretched) >= 0)
+    for name in ("scct_unsmooth.nii", "scgrey.nii"):
+        open(tmp_path / name, "w").close()
+    found = neuro.findAtlasFiles(str(tmp_path))
+    assert found[neuro.CT_TEMPLATE].endswith("scct_unsmooth.nii") and neuro.CT_TEMPLATE_GM in found
+    assert neuro.ctCorrectionPath(found).endswith("scct_unsmooth" + neuro.CT_CORRECTION_SUFFIX)
+    assert not any("scct" in name for name in neuro.missingFiles(found))
+
+
+def test_atlasFiles_bundled_and_user(tmp_path, monkeypatch):
+    bundled, cache, user = tmp_path / "bundled", tmp_path / "cache", tmp_path / "user"
+    for folder in (bundled, cache, user):
+        folder.mkdir()
+    monkeypatch.setattr(neuro, "BUNDLED_FOLDER", str(bundled))
+    monkeypatch.setenv(neuro.GENERATED_FOLDER_VARIABLE, str(cache))
+    for name in ("mni_icbm152_t1_tal_nlin_sym_09c.nii.gz", "mni_icbm152_t1_tal_nlin_sym_09c_mask.nii.gz",
+                 "mni_icbm152_gm_tal_nlin_sym_09c.nii.gz", "mni_icbm152_wm_tal_nlin_sym_09c.nii.gz",
+                 "mni_icbm152_CerebrA_tal_nlin_sym_09c.nii.gz", neuro.CSV_NAME):
+        (bundled / name).write_bytes(b"x")
+    (cache / (neuro.BILATERAL_STEM + ".nii")).write_bytes(b"x")
+    # no user folder: the extension's files, what is made from them in the cache folder
+    found = neuro.atlasFiles(None)
+    assert found["T1"] == str(bundled / "mni_icbm152_t1_tal_nlin_sym_09c.nii.gz")
+    assert found[neuro.BILATERAL_LABELS] == str(cache / (neuro.BILATERAL_STEM + ".nii"))
+    assert neuro.bilateralPaths(found)[1] == str(cache / neuro.BILATERAL_CSV_NAME)
+    assert neuro.pseudoPetPath(found) == str(cache / "mni_icbm152_pseudopet_tal_nlin_sym_09c.nii")
+    assert neuro.groupedPaths(found)[0] == str(cache / (neuro.GROUPED_STEM + ".nii"))
+    assert sorted(neuro.bundledKeys(found)) == sorted(found)
+    assert not neuro.missingFiles(found) or "t1" not in " ".join(neuro.missingFiles(found))
+    # the user's T1 comes first; the rest stays the extension's
+    (user / "mni_icbm152_t1_tal_nlin_sym_09c.nii").write_bytes(b"u")
+    found = neuro.atlasFiles(str(user))
+    assert found["T1"] == str(user / "mni_icbm152_t1_tal_nlin_sym_09c.nii")
+    assert found["GM"].startswith(str(bundled)) and found[neuro.CEREBRA_LABELS].startswith(str(bundled))
+    # the user's CerebrA: all the CerebrA files from the user's folder (not the cache of the extension's)
+    (user / "mni_icbm152_CerebrA_tal_nlin_sym_09c.nii").write_bytes(b"u")
+    found = neuro.atlasFiles(str(user))
+    assert found[neuro.CEREBRA_LABELS].startswith(str(user))
+    assert neuro.BILATERAL_LABELS not in found and neuro.CEREBRA_CSV not in found
+    assert neuro.bilateralPaths(found)[0] == str(user / (neuro.BILATERAL_STEM + ".nii"))
+    # one tissue map only: the extension's pair is kept
+    (user / "mni_icbm152_gm_tal_nlin_sym_09c.nii").write_bytes(b"u")
+    assert neuro.atlasFiles(str(user))["GM"].startswith(str(bundled))
+    (user / "mni_icbm152_wm_tal_nlin_sym_09c.nii").write_bytes(b"u")
+    found = neuro.atlasFiles(str(user))
+    assert found["GM"].startswith(str(user)) and neuro.pseudoPetPath(found).startswith(str(user))
+    assert neuro.atlasFiles(None, bundled="") == {}

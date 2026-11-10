@@ -542,12 +542,17 @@ without, the result is kept, or stay).
 6. **Modeling** (Dynamic PET Modeling), ready with the normalized series, the regions, **SRTM**, the reference region
    and the putamen as the target.
 
-**Atlas files.** The atlases are not shipped with the extension. Download the *ICBM 2009c Nonlinear Symmetric*
-NIfTI files from the [MNI](https://nist.mni.mcgill.ca/icbm-152-nonlinear-atlases-2009/) and
-[CerebrA](https://nist.mni.mcgill.ca/cerebra/), and pick their folder in step 4 (searched with its subfolders, kept in
-the application settings). Files used: *mni_icbm152_t1_tal_nlin_sym_09c.nii* (required), the t2 / pd / gm / wm / csf
-templates, *mni_icbm152_t1_tal_nlin_sym_09c_mask.nii*, *mni_icbm152_CerebrA_tal_nlin_sym_09c.nii* and
-*CerebrA_LabelDetails.csv*. Please cite Fonov et al., NeuroImage 2011;54:313-327 and NeuroImage 2009;47:S102 (ICBM
+**Atlas files.** The extension comes with the atlas files the workflows need (`Resources/Atlas`): the *ICBM 2009c
+Nonlinear Symmetric* T1 template, its brain mask and its grey and white matter probability maps, the CerebrA labels
+with *CerebrA_LabelDetails.csv*, and a CerebrA with pons. Nothing has to be picked: without an atlas folder these
+files are used. The files made from them on first use (the bilateral and grouped CerebrA, the pons overlays, the
+synthetic PET template) are written to `~/.PET4D/NeuroAtlas` (or `$PET4D_NEURO_ATLAS_CACHE`), not into the extension.
+An atlas folder picked in step 4 (searched with its subfolders, kept in the application settings) comes first: its
+files replace the extension's (the CerebrA files together when it holds the CerebrA labels, the grey / white matter
+maps together when it holds both, the others one by one), and it is where the t2 / pd / csf templates and a CT
+template are looked for. The full sets are at the [MNI](https://nist.mni.mcgill.ca/icbm-152-nonlinear-atlases-2009/)
+and [CerebrA](https://nist.mni.mcgill.ca/cerebra/) pages. The licenses of the files are in
+[Resources/Atlas/LICENSE.txt](DICOMGatedDynamicPET/Resources/Atlas/LICENSE.txt). Please cite Fonov et al., NeuroImage 2011;54:313-327 and NeuroImage 2009;47:S102 (ICBM
 2009c), and Manera et al., Scientific Data 2020;7:237 (CerebrA).
 
 ## Neuro PET Database Manager
@@ -593,28 +598,40 @@ database:
   (`stats/ssp.npz`): the brain surface (union of those regions) and, per group, the vertex mean / SD of every
   subject's smoothed map projected on it (Minoshima: the maximum along the inward normal, 0-20 mm, the ray stopped where it leaves the regions). Both are
   exported with the database, so a predefined database carries them too.
-- **Use mean as template** (a study specific template, iterated): the master mean map is copied as
-  `template.nii.gz` and the database's normalization becomes PET to PET. Run **Batch add subjects...** again with
-  **Normalize again the subjects already in the database** (every subject registered to the template and replaced),
-  check the QC pictures and compute the mean / SD again; repeat once more if needed (1-2 iterations; each starts
-  from the MNI-anchored first pass, so the template stays in the MNI space). The template stays fixed when the mean /
-  SD maps are computed again, and the Neuro workflow's PET to PET normalization uses it (else the master mean). It
-  is exported with the database.
+- **Build template (iterative)...** (step 3; a study specific template from the stored native images): pass 0
+  registers every subject to the database's **normalization target** (the PET to MR template method's template,
+  e.g. the synthetic PET), the mean of those is template 0; each next pass registers the natives to the previous
+  template starting from the last matrix, removes the group's mean drift (so the template stays anchored to the
+  MNI space) and resamples each subject once from its native image. It stops when the subjects move less than the
+  stop value (RMS of the brain box corners, 0.5 mm) or after the maximum number of passes (5). Templates are
+  `templates/pass_<k>.nii.gz`, the log `qc/template_iterations.csv`. The last template becomes `template.nii.gz`,
+  the database's normalization becomes PET to PET and the subjects' maps are replaced; then compute the mean / SD.
+- **Normalize again...** (step 2): every subject normalized again from its stored native image with the database's
+  current settings (e.g. after a new template), replacing its maps.
 - **Edit settings...**: the settings of the selected database in the creation form. A new reference region (or
   erosion) makes the reference mask again and, for a user defined database, the subjects' SUVR maps from their SUV
   maps; reference, smoothing or age group changes put the mean / SD maps out of date; a new name renames the folder.
   A predefined database keeps the settings of its maps (reference, smoothing, age groups). Changing the normalization
   warns that the subjects already in were normalized with the earlier settings.
-- **Batch add subjects...** (user defined databases): many normal subjects at once from a BIDS folder
+- **Add subjects...** (step 1, user defined databases): many normal subjects at once, from a BIDS folder
   (`sub-<id>[_ses-<session>]_pet.nii[.gz]` with the `.json` sidecars and `participants.tsv` for age and sex; pick the
-  session, e.g. `SUV`). Each image is normalized to the MNI template with the database's normalization settings
-  (PET/SPECT to an MR template; module defaults when the database has none, then stored with the first subject),
-  without a manual check, resampled onto the template grid and added like **Add this patient to a normal database**
-  (SUV and SUVR maps, the database's reference mask). Subject IDs already in the database are skipped, so a stopped
-  batch can be run again; a failing subject is logged and the batch goes on. The log is `qc/batch_<time>.csv`, and a
-  **QC picture** of each subject (the normalized PET over the MNI T1: axial, coronal, sagittal through the PET's
-  centre) is `qc/<id>_qc.png`. Check them and remove the badly normalized subjects (**Remove subjects...**: the rows
-  and maps of the selected subjects are deleted) before the mean / SD maps.
+  session, e.g. `SUV`) or from image files with a subject table (CSV / TSV with the columns id, age, sex; the file
+  name starts with the ID). A single patient is added from the Static Neuro workflow (Review: **Add this patient to
+  the DB**). Each **native image** (as loaded, before the normalization, with its tags) is stored in the database,
+  normalized to the MNI space with the database's normalization settings (module defaults when the database has
+  none, then stored with the first subject), without a manual check, resampled onto the database grid and added
+  (SUV and SUVR maps, the database's reference mask). Subject IDs already in the database are skipped unless
+  replacing is ticked; a failing subject is logged and the batch goes on. The log is `qc/batch_<time>.csv`, and a
+  **QC picture** of each subject (the normalized PET over the MNI T1: axial, coronal, sagittal) is
+  `qc/<id>_qc.png`. Check them and remove the badly normalized subjects (**Remove subjects...**: the selected
+  subjects' folders are deleted) before the mean / SD maps.
+- **Storage** (format 2): one folder per subject, `subjects/<id>/` with `<id>_native.nii.gz` and `<id>_native.json`
+  (the image as added and its tags), `transform.json` (native to MNI matrix of each template pass and the current
+  one), `<id>_SUV.nii.gz` and `<id>_SUVR.nii.gz` (MNI ICBM 152 2009c, 1 mm, the reference mask's grid, linear
+  interpolation, unsmoothed: the database's FWHM is applied to the mean / SD and to the patient). The **Pipeline**
+  rows of the details show the grid, the native images present, the normalization target, the template (how it was
+  built) and whether the mean / SD are up to date. A database of the older layout is moved to this one when it is
+  selected.
 - **Export as predefined...**: a user defined database as a .zip without its subject images (the number of
   subjects and an age summary are kept).
 - **Delete database** removes the folder from disk after a warning.
@@ -650,8 +667,9 @@ step; a step opens at its top. Without a CT / MR, Next goes from the data straig
    picked; the others are marked with `!` and warn when picked. The database's normalization settings become the
    defaults of the page; other settings are allowed but warned about. Then the normalization to the MNI ICBM 152
    2009c space, three ways: the PET/SPECT to an MR template (T1, grey matter probability, or the **synthetic PET**:
-   GM + 0.3 x WM smoothed 6 mm FWHM, made on first use next to the GM map), the **MR** to the MR template with the
-   same transform applied to the image (not a CT: its bone pulls the fit; with a CT the PET/SPECT is normalized), or
+   GM + 0.3 x WM smoothed 6 mm FWHM, made on first use next to the GM map), the **CT / MR** to the MR template with the
+   same transform applied to the image (a **CT** as its brain only: skull stripped, 0 - 80 HU, to the skull-stripped
+   template from the centres of mass, since the MR shows no skull; by default a CT study normalizes the PET/SPECT), or
    the PET/SPECT to a **PET template**: the master mean map of the picked database (it needs computed statistics).
    Whatever the method, the patient's CT / MR (and the other sequences) are normalized with the same transform: they
    lie on the image (registered in step 2, or a PET/CT, PET/MR). **Harden** resamples onto the template grid (1 mm)
@@ -683,14 +701,16 @@ step; a step opens at its top. Without a CT / MR, Next goes from the data straig
      are the database's (locked); for other regions of a user defined database computed from its subjects on the fly
      and cached in `<database>/cache/`; otherwise approximated from the mean / SD maps (the mean voxel SD is larger
      than the SD of a regional mean, so these scores are conservative). The optic chiasm is left out of the regions.
-   - **Display**: PET colors and window; score colors (SSP_Turbo (default), SSP_IceFire (black at 0), SSP_Rainbow,
+   - **Display**: PET colors and window; score colors (SSP_Turbo (default), SSP_IceFire (black at 0, cyan / light yellow at the ends), SSP_IceFire2 (white - blue, dark grey at 0, red - yellow), SSP_Rainbow,
      SSP_Rainbow10 (ten steps), SSP-PET-DICOM, SSP_HotIron, SSP_Inferno, SSP_Viridis, SSP_CoolWarm, SSP_GreyZero (grey
      around 0) and SSP_PurpleOrange, or Slicer's ColdToHotRainbow, DivergingBlueRed, Plasma or
      Viridis: below the normals the low end, above them the high end, 0 in the middle;
      the same choice for the score slices and the 3D-SSP) over a window symmetric about 0 (default +/- 7); PET colors
      default Inferno. **Scores colored**: all (default); *below the normals only*; or *below the threshold only*
      (**Threshold**, default -2). In the last two the color scale is reversed across minus the window .. 0 (the
-     lowest scores at its top end) and the other scores are grey. **Save display settings** keeps the display, 3D-SSP and fusion settings
+     lowest scores at its top end) and the other scores are grey; the maps with a neutral middle (SSP_IceFire,
+     SSP_IceFire2, SSP_CoolWarm, SSP_GreyZero, SSP_PurpleOrange, DivergingBlueRed) are not reversed or rescaled
+     (minus to plus the window, the other scores grey). **Save display settings** keeps the display, 3D-SSP and fusion settings
      (colors, score windows, score slices, outlines, legends, opacities; not the image windows or the layout) as
      the defaults of the next sessions; **Restore defaults** goes back to them, **Restore factory** to the module's
      own (and forgets the saved ones). **Score slices**: *Score as color, PET as brightness* (default: each voxel
@@ -824,3 +844,8 @@ scripts that use it keep working; only the title shown to users changed.
 ## License
 
 MIT, see [LICENSE](LICENSE).
+
+The atlas files in `DICOMGatedDynamicPET/Resources/Atlas` are not covered by it: they keep their own licenses (MNI ICBM
+152 2009c: the McConnell Brain Imaging Centre's permissive notice; CerebrA: CC0 1.0), given with the citations in
+[Resources/Atlas/LICENSE.txt](DICOMGatedDynamicPET/Resources/Atlas/LICENSE.txt). That file also holds the MIT license
+of the Chinese Brain PET Template (CNPET), the data normal databases shared for this extension may be built from.

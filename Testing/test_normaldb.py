@@ -126,6 +126,13 @@ def test_export_import(tmp_path):
                           "sd": "stats/master_sd.nii.gz"}}}
     normaldb.writeHeader(folder, h)
     package = str(tmp_path / "mine.zip")
+    with pytest.raises(ValueError, match="out of date"):       # stale statistics are not exported
+        normaldb.exportPredefined(folder, package)
+    h["statistics"]["stale"] = False
+    normaldb.writeHeader(folder, h)
+    errors, warnings, contents = normaldb.exportCheck(folder)
+    assert not errors and any("3D-SSP" in w for w in warnings) and any("regional" in w for w in warnings)
+    assert any("n = 2" in c for c in contents)
     normaldb.exportPredefined(folder, package)
     with zipfile.ZipFile(package) as archive:
         names = sorted(archive.namelist())
@@ -145,10 +152,57 @@ def test_export_import(tmp_path):
     normaldb.writeHeader(folder, h)
     normaldb.exportPredefined(folder, str(tmp_path / "noregions.zip"))
     assert "regions" not in normaldb.readPackage(str(tmp_path / "noregions.zip"))["statistics"]
-    (root / "mine" / "stats" / "regions.json").write_text("{}")
+    settings = {"regionAtlas": h["regionAtlas"], "growMm": 0.0, "growInto": normaldb.growInto(h),
+                "referenceRegion": h["referenceRegion"], "erodeReferenceMm": 0.0, "mapType": h["mapType"]}
+    document = {"maps": normaldb.subjectMapKey(h), "settings": settings,
+                "groups": {normaldb.MASTER: {"regions": {"Pons": [1.0, 0.1, 2]}}}}
+    (root / "mine" / "stats" / "regions.json").write_text(json.dumps(document))
     normaldb.exportPredefined(folder, str(tmp_path / "regions.zip"))
     with zipfile.ZipFile(str(tmp_path / "regions.zip")) as archive:
         assert "mine/stats/regions.json" in archive.namelist()
+    # regional statistics of another region atlas: not exported
+    document["settings"]["regionAtlas"] = "other"
+    (root / "mine" / "stats" / "regions.json").write_text(json.dumps(document))
+    with pytest.raises(ValueError, match="other settings"):
+        normaldb.exportPredefined(folder, str(tmp_path / "wrong.zip"))
+    document["settings"]["regionAtlas"] = h["regionAtlas"]
+    (root / "mine" / "stats" / "regions.json").write_text(json.dumps(document))
+    # the 3D-SSP projections: those of the statistics go in, older ones stop the export
+    from DICOMGatedDynamicPETLib import ssp
+    surface = {"points": np.zeros((3, 3)), "normals": np.ones((3, 3)), "triangles": np.array([[0, 1, 2]])}
+    groups = {normaldb.MASTER: {"mean": np.zeros(3), "sd": np.ones(3), "n": 2, "name": normaldb.MASTER}}
+    meta = {"depthMm": ssp.DEPTH_MM, "stepMm": ssp.STEP_MM, "clipToBrain": True, "surface": ssp.SURFACE_VERSION,
+            "fwhmMm": float(h.get("smoothingFwhmMm") or 0), "maps": normaldb.subjectMapKey(h),
+            "version": h.get("version", 1)}
+    ssp.write(str(root / "mine" / "stats" / "ssp.npz"), surface, groups, meta)
+    h["statistics"]["ssp"] = ssp.SSP_FILE
+    normaldb.writeHeader(folder, h)
+    errors, warnings, contents = normaldb.exportCheck(folder)
+    assert not errors and not any("3D-SSP" in w for w in warnings) and any("3D-SSP" in c for c in contents)
+    normaldb.exportPredefined(folder, str(tmp_path / "ssp.zip"))
+    with zipfile.ZipFile(str(tmp_path / "ssp.zip")) as archive:
+        assert "mine/stats/ssp.npz" in archive.namelist()
+    # the regions themselves (a segmentation) go in when stored; without them the export warns
+    assert any("regions themselves" in w for w in warnings)
+    (root / "mine" / "stats" / "regions.seg.nrrd").write_bytes(b"seg")
+    h["statistics"].update(regionsSegmentation="stats/regions.seg.nrrd", regionsReference="Pons (reference)")
+    normaldb.writeHeader(folder, h)
+    errors, warnings, contents = normaldb.exportCheck(folder)
+    assert not errors and not warnings and any("segmentation" in c for c in contents)
+    normaldb.exportPredefined(folder, str(tmp_path / "seg.zip"))
+    with zipfile.ZipFile(str(tmp_path / "seg.zip")) as archive:
+        assert "mine/stats/regions.seg.nrrd" in archive.namelist()
+    packed = normaldb.readPackage(str(tmp_path / "seg.zip"))
+    assert packed["statistics"]["regionsReference"] == "Pons (reference)"
+    from DICOMGatedDynamicPETLib import staticneuro as sn
+    assert sn.storedRegions(folder, h) == (os.path.join(folder, "stats/regions.seg.nrrd"), "Pons (reference)")
+    assert sn.storedRegions(folder, dict(h, statistics=dict(h["statistics"], stale=True))) is None
+    ssp.write(str(root / "mine" / "stats" / "ssp.npz"), surface, groups, dict(meta, surface=1))
+    with pytest.raises(ValueError, match="older surface"):
+        normaldb.exportPredefined(folder, str(tmp_path / "old.zip"))
+    # a region setting changed: the statistics of a user defined database become out of date
+    edited, changes = normaldb.editedHeader(normaldb.readHeader(folder), dict(h, regionGrowMm=2.0))
+    assert changes["statistics"] and edited["statistics"]["stale"]
 
 
 def test_import_refuses_unsafe_paths(tmp_path):
@@ -248,7 +302,8 @@ def test_normalization_settings(tmp_path):
 
 def test_add_subject(tmp_path):
     folder = normaldb.createDatabase(str(tmp_path), header(name="db"))
-    assert normaldb.subjectFileNames("sub/1") == ("subjects/sub_1_SUV.nii.gz", "subjects/sub_1_SUVR.nii.gz")
+    assert normaldb.subjectFileNames("sub/1") == ("subjects/sub_1/sub_1_SUV.nii.gz",
+                                                    "subjects/sub_1/sub_1_SUVR.nii.gz")
     norm = {"method": "pet", "template": "GM"}
     h = normaldb.addSubject(folder, {"id": "S1", "age": 52, "sex": "M", "referenceMean": "7.1",
                                      "reference": "Cerebellum Gray Matter (reference)"}, norm)
@@ -273,9 +328,9 @@ def test_add_subject(tmp_path):
 
 def test_remove_subjects(tmp_path):
     folder = normaldb.createDatabase(str(tmp_path), header(name="db"))
-    os.makedirs(os.path.join(folder, normaldb.SUBJECTS_DIR), exist_ok=True)
     for subjectId in ("S1", "S2"):
         suv, suvr = normaldb.subjectFileNames(subjectId)
+        os.makedirs(os.path.join(folder, normaldb.subjectDir(subjectId)), exist_ok=True)
         for relative in (suv, suvr):
             open(os.path.join(folder, relative), "wb").close()
         normaldb.addSubject(folder, {"id": subjectId, "suvFile": suv, "suvrFile": suvr})
@@ -284,8 +339,8 @@ def test_remove_subjects(tmp_path):
     normaldb.writeHeader(folder, h)
     assert normaldb.removeSubjects(folder, ["s1", "nope"]) == ["S1"]
     assert [r["id"] for r in normaldb.readSubjects(folder)] == ["S2"]
-    assert not os.path.exists(os.path.join(folder, "subjects", "S1_SUV.nii.gz"))
-    assert os.path.exists(os.path.join(folder, "subjects", "S2_SUVR.nii.gz"))
+    assert not os.path.exists(os.path.join(folder, "subjects", "S1"))
+    assert os.path.exists(os.path.join(folder, "subjects", "S2", "S2_SUVR.nii.gz"))
     assert normaldb.readHeader(folder)["statistics"]["stale"] is True
     assert normaldb.removeSubjects(folder, ["S1"]) == []
 
@@ -374,3 +429,56 @@ def test_freeze_template(tmp_path):
     assert open(path, "rb").read() == b"mean1"            # frozen
     assert normaldb.freezeTemplate(folder)["normalizationTemplate"]["iteration"] == 2
     assert open(path, "rb").read() == b"mean2"
+
+
+def test_migrate_layout(tmp_path):
+    folder = normaldb.createDatabase(str(tmp_path), header(name="db"))
+    h = normaldb.readHeader(folder)
+    h["formatVersion"] = 1
+    h.pop("storage", None)
+    normaldb.writeHeader(folder, h, touch=False)
+    os.makedirs(os.path.join(folder, "subjects"), exist_ok=True)
+    os.makedirs(os.path.join(folder, "transforms"), exist_ok=True)
+    for name in ("S1_SUV.nii.gz", "S1_SUVR.nii.gz"):
+        open(os.path.join(folder, "subjects", name), "wb").close()
+    json.dump({"pass": {}}, open(os.path.join(folder, "transforms", "S1.json"), "w"))
+    normaldb.writeSubjects(folder, [{"id": "S1", "suvFile": "subjects/S1_SUV.nii.gz",
+                                     "suvrFile": "subjects/S1_SUVR.nii.gz"}])
+    assert normaldb.migrateLayout(folder) == 3
+    row = normaldb.readSubjects(folder)[0]
+    assert row["suvFile"] == "subjects/S1/S1_SUV.nii.gz" and row["suvrFile"] == "subjects/S1/S1_SUVR.nii.gz"
+    assert os.path.isfile(os.path.join(folder, row["suvFile"]))
+    assert os.path.isfile(os.path.join(folder, normaldb.transformName("S1")))
+    assert not os.path.exists(os.path.join(folder, "transforms"))
+    h = normaldb.readHeader(folder)
+    assert h["formatVersion"] == normaldb.FORMAT_VERSION and h["storage"]["interpolation"] == "linear"
+    assert normaldb.migrateLayout(folder) == 0
+    assert normaldb.nativeCount(folder) == (0, 1)
+    native = normaldb.nativeFileName("S1")
+    open(os.path.join(folder, native), "wb").close()
+    row["nativeFile"] = native
+    normaldb.writeSubjects(folder, [row])
+    assert normaldb.nativeCount(folder) == (1, 1)
+    labels = [label for label, _ in normaldb.pipelineRows(folder, normaldb.readHeader(folder))]
+    assert "Native images" in labels and "Mean / SD" in labels
+
+
+def test_subject_table(tmp_path):
+    path = os.path.join(str(tmp_path), "subjects.tsv")
+    with open(path, "w") as f:
+        f.write("participant_id\tAge\tSex\nsub-01\t54\tM\nsub-02\t61\tF\n")
+    table = normaldb.readSubjectTable(path)
+    assert table["sub-01"]["age"] == "54" and table["sub-02"]["sex"] == "F"
+    match = normaldb.matchSubject("sub-02_ses-SUV_pet.nii", table)
+    assert match and match["id"] == "sub-02"
+    assert not normaldb.matchSubject("sub-03_pet", table)
+
+
+def test_normalization_target():
+    h = header()
+    assert normaldb.normalizationTarget(h) == "pseudoPET"
+    h["normalization"] = dict(normaldb.emptyNormalization(), method=normaldb.NORM_PET, template="GM")
+    assert normaldb.normalizationTarget(h) == "GM"
+    h["normalization"]["method"] = normaldb.NORM_PET_TEMPLATE
+    h["normalizationTemplate"] = {"target": "GM"}
+    assert normaldb.normalizationTarget(h) == "GM"

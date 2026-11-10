@@ -43,6 +43,7 @@ from DICOMGatedDynamicPETLib import registration as reg  # noqa: E402
 from DICOMGatedDynamicPETLib import resampling  # noqa: E402
 from DICOMGatedDynamicPETLib import ssp  # noqa: E402
 from DICOMGatedDynamicPETLib import staticneuro as sn  # noqa: E402
+from DICOMGatedDynamicPETLib import templatebuild as tb  # noqa: E402
 from DICOMGatedDynamicPETLib.hardendialog import hardenDialog  # noqa: E402
 from DynamicNeuroPET import (DynamicNeuroPETLogic, DynamicNeuroPETWidget, _button, _ijkToRas, _percentiles,  # noqa
                              _badgePixmap, _vtkMatrix, ATLAS_BILATERAL, ATLAS_FILE_ATTRIBUTE, METHOD_ANATOMY,
@@ -61,7 +62,7 @@ STEPS = (
     (STEP_REVIEW, None, "Review", "Comparison with the normal database"),
 )
 METHODS = ((METHOD_PET, "PET/SPECT to MR template (T1)"),
-           (METHOD_ANATOMY, "MR to MR template, same transform to the PET/SPECT (not with a CT)"),
+           (METHOD_ANATOMY, "CT/MR to MR template, same transform to the PET/SPECT (a CT: to the CT template if any)"),
            (METHOD_PET_TEMPLATE, "PET/SPECT to PET template (normal database mean)"))
 SETTINGS_DB_ROOT = "DICOMGatedDynamicPET/NeuroDatabase/RootFolder"     # shared with the Neuro PET Database Manager
 SETTINGS_IMPORT_FOLDER = "DICOMGatedDynamicPET/StaticNeuro/ImportFolder"
@@ -72,6 +73,13 @@ SOURCE_ATTRIBUTE = NEURO_PREFIX + "Source"      # a CT / MR normalized with the 
 # Harden of the normalization: the template grid and Overwrite by default
 NORM_HARDEN_GRIDS = tuple(sorted(NORMALIZATION_GRIDS, key=lambda option: option[1] != reg.OUTPUT_FIXED_GRID))
 NORM_HARDEN_ACTIONS = (("Overwrite", reg.OVERWRITE), ("Save separately", reg.SAVE_SEPARATELY))
+# the regions step layout: columns (view name prefix, view label, what lies under the PET), rows axial / coronal
+REGIONS_LAYOUT_ID = 7830
+REGIONS_VIEW_GROUP = 94
+REGIONS_COLUMNS = (("NeuroRegionsPet", "P", "pet"), ("NeuroRegionsT1", "M", "t1"),
+                   ("NeuroRegionsTemplate", "T", "template"))
+REGIONS_ORIENTATIONS = ("Axial", "Coronal")
+REGIONS_ORIENTATION_COLORS = {"Axial": "#F34A33", "Coronal": "#6EB04B"}
 STEP_ICON_SIZE = 22                     # px, the height of a step's icon (its pictogram and its state badge)
 STEP_GLYPH_COLOR = "#5b6770"
 REVIEW_SCORE_WINDOWS = (2.0, 3.0, 4.0, 5.0, 7.0, 10.0)     # the score windows of the review toolbar (+/- SD)
@@ -81,7 +89,7 @@ NORMALIZATION_ATTRIBUTE = NEURO_PREFIX + "Normalization"    # JSON of the settin
 REGISTERED_SUFFIX = " registered"
 ICON_PATH = os.path.join(_MODULE_DIR, "Resources", "Icons", "StaticNeuroPET.png")
 WARNING_STYLE = "<span style='color:#c0392b'>{}</span>"
-REVIEW_PET_COLORMAP = "Inferno"                  # the top row (the normalized PET / SPECT)
+REVIEW_PET_COLORMAP = "Inverted grey"                  # the top row (the normalized PET / SPECT)
 REVIEW_SSP_PATIENT_COLORMAP = "PET-DICOM"       # the 3D-SSP of the patient's projected values
 REVIEW_SCORE_COLORMAP = nr.SCORE_COLORMAPS[0]     # diverging: below the normals cold, above hot
 SCORE_COLOR_NODE = "Neuro review score colors"
@@ -96,6 +104,15 @@ SSP_MAX_EDGE_MM = 4.0                   # its triangles' longest edge: the surfa
 #                                         split again after it: vtkAdaptiveSubdivisionFilter leaves T-junctions, the
 #                                         surface in thousands of pieces whose normals point in or out at random)
 SSP_MODEL_NAME = "Neuro 3D-SSP surface"
+SSP_OUTLINE_NAME = "Neuro 3D-SSP region outline"
+SSP_OUTLINE_ATTRIBUTE = NEURO_PREFIX + "SSPOutline"
+SSP_OUTLINE_COLOR = (1.0, 1.0, 1.0)     # white
+SSP_OUTLINE_WIDTH = 2.0                 # px
+SSP_OUTLINE_LIFT_MM = 0.6               # the outline this far outside the surface: drawn over it
+SSP_PICK_MM = 4.0                       # the mouse on the surface: a vertex this near the picked point
+MOUSE_PRIORITY = 100.0                  # the review's mouse observers before Slicer's interaction
+CLICK_TOLERANCE_PX = 3                  # a right press moved less than this: a click (Slicer's menu), not a drag
+WINDOW_DRAG_MS = 60                     # a right drag's window applied at most this often
 SSP_MODEL_ATTRIBUTE = NEURO_PREFIX + "SSPModel"     # (view set)/(surface part) of the review's 3D-SSP models
 SSP_COLOR_NODE = "Neuro 3D-SSP colors"
 SSP_LOW_COLOR_NODE = "Neuro 3D-SSP low score colors"
@@ -122,6 +139,15 @@ class StaticNeuroPET(ScriptedLoadableModule):
         parent.acknowledgementText = (
             "Part of the DICOM Gated / Dynamic PET extension. MNI ICBM 152 nonlinear symmetric 2009c template: Fonov "
             "VS et al., NeuroImage 2011;54:313-327. CerebrA: Manera AL et al., Scientific Data 2020;7:237 (CC0).")
+
+
+def _fmt(value, digits=2):
+    """A number for a log, '' when it is not finite."""
+    try:
+        value = float(value)
+    except (TypeError, ValueError):
+        return ""
+    return f"{value:.{digits}f}" if np.isfinite(value) else ""
 
 
 def _sameRegion(segmentName, title):
@@ -538,11 +564,13 @@ class StaticNeuroPETLogic(DynamicNeuroPETLogic):
 
     # --- adding a patient to a normal database --------------------------------------------------
     def addSubject(self, folder, header, volume, subjectId, gridPath, age, sex, normalization, replace=False,
-                   segmentation=None, segmentId=None, referenceName=""):
+                   segmentation=None, segmentId=None, referenceName="", native=None):
         """Add a normalized volume to a user defined database: resampled onto the database grid (gridPath: its
-        reference mask, or the MNI brain mask; MNI 2009c 1 mm) and saved as subjects/<id>_SUV.nii.gz and its SUVR
-        map. The reference region (intensity normalization) is the segment segmentId of segmentation (the regions
-        of step 4) or, without it, the mask gridPath. Returns the row written into subjects.csv."""
+        reference mask, or the MNI brain mask; MNI 2009c 1 mm) and saved as subjects/<id>/<id>_SUV.nii.gz and its
+        SUVR map. The reference region (intensity normalization) is the segment segmentId of segmentation (the
+        regions of step 4) or, without it, the mask gridPath. native: the image before the normalization, stored too
+        (storeNative); a subject replaced without one keeps its stored native image. Returns the row written into
+        subjects.csv."""
         scene = slicer.mrmlScene
         gridArray, gridNode = self._loadLabels(gridPath)
         nodes = [gridNode]
@@ -569,7 +597,7 @@ class StaticNeuroPETLogic(DynamicNeuroPETLogic):
             suvrNode.SetIJKToRASMatrix(_vtkMatrix(_ijkToRas(gridNode)))
             slicer.util.updateVolumeFromArray(suvrNode, ratio)
             suvFile, suvrFile = normaldb.subjectFileNames(subjectId)
-            os.makedirs(os.path.join(folder, normaldb.SUBJECTS_DIR), exist_ok=True)
+            os.makedirs(os.path.join(folder, normaldb.subjectDir(subjectId)), exist_ok=True)
             for node, relative in ((suvNode, suvFile), (suvrNode, suvrFile)):
                 if not slicer.util.saveNode(node, os.path.join(folder, relative)):
                     raise RuntimeError(f"Could not write {relative}")
@@ -585,9 +613,95 @@ class StaticNeuroPETLogic(DynamicNeuroPETLogic):
                "suvFile": suvFile, "suvrFile": suvrFile, "referenceMean": f"{mean:.6g}",
                "reference": referenceName or "", "normalization": normaldb.normalizationText(normalization),
                "source": attributes.get(sn.IMPORTED_ATTRIBUTE) or volume.GetName()}
+        old = next((s for s in normaldb.readSubjects(folder) if s.get("id", "").lower() == subjectId.lower()), None)
+        if isinstance(native, str):        # stored already (storeNative)
+            row["nativeFile"] = native
+        elif native is not None:
+            row["nativeFile"] = self.storeNative(folder, subjectId, native, row["source"])
+        if old and replace:        # kept from the subject's previous row: its native image, scan date, source
+            for key in ("nativeFile", "scanDate", "source"):
+                if not row.get(key) and old.get(key):
+                    row[key] = old[key]
+            for key in ("suvFile", "suvrFile"):     # an older layout's maps are not left behind
+                previous = old.get(key)
+                if previous and previous != row[key] and os.path.isfile(os.path.join(folder, previous)):
+                    os.remove(os.path.join(folder, previous))
         normaldb.addSubject(folder, row, normalization, replace)
         logging.info(f"Static Neuro: '{subjectId}' added to {folder} (reference mean {mean:.4g})")
         return row
+
+    # --- the native images of a normal database -------------------------------------------------------
+    def storeNative(self, folder, subjectId, volume, source=""):
+        """Save the image as added (before the normalization) in the subject's folder with its tags
+        (subjects/<id>/<id>_native.nii.gz and .json). Returns the relative path."""
+        relative = normaldb.nativeFileName(subjectId)
+        path = os.path.join(folder, relative)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        node = volume
+        copy = None
+        if volume.GetParentTransformNode() is not None:
+            raise ValueError(f"'{volume.GetName()}' is under a transform: harden it first.")
+        try:
+            if os.path.realpath(volume.GetStorageNode().GetFileName() if volume.GetStorageNode() else "") != \
+                    os.path.realpath(path):
+                copy = slicer.modules.volumes.logic().CloneVolume(slicer.mrmlScene, volume, "native (temporary)")
+                node = copy
+                if not slicer.util.saveNode(node, path):
+                    raise RuntimeError(f"Could not write {relative}")
+        finally:
+            if copy is not None:
+                slicer.mrmlScene.RemoveNode(copy)
+        scanDate = self.dicomValues(volume, ("0008,0020",))["0008,0020"] or ""
+        normaldb.writeNativeInfo(folder, subjectId, {"id": subjectId, "source": source or volume.GetName(),
+                                                      "scanDate": scanDate, "stored": normaldb.now(),
+                                                      "attributes": self.attributes(volume)})
+        return relative
+
+    def loadNative(self, folder, subjectId, path=None):
+        """The stored native image of a subject as a volume, with its tags (as when it was added)."""
+        path = path or normaldb.nativePath(folder, next((s for s in normaldb.readSubjects(folder)
+                                                         if s.get("id", "").lower() == subjectId.lower()), None))
+        if not path:
+            raise ValueError(f"Subject '{subjectId}' has no native image in the database.")
+        node = slicer.util.loadVolume(path, {"show": False, "name": f"{subjectId} native"})
+        if node is None:
+            raise RuntimeError(f"Could not load {path}")
+        for key, value in (normaldb.readNativeInfo(folder, subjectId).get("attributes") or {}).items():
+            if value is not None:
+                node.SetAttribute(key, str(value))
+        return node
+
+    def _loadSource(self, folder, item):
+        """A batch item as a volume: (path, subject ID, extra) where the path is a stored native image of the
+        database (loadNative) or any image file (loadFromFile); extra {"age", "sex"} sets them when given."""
+        path, subjectId, extra = item
+        native = os.path.realpath(path).startswith(os.path.realpath(os.path.join(folder, normaldb.SUBJECTS_DIR))
+                                                   + os.sep)
+        volume = self.loadNative(folder, subjectId, path) if native else self.loadFromFile(path)
+        if extra and (extra.get("age") or extra.get("sex")):
+            age = sn.parseAge(extra.get("age"))
+            current, currentSex = self.ageAndSex(volume)
+            self.setAgeAndSex(volume, age if age is not None else current,
+                              sn.parseSex(extra.get("sex")) or currentSex)
+        return volume, native
+
+    @staticmethod
+    def batchItems(folder, files=None, table=None):
+        """Batch items (path, subject ID, extra): the given image files (the BIDS subject, or the subject of table
+        - normaldb.readSubjectTable - the file name fits, else the file name), or without files the database's
+        stored native images."""
+        if files is None:
+            return [(normaldb.nativePath(folder, s), s["id"], None) for s in normaldb.readSubjects(folder)
+                    if normaldb.nativePath(folder, s)]
+        items = []
+        for index, path in enumerate(files):
+            stem = sn.splitImageName(os.path.basename(path))[0]
+            row = normaldb.matchSubject(stem, table or {}) or normaldb.matchSubject(sn.bidsSubjectId(path),
+                                                                                    table or {})
+            subjectId = (row or {}).get("id") or sn.bidsSubjectId(path) or normaldb.safeName(stem) \
+                or f"subject{index}"
+            items.append((path, subjectId, row))
+        return items
 
     # --- the regions of a normal database and their values ----------------------------------------
     @staticmethod
@@ -618,13 +732,65 @@ class StaticNeuroPETLogic(DynamicNeuroPETLogic):
             masks[name] = np.asarray(array) > 0 if array is not None else np.zeros(shape, dtype=bool)
         return masks
 
-    def databaseRegionMasks(self, atlas, folder, header, gridNode):
-        """The regions of a database's region settings (CerebrA of the atlas folder) as masks on gridNode's grid."""
-        segmentation, _ = self.loadAtlasRegions(atlas, **self.databaseRegionArguments(folder, header))
+    savedRegionsReference = None        # the reference segment's name of the regions databaseRegionMasks() saved
+
+    def databaseRegionMasks(self, atlas, folder, header, gridNode, savePath=None):
+        """The regions of a database's region settings (CerebrA of the atlas folder) as masks on gridNode's grid.
+        savePath: the segmentation is written there too (.seg.nrrd; not written when it cannot be: the file is then
+        missing), its reference segment's name kept in savedRegionsReference."""
+        segmentation, referenceId = self.loadAtlasRegions(atlas, **self.databaseRegionArguments(folder, header))
         try:
-            return self.segmentMasks(segmentation, gridNode)
+            masks = self.segmentMasks(segmentation, gridNode)
+            if savePath:
+                self.savedRegionsReference = None
+                try:
+                    os.makedirs(os.path.dirname(savePath), exist_ok=True)
+                    if slicer.util.saveNode(segmentation, savePath) and referenceId:
+                        self.savedRegionsReference = segmentation.GetSegmentation().GetSegment(referenceId).GetName()
+                except Exception:
+                    logging.exception("Static Neuro: could not save the database's regions")
+            return masks
         finally:
+            storage = segmentation.GetStorageNode()
             slicer.mrmlScene.RemoveNode(segmentation)
+            if storage is not None and slicer.mrmlScene.IsNodePresent(storage):
+                slicer.mrmlScene.RemoveNode(storage)
+
+    def loadAtlasRegions(self, atlas, *args, storedRegions=None, **kwargs):
+        """DynamicNeuroPETLogic.loadAtlasRegions(); storedRegions (path, reference segment name; sn.storedRegions):
+        the regions stored with a normal database's statistics are loaded as they are instead."""
+        if storedRegions:
+            return self.loadStoredRegions(storedRegions[0], storedRegions[1], kwargs.get("target"))
+        return DynamicNeuroPETLogic.loadAtlasRegions(self, atlas, *args, **kwargs)
+
+    def loadStoredRegions(self, path, referenceName=None, target=None):
+        """The regions stored with a database's statistics (a .seg.nrrd) as a segmentation: a new one, or target
+        filled with them. Not tied to the file (never saved back onto the database). Returns (segmentation, reference
+        segment ID or None)."""
+        from DynamicNeuroPET import REGIONS_NAME
+        scene = slicer.mrmlScene
+        loaded = slicer.util.loadSegmentation(path)
+        if loaded is None:
+            raise RuntimeError(f"Could not load the database's regions ({path})")
+        storage = loaded.GetStorageNode()
+        if storage is not None:
+            scene.RemoveNode(storage)
+        if target is not None and scene.IsNodePresent(target) and target is not loaded:
+            target.GetSegmentation().DeepCopy(loaded.GetSegmentation())
+            scene.RemoveNode(loaded)
+            segmentation = target
+        else:
+            segmentation = loaded
+            segmentation.SetName(scene.GenerateUniqueName(REGIONS_NAME))
+        segmentation.CreateDefaultDisplayNodes()
+        segmentation.SetAttribute(NEURO_PREFIX + "Atlas", os.path.basename(path))
+        display = segmentation.GetDisplayNode()
+        if display is not None:
+            display.SetOpacity2DFill(0.3)
+            display.SetVisibility3D(False)
+        referenceId = self.segmentIdByName(segmentation, referenceName) if referenceName else None
+        logging.info(f"Static Neuro: '{segmentation.GetName()}' loaded from the database's regions ({path})")
+        return segmentation, referenceId
 
     @staticmethod
     def subjectRegionValues(folder, header, masks, progress=None):
@@ -1071,8 +1237,10 @@ class StaticNeuroPETLogic(DynamicNeuroPETLogic):
         return plan, settings
 
     def batchAdd(self, folder, files, atlas, qc=True, progress=None, replace=False):
-        """Add BIDS PET files (staticneuro.findPetFiles) of normal subjects to a user defined database, one after the
-        other: each loaded, normalized to the MNI template (or the database's own template, PET to PET) with the
+        """Add images of normal subjects to a user defined database, one after the other. files: batch items
+        (batchItems: path, subject ID, extra) - BIDS PET files, plain image files with a subject table, or the
+        database's stored native images (normalized again) - or plain paths (BIDS). Each loaded (and its native image
+        stored), normalized to the MNI template (or the database's own template, PET to PET) with the
         database's normalization settings (no manual check), resampled onto the template grid and added
         (logic.addSubject, the database's reference mask). IDs already in the database are skipped (replace: normalized
         again and replaced); a subject that fails is logged and the batch goes on. qc: a PNG of the
@@ -1105,9 +1273,10 @@ class StaticNeuroPETLogic(DynamicNeuroPETLogic):
         qcFolder = os.path.join(folder, "qc")
         os.makedirs(qcFolder, exist_ok=True)
         logPath = os.path.join(qcFolder, "batch_" + time.strftime("%Y%m%d_%H%M%S") + ".csv")
-        rows, stopped, total = [], False, len(files)
-        for index, path in enumerate(files):
-            subjectId = sn.bidsSubjectId(path) or normaldb.safeName(sn.splitImageName(path)[0]) or f"subject{index}"
+        items = [f if isinstance(f, (tuple, list)) else self.batchItems(folder, [f])[0] for f in files]
+        rows, stopped, total = [], False, len(items)
+        for index, item in enumerate(items):
+            path, subjectId = item[0], item[1]
             if progress is not None and not progress(index, total, f"{subjectId} ({index + 1} / {total})"):
                 stopped = True
                 break
@@ -1119,7 +1288,7 @@ class StaticNeuroPETLogic(DynamicNeuroPETLogic):
                 def stepProgress(step, steps, text, index=index, subjectId=subjectId):
                     return progress is None or progress(index, total, f"{subjectId} ({index + 1} / {total}): {text}")
                 try:
-                    added = self._batchSubject(folder, header, path, subjectId, template, mask, settings, plan,
+                    added = self._batchSubject(folder, header, item, subjectId, template, mask, settings, plan,
                                                gridPath, anatomy, qcFolder, stepProgress, replace)
                     if added is None:
                         row.update(status="stopped", message="stopped during the registration")
@@ -1140,15 +1309,17 @@ class StaticNeuroPETLogic(DynamicNeuroPETLogic):
             self._writeBatchLog(logPath, rows)
         return rows, logPath, stopped
 
-    def _batchSubject(self, folder, header, path, subjectId, template, mask, settings, plan, gridPath, anatomy,
+    def _batchSubject(self, folder, header, item, subjectId, template, mask, settings, plan, gridPath, anatomy,
                       qcFolder, progress, replace=False):
         """One subject of batchAdd(): the row added (with "notes"), None when the registration was stopped."""
         from DynamicPETRegistration import DynamicPETRegistrationLogic
         scene = slicer.mrmlScene
         nodes = []
         try:
-            volume = self.loadFromFile(path)
+            volume, isNative = self._loadSource(folder, item)
             nodes.append(volume)
+            # the image as added, before anything moves it (a stored native image is kept as it is)
+            native = None if isNative else self.storeNative(folder, subjectId, volume, item[0])
             notes = sn.unitWarnings(self.imageInfo(volume), header)
             method = plan["method"]
             result = self.normalize(volume, template, method, None, settings, mask, progress)
@@ -1168,7 +1339,9 @@ class StaticNeuroPETLogic(DynamicNeuroPETLogic):
             age, sex = self.ageAndSex(normalized)
             if age is None:
                 notes.append("age not known")
-            row = self.addSubject(folder, header, normalized, subjectId, gridPath, age, sex, plan, replace)
+            row = self.addSubject(folder, header, normalized, subjectId, gridPath, age, sex, plan, replace,
+                                  native=native)
+            tb.writeCurrent(folder, subjectId, result["linear"], template.GetName(), result.get("bspline") is not None)
             if anatomy is not None:
                 try:
                     self.writeQcPicture(os.path.join(qcFolder, normaldb.safeName(subjectId) + "_qc.png"), normalized,
@@ -1182,6 +1355,237 @@ class StaticNeuroPETLogic(DynamicNeuroPETLogic):
             for node in nodes:
                 if node is not None and scene.IsNodePresent(node):
                     scene.RemoveNode(node)
+
+    # --- iterative template of a normal database ---------------------------------------------------
+    def buildTemplate(self, folder, atlas, maxPasses=tb.MAX_PASSES, stopMm=tb.STOP_MM, qc=True, progress=None,
+                      items=None):
+        """An iterative (group-wise) template of a user defined database from the stored native images of its
+        subjects (items: batch items instead, see batchItems; see templatebuild): pass 0 registers each subject to
+        the database's MNI target (normaldb.normalizationTarget, e.g. the synthetic PET), the mean of their maps
+        (smoothed with the database's FWHM) is template 0; pass k registers each subject to template k-1, starting
+        from its previous matrix. After each pass the group's drift since pass 0 is taken out, the matrices are
+        saved (subjects/<id>/transform.json), every subject is resampled
+        once from its native image and replaced in the database, and the new template is saved
+        (templates/pass_<k>.nii.gz). Stops when the subjects move less than stopMm between two passes, after
+        maxPasses, or when progress(index, total, text) returns False. The last template becomes the database's
+        normalization template (PET to PET). Linear registration only. Returns (log rows, log path, stopped)."""
+        header = normaldb.readHeader(folder)
+        if header.get("kind") != normaldb.USER_DEFINED:
+            raise ValueError("A template is built for user defined databases only.")
+        gridPath = sn.referenceMaskPath(folder, header)
+        if not gridPath:
+            raise ValueError(f"'{header['name']}' has no reference mask (reference_mask in its folder).")
+        if items is None:
+            items = self.batchItems(folder)
+            have, count = normaldb.nativeCount(folder)
+            if have < count:
+                raise ValueError(f"{count - have} of the {count} subjects have no native image in the database: "
+                                 "add them again (replace) or remove them.")
+        files = [i[0] for i in items]
+        # pass 0: the database's PET to MR template normalization, to its MNI target (kept when it became PET to PET)
+        norm0 = dict(normaldb.emptyNormalization(), **(header.get("normalization") or {}))
+        norm0.update(method=normaldb.NORM_PET, template=normaldb.normalizationTarget(header))
+        plan, settings = self.batchPlan(dict(header, normalization=norm0), None)
+        plan = dict(plan, deformable=False)
+        if settings.get("engine") == reg.ENGINE_ITERATIVE:
+            settings.update(iterativeDeformable=False, steps=reg.iterativeSteps(plan["linear"], False))
+        else:
+            steps = [s for s in settings["steps"] if s != "BSpline"] or ["Affine"]
+            settings.update(steps=steps, resample=list(settings.get("resample") or [True] * len(steps))[:len(steps)])
+        key = plan["template"]
+        templatePath = atlas.get(key)
+        if not templatePath and key == neuro.PSEUDO_PET and neuro.canMakeTemplate(atlas, key):
+            templatePath = self.ensurePseudoPet(atlas)
+        if not templatePath:
+            raise ValueError(f"The template '{key}' (pass 0) is not in the atlas folder.")
+        mniTemplate = self.loadAtlasVolume(templatePath, name=f"MNI ICBM152 2009c {key}")
+        brainMask = None
+        if plan["brainMask"] and neuro.BRAIN_MASK in atlas:
+            brainMask = self.loadAtlasVolume(atlas[neuro.BRAIN_MASK], name="MNI ICBM152 2009c brain mask")
+        anatomy = None
+        if qc and "T1" in atlas:
+            t1 = self.loadAtlasVolume(atlas["T1"], name="MNI ICBM152 2009c T1")
+            anatomy = (sn.rasArray(slicer.util.arrayFromVolume(t1), _ijkToRas(t1)), tuple(_ijkToRas(t1).ravel()))
+        qcFolder = os.path.join(folder, "qc")
+        os.makedirs(qcFolder, exist_ok=True)
+        logPath = os.path.join(qcFolder, tb.ITERATIONS_LOG)
+        ids = {i[0]: i[1] for i in items}
+        itemOf = {i[0]: i for i in items}
+        rows, initial, previous, previousTemplate, isConverged = [], {}, {}, None, False
+        target, method, stepSettings, stopped, lastPass = mniTemplate, METHOD_PET, dict(settings), False, None
+        targetName = mniTemplate.GetName()
+        try:
+            for passIndex in range(int(maxPasses)):
+                start = time.time()
+                todo = [p for p in files if passIndex == 0 or ids[p] in previous]
+                total = len(todo)
+                # the brain mask strips the target (the MNI template, or a template on its grid)
+                mask = brainMask
+                if mask is not None and target.GetImageData().GetDimensions() != mask.GetImageData().GetDimensions():
+                    mask = None
+                current, failed = {}, []
+                for index, path in enumerate(todo):
+                    subjectId = ids[path]
+                    label = f"Pass {passIndex}: registering {subjectId} ({index + 1} / {total})"
+                    if progress is not None and not progress(index, total, label):
+                        stopped = True
+                        break
+                    try:
+                        matrix = self._templateRegister(folder, itemOf[path], target, method, stepSettings, mask,
+                                                        previous.get(subjectId),
+                                                        lambda s, n, t, i=index, text=label: progress is None
+                                                        or progress(i, total, f"{text}: {t}"))
+                    except Exception as error:
+                        logging.exception(f"Static Neuro template: {path} failed in pass {passIndex}")
+                        failed.append(f"{subjectId}: {error}")
+                        matrix = previous.get(subjectId)
+                    if matrix is False:
+                        stopped = True
+                        break
+                    if matrix is not None:
+                        current[subjectId] = matrix
+                if stopped or len(current) < 2:
+                    if not stopped:
+                        raise ValueError(f"Pass {passIndex}: fewer than two subjects registered.")
+                    break
+                if passIndex == 0:
+                    initial, drift = dict(current), np.eye(4)
+                else:
+                    current, drift = tb.driftCorrected(current, initial)
+                byId = {ids[p]: p for p in todo}
+                for index, (subjectId, matrix) in enumerate(current.items()):
+                    tb.writeTransform(folder, subjectId, passIndex, matrix, byId.get(subjectId, ""))
+                    if progress is not None and not progress(index, len(current), f"Pass {passIndex}: resampling "
+                                                             f"{subjectId} ({index + 1} / {len(current)})"):
+                        stopped = True
+                        break
+                    self._templateResample(folder, header, itemOf[byId[subjectId]], subjectId, matrix, mniTemplate,
+                                           gridPath,
+                                           dict(plan, method=method if passIndex else normaldb.NORM_PET,
+                                                templatePass=passIndex),
+                                           anatomy, qcFolder)
+                    header = normaldb.readHeader(folder)
+                if stopped:
+                    break
+                templateArray, geometry = self._meanSubjectMap(folder, header, list(current))
+                relative = tb.templateFile(passIndex)
+                self._saveArray(templateArray, geometry, os.path.join(folder, relative))
+                moved = tb.passStatistics(current, previous) if passIndex else {"n": 0, "meanMm": "", "maxMm": ""}
+                row = {"pass": passIndex, "target": targetName, "subjects": len(current), "failed": len(failed),
+                       "meanMoveMm": _fmt(moved["meanMm"]), "maxMoveMm": _fmt(moved["maxMm"]),
+                       "driftScale": _fmt(tb.scaleOf(drift), 4), "driftShiftMm": _fmt(float(np.linalg.norm(
+                           drift[:3, 3])), 2),
+                       "templateCorrelation": _fmt(tb.correlation(templateArray, previousTemplate), 5)
+                       if previousTemplate is not None else "",
+                       "seconds": f"{time.time() - start:.0f}", "failures": failed}
+                rows.append(row)
+                tb.writeIterationsLog(logPath, rows)
+                logging.info(f"Static Neuro template: pass {passIndex} {row}")
+                lastPass = passIndex
+                previous, previousTemplate = current, templateArray
+                if passIndex > 0 and tb.converged(moved, stopMm):
+                    isConverged = True
+                    break
+                if target is not mniTemplate:
+                    slicer.mrmlScene.RemoveNode(target)
+                target = slicer.util.loadVolume(os.path.join(folder, relative),
+                                                {"show": False, "name": f"{header['name']} template pass {passIndex}"})
+                targetName = os.path.basename(relative)
+                method = METHOD_PET_TEMPLATE
+                stepSettings = dict(settings, initialization="Off")
+        finally:
+            if target is not mniTemplate and slicer.mrmlScene.IsNodePresent(target):
+                slicer.mrmlScene.RemoveNode(target)
+        if lastPass is not None:
+            normaldb.useTemplate(folder, os.path.join(folder, tb.templateFile(lastPass)), n=len(previous),
+                                 iteration=lastPass, built="iterative", passes=lastPass + 1, converged=isConverged)
+        return rows, logPath, stopped
+
+    def _templateRegister(self, folder, item, target, method, settings, mask, start, progress):
+        """A subject's native image registered to target, starting from matrix start (None: the settings'
+        initialization): its matrix (native to target, to parent); False when stopped."""
+        volume = self._loadSource(folder, item)[0]
+        result = None
+        try:
+            startMatrix = np.eye(4) if start is None else np.asarray(start, dtype=float)
+            if start is not None:
+                volume.SetIJKToRASMatrix(_vtkMatrix(startMatrix @ _ijkToRas(volume)))
+            result = self.normalize(volume, target, method, None, settings, mask, progress)
+            if result.get("stopped") or not result.get("steps"):
+                return False
+            return np.asarray(result["linear"], dtype=float) @ startMatrix
+        finally:
+            for node in (volume, (result or {}).get("bspline")):
+                if node is not None and slicer.mrmlScene.IsNodePresent(node):
+                    slicer.mrmlScene.RemoveNode(node)
+
+    def _templateResample(self, folder, header, item, subjectId, matrix, gridTemplate, gridPath, plan, anatomy,
+                          qcFolder):
+        """A subject's native image resampled once through matrix onto the template grid and replaced in the
+        database (with its QC picture)."""
+        from DynamicPETRegistration import DynamicPETRegistrationLogic
+        scene = slicer.mrmlScene
+        nodes = []
+        try:
+            volume, isNative = self._loadSource(folder, item)
+            nodes.append(volume)
+            native = None if isNative else self.storeNative(folder, subjectId, volume, item[0])
+            chain = DynamicPETRegistrationLogic.transformNode("vtkMRMLLinearTransformNode", "Template normalization")
+            nodes.append(chain)
+            chain.SetMatrixTransformToParent(_vtkMatrix(matrix))
+            description = f"Iterative template, pass {plan.get('templatePass')} (linear)"
+            _, normalized, _, _ = self.harden(volume, gridTemplate, chain, reg.SAVE_SEPARATELY, reg.OUTPUT_FIXED_GRID,
+                                              None, "Linear", description, plan["method"])
+            nodes.append(normalized)
+            normalized.SetAttribute(NORMALIZATION_ATTRIBUTE, json.dumps(plan))
+            age, sex = self.ageAndSex(normalized)
+            self.addSubject(folder, header, normalized, subjectId, gridPath, age, sex, plan, True, native=native)
+            if anatomy is not None:
+                try:
+                    self.writeQcPicture(os.path.join(qcFolder, normaldb.safeName(subjectId) + "_qc.png"), normalized,
+                                        anatomy)
+                except Exception:
+                    logging.exception(f"Static Neuro template: no QC picture of {subjectId}")
+        finally:
+            for node in nodes:
+                if node is not None and scene.IsNodePresent(node):
+                    scene.RemoveNode(node)
+
+    @staticmethod
+    def _meanSubjectMap(folder, header, subjectIds):
+        """(mean array, IJK-to-RAS 4x4) of the subjects' maps (SUVR or SUV by the map type), each smoothed with the
+        database's FWHM."""
+        mapKey = normaldb.subjectMapKey(header)
+        wanted = set(subjectIds)
+        running, geometry = normaldb.RunningStatistics(), None
+        fwhm = float(header.get("smoothingFwhmMm") or 0)
+        for subject in normaldb.readSubjects(folder):
+            if subject["id"] not in wanted or not subject.get(mapKey):
+                continue
+            node = slicer.util.loadVolume(os.path.join(folder, subject[mapKey]), {"show": False})
+            if node is None:
+                continue
+            try:
+                geometry = _ijkToRas(node) if geometry is None else geometry
+                running.add(normaldb.smoothMap(slicer.util.arrayFromVolume(node), fwhm,
+                                               tuple(float(x) for x in node.GetSpacing())[::-1]))
+            finally:
+                slicer.mrmlScene.RemoveNode(node)
+        if running.n < 2:
+            raise ValueError("The template needs the maps of at least two subjects.")
+        return np.asarray(running.mean(), dtype=np.float32), geometry
+
+    @staticmethod
+    def _saveArray(array, ijkToRas, path):
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        node = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLScalarVolumeNode", "template (temporary)")
+        try:
+            node.SetIJKToRASMatrix(_vtkMatrix(ijkToRas))
+            slicer.util.updateVolumeFromArray(node, array)
+            if not slicer.util.saveNode(node, path):
+                raise RuntimeError(f"Could not write {path}")
+        finally:
+            slicer.mrmlScene.RemoveNode(node)
 
     @staticmethod
     def writeQcPicture(path, volume, anatomy):
@@ -1342,15 +1746,16 @@ class StaticNeuroPETWidget(DynamicNeuroPETWidget):
 
     def _fillWindowMenu(self, menu):
         menu.clear()
-        menu.addSection("Score window (slices and 3D-SSP)")
-        current = float(self.scoreMaximumSpin.value)
-        for maximum in REVIEW_SCORE_WINDOWS:
-            self._menuChoice(menu, f"\u00b1 {maximum:g} SD", abs(current - maximum) < 1e-6
-                             and abs(float(self.sspMaximumSpin.value) - maximum) < 1e-6,
-                             lambda v=maximum: self._setScoreWindows(v))
+        for title, spin in (("Score window of the slices", self.scoreMaximumSpin),
+                            ("Score window of the 3D-SSP", self.sspMaximumSpin)):     # each its own
+            menu.addSection(title)
+            current = float(spin.value)
+            for maximum in REVIEW_SCORE_WINDOWS:
+                self._menuChoice(menu, f"\u00b1 {maximum:g} SD", abs(current - maximum) < 1e-6,
+                                 lambda v=maximum, w=spin: setattr(w, "value", v))
         menu.addSection("Image windows")
         reset = menu.addAction("PET: automatic (0 - 99.5th percentile)")
-        reset.connect("triggered()", self._initPetWindow)
+        reset.connect("triggered()", lambda: self._initPetWindow(percentile=True))
         full = menu.addAction("PET: 0 - maximum")
         full.connect("triggered()", lambda: self.petWindowRange.setValues(0.0, self.petWindowRange.maximum))
         patient = menu.addAction("3D-SSP patient values: automatic")
@@ -1384,17 +1789,17 @@ class StaticNeuroPETWidget(DynamicNeuroPETWidget):
             self._menuChoice(menu, "Fusion with an anatomical image", self.fusionCheck.checked,
                              lambda: setattr(self.fusionCheck, "checked", not self.fusionCheck.checked))
 
-    # --- navigation: no CT/MR, no registration step ----------------------------------------------------------
-    def moveStep(self, delta):
-        """Back / Next; the CT/MR registration is skipped when there is no CT/MR."""
-        keys = [k for k, _, _, _ in self.STEPS]
-        index = keys.index(self.current) + delta
-        while 0 <= index < len(keys) and keys[index] == STEP_REG and self.anatomy() is None:
-            index += 1 if delta > 0 else -1
-        if 0 <= index < len(keys):
-            self.showStep(keys[index])
+    # --- navigation: no CT/MR, no registration step; a step opens once the steps it needs are done ----------
+    STEP_NEEDS = {STEP_REG: "Pick the PET / SPECT and its CT / MR in step 1 (Data) first.",
+                  STEP_NORM: "Pick the PET / SPECT in step 1 (Data) first (the CT/MR registration is not needed).",
+                  STEP_REGIONS: "Normalize the image first (Normalization step).",
+                  STEP_REVIEW: "Load the regions first (Regions step)."}
 
-    # --- the CT/MR: an MR may be normalized (to the MR template), a CT not ------------------------------------
+    def _skipStep(self, key):
+        """Back / Next pass over the CT/MR registration when there is no CT/MR."""
+        return key == STEP_REG and self.anatomy() is None
+
+    # --- the CT/MR: an MR is normalized to the MR template as it is, a CT as its brain only (skull stripped) -----
     def contrast(self):
         """(contrast, reason) of the CT/MR: the user's choice, else read from the DICOM tags (once per CT/MR)."""
         chosen = self.contrastCombo.currentData if hasattr(self, "contrastCombo") else ""
@@ -1407,20 +1812,24 @@ class StaticNeuroPETWidget(DynamicNeuroPETWidget):
         return self._contrastFor[1]
 
     def _anatomyIsMr(self):
-        """Whether the CT/MR can be normalized to the MR template: an MR (a CT fits its bone to the brain)."""
+        """Whether the CT/MR is an MR: then it is the default way to the MR template (a CT can be picked: its brain
+        only)."""
         return self.anatomy() is not None and self.contrast()[0] != "CT"
 
     def _updateMethodItems(self):
-        """The MR to MR template method offered only with an MR; with a CT (or none) the PET/SPECT is normalized."""
+        """The CT/MR to MR template method offered with a CT/MR (a CT is registered as its brain only, skull stripped,
+        to the skull-stripped template); without one the PET/SPECT is normalized."""
         if not hasattr(self, "methodCombo"):
             return
-        allowed = self._anatomyIsMr()
+        allowed = self.anatomy() is not None
         index = self.methodCombo.findData(METHOD_ANATOMY)
         item = self.methodCombo.model().item(index) if index >= 0 else None
         if item is not None:
             item.setEnabled(allowed)
-            item.setToolTip("" if allowed else ("Pick an MR in step 1: a CT is not normalized to the MR template (its "
-                                                "bone pulls the fit); the PET/SPECT is, and the CT follows it."))
+            item.setToolTip("Pick the CT/MR in step 1." if not allowed else (
+                "With scct_unsmooth (CT template) in the atlas folder the CT is registered to it (CT to CT), its MNI "
+                "space put on the ICBM 2009c through scgrey; else with its bone (over 100 HU) black as in the MR."
+                if self._anatomyIsCt() else ""))
         if not allowed and self.method() == METHOD_ANATOMY and self.normResult is None:
             self.methodCombo.setCurrentIndex(self.methodCombo.findData(METHOD_PET))
 
@@ -1669,8 +2078,9 @@ class StaticNeuroPETWidget(DynamicNeuroPETWidget):
         else:
             contrast, reason = self.contrast()
             if contrast == "CT":
-                self.anatomyInfo.text = (f"Recognised as <b>CT</b> ({reason}): the PET/SPECT is normalized and the CT "
-                                         "follows it (a CT is not normalized to the MR template).")
+                self.anatomyInfo.text = (f"Recognised as <b>CT</b> ({reason}): by default the PET/SPECT is "
+                                         "normalized and the CT follows it; 'CT/MR to MR template' registers the "
+                                         "CT to the CT template (scct_unsmooth) when it is in the atlas folder.")
             else:
                 self.anatomyInfo.text = (f"Recognised as <b>{contrast}</b> ({reason})." if contrast else
                                          f"Contrast not recognised ({reason}); the T1 template is used unless you "
@@ -2058,10 +2468,6 @@ class StaticNeuroPETWidget(DynamicNeuroPETWidget):
             return None
 
     def onNormalize(self):
-        if self.method() == METHOD_ANATOMY and self.anatomy() is not None and not self._anatomyIsMr():
-            slicer.util.warningDisplay("A CT is not normalized to the MR template (its bone pulls the fit). Normalize "
-                                       "the PET/SPECT: the CT follows it.", windowTitle="Normalization")
-            return
         settings = self.normalizationSettings()
         DynamicNeuroPETWidget.onNormalize(self)
         if self.normResult is not None:
@@ -2345,6 +2751,10 @@ class StaticNeuroPETWidget(DynamicNeuroPETWidget):
         header = self._header(folder)
         if header is None or not self._locked():
             return arguments
+        stored = sn.storedRegions(folder, header)
+        if stored:              # the regions the database's statistics were made on, as they are
+            arguments["storedRegions"] = stored
+            return arguments
         settings = sn.regionSettings(folder, header)
         if settings["referenceMaskPath"]:
             arguments["referenceMaskPath"] = settings["referenceMaskPath"]
@@ -2362,6 +2772,20 @@ class StaticNeuroPETWidget(DynamicNeuroPETWidget):
         if hasattr(self, "dbCombo"):
             self._fillDatabases()
             self._applyLock()
+            folder = self._database()
+            header = self._header(folder)
+            if header is not None and self._locked() and sn.storedRegions(folder, header) \
+                    and self.volume() is not None:
+                # the database's own regions: the CerebrA files of the atlas folder are not needed
+                self.loadRegionsButton.enabled = True
+                normalized = bool(self.volume().GetAttribute(NEURO_PREFIX + "Template"))
+                segmentation = self.node("Segmentation")
+                self.regionsInfo.text = " ".join(
+                    ([] if normalized else ["<span style='color:#c0392b'>The image is not normalized yet "
+                                            "(Normalization step).</span>"])
+                    + [f"The regions stored with '{header['name']}' are loaded (the ones its statistics were made "
+                       "on)."]
+                    + ([f"Loaded: '{segmentation.GetName()}'."] if segmentation is not None else []))
 
     # --- page 5: review (placeholder) and adding the patient to a database ------------------------------
     def _buildReviewPage(self):
@@ -2466,7 +2890,8 @@ class StaticNeuroPETWidget(DynamicNeuroPETWidget):
         self.scoreSideCombo.toolTip = (
             "Which scores are colored (score slices and 3D-SSP): all; only those below the normals "
             "(hypometabolism / hypoperfusion); or only those below the threshold. In the last two the color scale is "
-            "reversed across minus the window .. 0 (the lowest scores at its top end) and the rest is grey.")
+            "reversed across minus the window .. 0 (the lowest scores at its top end) and the rest is grey; maps "
+            "with a neutral middle (IceFire, CoolWarm, GreyZero, PurpleOrange, DivergingBlueRed) stay as they are.")
         view.addRow("Scores colored:", self.scoreSideCombo)
         self.thresholdSpin = qt.QDoubleSpinBox()
         self.thresholdSpin.setRange(-10.0, 0.0)
@@ -2523,7 +2948,7 @@ class StaticNeuroPETWidget(DynamicNeuroPETWidget):
                                              "black")
         view.addRow("Score background:", self.scoreBackgroundCombo)
         self.outlineCheck = qt.QCheckBox("Show the region outlines")
-        self.outlineCheck.checked = True
+        self.outlineCheck.checked = False
         self.outlineCheck.toolTip = (f"The regions as {REVIEW_OUTLINE_THICKNESS} px outlines on the PET and the score "
                                      "slices. Click a region in the table to show it alone for a few seconds.")
         view.addRow(self.outlineCheck)
@@ -2533,6 +2958,7 @@ class StaticNeuroPETWidget(DynamicNeuroPETWidget):
         view.addRow(self.legendCheck)
         layout.addWidget(viewBox)
         self._buildSspBox(layout)
+        layout.addWidget(self._buildMouseHelp())
 
         fusionBox = qt.QGroupBox("Fusion")
         fusion = qt.QFormLayout(fusionBox)
@@ -2628,6 +3054,7 @@ class StaticNeuroPETWidget(DynamicNeuroPETWidget):
                 "legends": self.legendCheck, "sspMap": self.sspMapCombo, "sspSource": self.sspSourceCombo,
                 "sspColors": self.sspColorCombo, "sspMaximum": self.sspMaximumSpin,
                 "sspPatientColors": self.sspPatientColorCombo, "sspLighting": self.sspLightingCheck,
+                "sspOutlines": self.sspOutlineCheck,
                 "fusionOpacity": self.fusionOpacity, "scoreOpacity": self.scoreOpacity}
 
     def _displayValues(self):
@@ -2937,13 +3364,17 @@ class StaticNeuroPETWidget(DynamicNeuroPETWidget):
         reference = {k: [v[0], v[1], v[2] if len(v) > 2 and v[2] is not None else n]
                      for k, v in (result.get("reference") or {}).items()}
         rows = nr.tableRows(result["values"], result["suv"], reference, kind)
+        self._hoverValues = {row[0]: (row[1], row[6]) for row in rows}     # name: (SUVmean, score) at the mouse
+        self._hoverKind = kind
         referenceKey = (result.get("header") or {}).get("referenceRegion")
         rows = [row for row in rows if not nr.isReferenceRegion(row[0], referenceKey)]     # the reference left out
         units = result["header"].get("mapType") if result.get("header") else "SUVR"
         compared = result.get("ratio") and units in (normaldb.MAP_SUVR, normaldb.MAP_RATIO, "SUVR")
-        columns = ["Region", "SUVmean"] + ([units or "SUVR"] if compared else [])
-        if result.get("header") is not None:
-            columns += ["Normal (mean ± SD)", kind]
+        scored = result.get("header") is not None
+        # the score (the most important) right after the region's name
+        columns = ["Region"] + ([kind] if scored else []) + ["SUVmean"] + ([units or "SUVR"] if compared else [])
+        if scored:
+            columns += ["Normal (mean ± SD)"]
         table = vtk.vtkTable()
         arrays = []
         for name in columns:
@@ -2964,15 +3395,19 @@ class StaticNeuroPETWidget(DynamicNeuroPETWidget):
 
         cellRows = []
         for name, suv, value, mean, sd, _, score in rows:
-            cells = [name, text(suv)] + ([text(value)] if compared else [])
-            numbers = [name, rounded(suv)] + ([rounded(value)] if compared else [])
-            if result.get("header") is not None:
+            cells, numbers = [name], [name]
+            if scored:
+                cells.append("" if score is None else f"{score:.2f}")
+                numbers.append(None if score is None else round(float(score), 2))
+            cells += [text(suv)] + ([text(value)] if compared else [])
+            numbers += [rounded(suv)] + ([rounded(value)] if compared else [])
+            if scored:
                 normal = text(mean)
                 if normal and text(sd):         # mean and SD with the same decimals (2; none from 100)
                     decimals = 2 if abs(float(mean)) < 100 else 0
                     normal = f"{float(mean):.{decimals}f} ± {float(sd):.{decimals}f}"
-                cells += [normal, "" if score is None else f"{score:.2f}"]
-                numbers += [normal or None, None if score is None else round(float(score), 2)]
+                cells.append(normal)
+                numbers.append(normal or None)
             for array, cell in zip(arrays, cells):
                 array.InsertNextValue(cell)
             cellRows.append(numbers)
@@ -3151,6 +3586,13 @@ class StaticNeuroPETWidget(DynamicNeuroPETWidget):
         display.EndModify(wasModifying)
         qt.QTimer.singleShot(REVIEW_FLASH_MS, lambda: self._endFlash(token))
         self._jumpToRegion(segmentation, segmentId)
+        try:        # its outline on the 3D-SSP too
+            names = ((self.reviewResult or {}).get("labels") or (None, []))[1]
+            name = segmentation.GetSegmentation().GetSegment(segmentId).GetName()
+            if name in names:
+                self._sspOutline(names.index(name) + 1)
+        except Exception:
+            logging.debug("Static Neuro: no 3D-SSP outline of the region", exc_info=True)
 
     def _regionPoint(self, segmentation, segmentId):
         """RAS of a point inside a region: the voxel of the compared regions nearest to its centroid, else the
@@ -3185,6 +3627,7 @@ class StaticNeuroPETWidget(DynamicNeuroPETWidget):
             return
         self._flash = None
         _, display, saved = flash
+        self._sspOutline(None)
         if not slicer.mrmlScene.IsNodePresent(display):
             return
         wasModifying = display.StartModify()
@@ -3236,9 +3679,10 @@ class StaticNeuroPETWidget(DynamicNeuroPETWidget):
 
     def _scoreColors(self, label=None, maximum=None, side=None):
         """(RGBA, (low, high)) of the score colors: the score slices' (or a color map label's, a window's, a side's)."""
-        return nr.scoreColors(self._rgbOf(label or self.scoreColorCombo.currentText), side or self._scoreSide(),
+        label = label or self.scoreColorCombo.currentText
+        return nr.scoreColors(self._rgbOf(label), side or self._scoreSide(),
                               float(self.scoreMaximumSpin.value if maximum is None else maximum),
-                              float(self.thresholdSpin.value))
+                              float(self.thresholdSpin.value), neutralMidpoint=label in nr.NEUTRAL_MIDPOINT_COLORMAPS)
 
     def _applyScoreDisplay(self):
         if self.scoreNode is None or not slicer.mrmlScene.IsNodePresent(self.scoreNode):
@@ -3281,9 +3725,20 @@ class StaticNeuroPETWidget(DynamicNeuroPETWidget):
         node.SetIJKToRASMatrix(_vtkMatrix(_ijkToRas(result["grid"])))
         factor = nr.tFactor(result.get("n")) if self._scoreKind() == nr.SCORE_T else 1.0
         rgba, (low, high) = self._scoreColors()
-        rgb = nr.brightnessColors(np.asarray(result["z"], np.float32) / np.float32(factor), result["brightness"],
-                                  rgba, high, low)
-        slicer.util.updateVolumeFromArray(node, rgb)
+        # the scores quantized and the brightness as 0..255 once per comparison and score: a window change is then
+        # a table look-up and an integer product (a right drag on the score row redraws it many times)
+        key = (id(result), id(result["z"]), factor)
+        cache = getattr(self, "_brightnessCache", None)
+        if cache is None or cache[0] != key:
+            cache = self._brightnessCache = (key, nr.quantizedBrightness(
+                np.asarray(result["z"], np.float32) / np.float32(factor), result["brightness"]))
+        current = slicer.util.arrayFromVolume(node) if node.GetImageData() is not None else None
+        if (current is not None and current.shape == cache[1]["flat"].shape + (3,) and current.dtype == np.uint8
+                and current.flags["C_CONTIGUOUS"]):
+            nr.fastBrightnessColors(cache[1], rgba, high, low, out=current)       # in place: no new image
+            slicer.util.arrayFromVolumeModified(node)
+        else:
+            slicer.util.updateVolumeFromArray(node, nr.fastBrightnessColors(cache[1], rgba, high, low))
         if node.GetDisplayNode() is None:
             node.CreateDefaultDisplayNodes()
         display = node.GetDisplayNode()
@@ -3291,7 +3746,8 @@ class StaticNeuroPETWidget(DynamicNeuroPETWidget):
             display.SetAutoWindowLevel(False)
             display.SetWindowLevelMinMax(0.0, 255.0)
 
-    def _initPetWindow(self):
+    def _initPetWindow(self, percentile=False):
+        """The PET window: 0 to the maximum (default), or 0 to the 99.5th percentile."""
         volume = self.volume()
         if volume is None:
             return
@@ -3301,7 +3757,7 @@ class StaticNeuroPETWidget(DynamicNeuroPETWidget):
         self.petWindowRange.minimum = min(0.0, low)
         self.petWindowRange.maximum = max(top, high)
         self.petWindowRange.singleStep = max(high / 200.0, 0.001)
-        self.petWindowRange.setValues(max(0.0, low), high)
+        self.petWindowRange.setValues(0.0, max(high if percentile else top, 1e-6))
         self.petWindowRange.blockSignals(False)
         self._applyPetDisplay()
 
@@ -3377,6 +3833,31 @@ class StaticNeuroPETWidget(DynamicNeuroPETWidget):
         display.SetAutoWindowLevel(False)
         display.SetWindowLevelMinMax(self.anatomyWindowRange.minimumValue, self.anatomyWindowRange.maximumValue)
 
+    @staticmethod
+    def _buildMouseHelp():
+        """How to use the mouse on the review's slices and 3D-SSP views."""
+        box = ctk.ctkCollapsibleButton()
+        box.text = "Mouse controls"
+        form = qt.QVBoxLayout(box)
+        label = qt.QLabel(
+            "<b>Slices</b><ul style='margin-left:-20px'>"
+            "<li>Right click: the view's menu. Right drag: window. PET row: left / right the width, up / down the level. Score row: the score "
+            "window (right / up wider).</li>"
+            "<li>Wheel: next / previous slice. Ctrl + wheel: zoom. Middle drag: pan.</li>"
+            "<li>Shift + move: the other views follow the mouse.</li>"
+            "<li>Mouse over a region: its name, SUVmean and score.</li>"
+            "<li>Click a region in the table: it is shown alone for a few seconds.</li></ul>"
+            "<b>3D-SSP</b><ul style='margin-left:-20px'>"
+            "<li>Left drag: rotate the view (Restore 3D views turns it back).</li>"
+            "<li>Right click: the view's menu. Right drag: score window (the patient window with the Patient map).</li>"
+            "<li>Wheel: zoom. Middle drag: pan. Zoom and pan are the same in all the 3D-SSP views.</li>"
+            "<li>Mouse over the surface: the region's name, SUVmean and score; its outline is drawn in white in "
+            "every 3D-SSP view.</li></ul>")
+        label.wordWrap = True
+        label.setTextFormat(qt.Qt.RichText)
+        form.addWidget(label)
+        return box
+
     # 3D-SSP
     def _buildSspBox(self, layout):
         box = qt.QGroupBox("3D-SSP")
@@ -3421,6 +3902,12 @@ class StaticNeuroPETWidget(DynamicNeuroPETWidget):
         self.sspLightingCheck.toolTip = "Shaded surface; off: flat colors at full brightness (as in the original 3D-SSP)"
         form.addRow(self.sspLightingCheck)
         self.sspLightingCheck.connect("toggled(bool)", lambda on: self._showSsp())
+        self.sspOutlineCheck = qt.QCheckBox("Show the region outlines")
+        self.sspOutlineCheck.checked = False
+        self.sspOutlineCheck.toolTip = ("The borders of all the regions drawn on the surface (as the outline of the "
+                                        "region under the mouse, which is always shown)")
+        form.addRow(self.sspOutlineCheck)
+        self.sspOutlineCheck.connect("toggled(bool)", lambda on: self._sspAllOutlines())
         self.restoreViewsButton = _button("Restore 3D views")
         self.restoreViewsButton.toolTip = "The 3D-SSP views back to their default direction, zoom and position"
         form.addRow(self.restoreViewsButton)
@@ -3474,8 +3961,8 @@ class StaticNeuroPETWidget(DynamicNeuroPETWidget):
 
     def _sspValues(self, viewSet=nr.SSP_MAIN):
         """(vertex values, color table RGBA, (low, high), what) of a set of 3D-SSP views: the main one as set in the
-        3D-SSP box; the low scores' the scores below the threshold (colors reversed). None for the low scores without
-        scores."""
+        3D-SSP box; the low scores' the scores below the threshold (colors reversed, the rest grey). None for
+        the low scores without scores."""
         result = self.reviewResult
         data = result.get("ssp")
         score = what = None
@@ -3651,6 +4138,7 @@ class StaticNeuroPETWidget(DynamicNeuroPETWidget):
             rows = [shownViews[key].GetID() for key in (nr.SSP_VIEWS[0][0], nr.SSP_VIEWS[nr.SSP_COLUMNS][0])
                     if key in shownViews]
             self._legend(models[0], rows, what if what != "patient" else self._patientUnits(), "%.1f")
+        self._sspAllOutlines()
 
     def _legend(self, node, viewIds, title, labelFormat):
         """A color legend of node on the left of the views viewIds (hidden with none)."""
@@ -3875,6 +4363,7 @@ class StaticNeuroPETWidget(DynamicNeuroPETWidget):
         finally:
             self._syncingCameras = False
         self._syncCameras(True)
+        self._watchMouse(True)
 
     # layout and views
     def _reviewLayout(self):
@@ -3998,6 +4487,8 @@ class StaticNeuroPETWidget(DynamicNeuroPETWidget):
         try:
             xyz = [0.0, 0.0, 0.0]
             sliceNode = crosshair.GetCursorPositionXYZ(xyz)
+            if sliceNode is None and getattr(self, "_mouseObservers", None):
+                return          # the mouse on a 3D view: named there by _sspHover
             segmentation = self.node("Segmentation")
             display = segmentation.GetDisplayNode() if segmentation is not None else None
             names = []
@@ -4031,20 +4522,380 @@ class StaticNeuroPETWidget(DynamicNeuroPETWidget):
             if not names:
                 self._hideHoverName()
                 return
-            view = widget.sliceView()
-            label = self._hoverLabel(view)
-            label.text = ", ".join(names)
-            label.adjustSize()
-            point = view.mapFromGlobal(qt.QCursor.pos())
-            x = point.x() - label.width - 12
-            if x < 2:           # no room on the left: on the right
-                x = point.x() + 16
-            label.move(x, max(2, point.y() - label.height // 2))
-            label.show()
-            label.raise_()
+            self._showHoverText(widget.sliceView(), names)
         except Exception:
             logging.debug("Static Neuro: no region name at the mouse", exc_info=True)
             self._hideHoverName()
+
+    def _hoverText(self, name, stacked=False):
+        """A region's name with its SUVmean and score (of the last comparison) for the label at the mouse."""
+        suv, score = (getattr(self, "_hoverValues", None) or {}).get(name, (None, None))
+        parts = [name]
+        if suv is not None and np.isfinite(suv):
+            parts.append(f"SUVmean {suv:.2f}")
+        if score is not None and np.isfinite(score):
+            parts.append(f"{getattr(self, '_hoverKind', '') or self._scoreKind()} {score:+.2f}")
+        return ("\n" if stacked else "   ").join(parts)       # stacked (one value a line) on the 3D-SSP
+
+    def _showHoverText(self, view, names, stacked=False):
+        """The names (with their values) left of the mouse on view (right of it without room)."""
+        label = self._hoverLabel(view)
+        label.text = ("\n\n" if stacked else "\n").join(self._hoverText(name, stacked) for name in names)
+        label.adjustSize()
+        point = view.mapFromGlobal(qt.QCursor.pos())
+        x = point.x() - label.width - 12
+        if x < 2:           # no room on the left: on the right
+            x = point.x() + 16
+        label.move(x, max(2, point.y() - label.height // 2))
+        label.show()
+        label.raise_()
+
+    # --- the mouse on the review views: right drag = window; the region under the mouse on the 3D-SSP -------------
+    def _mouseTargets(self):
+        """[(interactor, what, view widget)] of the review views: what "pet" / "score" (slice rows) or (view set, view
+        key) of a 3D-SSP view."""
+        out = []
+        for row, widget in self._reviewSliceWidgets():
+            out.append((widget.sliceView().interactor(), "pet" if row == nr.PET_ROW else "score", widget.sliceView()))
+        for key, (widget, _) in self._sspViewNodes().items():
+            out.append((widget.threeDView().interactor(), key, widget.threeDView()))
+        return out
+
+    def _watchMouse(self, enable):
+        """Observers on the review views' interactors (before Slicer's own, which they stop for the right button):
+        right drag sets the window of the row (PET window, score window) or of the 3D-SSP; on the 3D-SSP the region
+        under the mouse is named (SUVmean, score) and outlined on the surface."""
+        targets = self._mouseTargets() if enable else []
+        old = getattr(self, "_mouseObservers", None) or {}
+        if enable and sorted(old) == sorted(id(t[0]) for t in targets) and all(
+                old[id(t[0])][1] == t[1] for t in targets):
+            return
+        for interactor, _, _, tags in old.values():
+            for tag in tags.values():
+                try:
+                    interactor.RemoveObserver(tag)
+                except Exception:
+                    pass
+        self._mouseObservers = {}
+        self._drag = None
+        for interactor, what, view in targets:
+            if interactor is None:
+                continue
+            tags = {}
+            for event in ("RightButtonPressEvent", "MouseMoveEvent", "RightButtonReleaseEvent", "LeaveEvent"):
+                tags[event] = interactor.AddObserver(
+                    event, lambda caller, ev, w=what, v=view: self._onViewMouse(caller, ev, w, v), MOUSE_PRIORITY)
+            self._mouseObservers[id(interactor)] = (interactor, what, view, tags)
+
+    def _replayRightClick(self, interactor, position):
+        """A right click (press and release, not moved) given to Slicer's interaction: its context menu."""
+        self._replayingClick = True
+        try:
+            interactor.SetEventPosition(*position)
+            interactor.InvokeEvent("RightButtonPressEvent")
+            interactor.InvokeEvent("RightButtonReleaseEvent")
+        except Exception:
+            logging.debug("Static Neuro: no right click menu", exc_info=True)
+        finally:
+            self._replayingClick = False
+
+    def _abortEvent(self, interactor, event):
+        entry = (getattr(self, "_mouseObservers", None) or {}).get(id(interactor))
+        tag = entry[3].get(event) if entry else None
+        command = interactor.GetCommand(tag) if tag is not None else None
+        if command is not None:
+            command.SetAbortFlag(1)
+
+    def _windowTarget(self, what):
+        """(kind, widget) set by a right drag on a view: ("range", range widget) for a display range, ("maximum", spin
+        box) for a score window symmetric about 0; None when the view has none."""
+        if what == "pet":
+            return "range", self.petWindowRange
+        if what == "score":
+            return "maximum", self.scoreMaximumSpin
+        if self.sspMapCombo.currentData == ssp.MAP_PATIENT and what[0] == nr.SSP_MAIN:
+            return "range", self.sspWindowRange
+        return "maximum", self.sspMaximumSpin
+
+    def _onViewMouse(self, interactor, event, what, view):
+        if getattr(self, "_replayingClick", False):     # a right click given back to Slicer (its view menu)
+            return
+        try:
+            drag = getattr(self, "_drag", None)
+            if event == "RightButtonPressEvent":
+                target = self._windowTarget(what)
+                if target is None:
+                    return
+                kind, widget = target
+                start = ((widget.minimumValue, widget.maximumValue) if kind == "range" else float(widget.value))
+                span = (widget.maximum - widget.minimum) if kind == "range" else None
+                self._drag = {"interactor": interactor, "position": tuple(interactor.GetEventPosition()),
+                              "kind": kind, "widget": widget, "start": start, "span": span, "moved": False}
+                self._abortEvent(interactor, event)
+            elif event == "MouseMoveEvent":
+                if drag is not None and drag["interactor"] is interactor:
+                    if not drag["moved"]:
+                        x0, y0 = drag["position"]
+                        x, y = interactor.GetEventPosition()
+                        drag["moved"] = abs(x - x0) + abs(y - y0) > CLICK_TOLERANCE_PX
+                        if drag["moved"]:
+                            self._hideHoverName()
+                    if drag["moved"]:
+                        self._dragWindow(drag, interactor)
+                    self._abortEvent(interactor, event)
+                elif not isinstance(what, str):
+                    self._sspHover(interactor, view)
+            elif event == "RightButtonReleaseEvent":
+                if drag is not None and drag["interactor"] is interactor:
+                    self._drag = None
+                    self._abortEvent(interactor, event)
+                    if drag["moved"]:
+                        self._dragWindow(drag, interactor)
+                        self._applyDragWindow()
+                    else:       # a click, not a drag: Slicer's own right click (the view's menu)
+                        position = drag["position"]
+                        qt.QTimer.singleShot(0, lambda i=interactor, p=position: self._replayRightClick(i, p))
+            elif event == "LeaveEvent":
+                self._hideHoverName()
+                if not isinstance(what, str):
+                    self._sspOutline(None)
+        except Exception:
+            logging.debug("Static Neuro: mouse on a review view", exc_info=True)
+
+    def _dragWindow(self, drag, interactor):
+        """The window from the drag: left / right the width, down / up the level (a display range); for a symmetric
+        score window right or up wider. Applied at most every WINDOW_DRAG_MS."""
+        x0, y0 = drag["position"]
+        x, y = interactor.GetEventPosition()
+        size = interactor.GetRenderWindow().GetSize()
+        scale = float(max(100, min(size[0], size[1])))
+        dx, dy = (x - x0) / scale, (y - y0) / scale
+        if drag["kind"] == "range":
+            low, high = drag["start"]
+            span = drag["span"] or max(high - low, 1e-6)
+            width = max(span * 1e-3, (high - low) + dx * span)
+            center = 0.5 * (low + high) - dy * 0.5 * span
+            drag["value"] = (center - 0.5 * width, center + 0.5 * width)
+        else:
+            widget = drag["widget"]
+            drag["value"] = float(min(widget.maximum, max(widget.minimum, drag["start"] * float(np.exp(2.0 * (dx + dy))))))
+        self._pendingDrag = drag
+        if not getattr(self, "_dragTimerRunning", False):
+            self._dragTimerRunning = True
+            qt.QTimer.singleShot(WINDOW_DRAG_MS, self._applyDragWindow)
+
+    def _applyDragWindow(self):
+        self._dragTimerRunning = False
+        drag = getattr(self, "_pendingDrag", None)
+        self._pendingDrag = None
+        if drag is None or drag.get("value") is None:
+            return
+        widget = drag["widget"]
+        if drag["kind"] == "range":
+            low, high = drag["value"]
+            widget.setValues(max(widget.minimum, low), min(widget.maximum, max(high, low + 1e-6)))
+        else:
+            widget.value = round(drag["value"], widget.decimals)
+
+    def _sspVertexLabels(self):
+        """(surface, KD tree of its vertices, region label of each vertex) of the last comparison's 3D-SSP; None
+        without one."""
+        result = self.reviewResult or {}
+        data = result.get("ssp")
+        if not data or result.get("labels") is None:
+            return None
+        surface = data["surface"]
+        found = getattr(self, "_sspLabels", None)
+        if found is not None and found[0] is surface and found[3] is result["labels"]:
+            return found[:3]
+        from scipy.spatial import cKDTree
+        labels, _ = result["labels"]
+        points = np.asarray(surface["points"], dtype=np.float64)
+        vertexLabels = ssp.vertexLabels(labels, _ijkToRas(result["grid"]), points, surface["normals"])
+        self._sspLabels = (surface, cKDTree(points), vertexLabels, result["labels"])
+        return self._sspLabels[:3]
+
+    def _sspHover(self, interactor, view):
+        """The region under the mouse on a 3D-SSP view: its name (SUVmean, score) next to the mouse and its outline
+        on the surface."""
+        found = self._sspVertexLabels()
+        if found is None:
+            return
+        surface, tree, vertexLabels = found
+        x, y = interactor.GetEventPosition()
+        renderer = interactor.GetRenderWindow().GetRenderers().GetFirstRenderer()
+        if renderer is None:
+            return
+        picker = getattr(self, "_sspPicker", None)
+        if picker is None:
+            picker = self._sspPicker = vtk.vtkWorldPointPicker()
+        picker.Pick(x, y, 0, renderer)
+        distance, index = tree.query(np.asarray(picker.GetPickPosition(), dtype=np.float64))
+        label = int(vertexLabels[index]) if distance < SSP_PICK_MM else 0
+        _, names = (self.reviewResult or {}).get("labels")
+        if label <= 0 or label > len(names):
+            self._hideHoverName()
+            self._sspOutline(None)
+            return
+        self._showHoverText(view, [names[label - 1]], stacked=True)
+        self._sspOutline(label)
+
+    def _sspOutline(self, label):
+        """The outline of region label on the 3D-SSP surface (white, SSP_OUTLINE_WIDTH px, a little outside the
+        surface so it is drawn over it) in every 3D-SSP view; hidden with None."""
+        if getattr(self, "_sspOutlineLabel", None) == label:
+            return
+        self._sspOutlineLabel = label
+        models = getattr(self, "_sspOutlineModels", None)
+        if models is None:
+            models = self._sspOutlineModels = {}
+        found = self._sspVertexLabels() if label else None
+        views = self._sspViewNodes() if found else {}
+        for part in (ssp.PART_BRAIN, ssp.PART_LEFT, ssp.PART_RIGHT):
+            node = models.get(part)
+            if node is not None and not slicer.mrmlScene.IsNodePresent(node):
+                node = models[part] = None
+            shown = [viewNode.GetID() for (_, key), (_, viewNode) in views.items() if ssp.viewPart(key) == part]
+            if not found or not shown or not ssp.hasPart(found[0], part):
+                if node is not None and node.GetDisplayNode() is not None:
+                    node.GetDisplayNode().SetVisibility(False)
+                continue
+            lines = self._sspOutlineLines(found[0], found[2], part, label)
+            if node is None:
+                scene = slicer.mrmlScene
+                node = scene.AddNewNodeByClass("vtkMRMLModelNode", scene.GenerateUniqueName(SSP_OUTLINE_NAME))
+                node.SetAttribute(SSP_OUTLINE_ATTRIBUTE, "1")
+                node.SetHideFromEditors(True)
+                node.CreateDefaultDisplayNodes()
+                models[part] = node
+            node.SetAndObservePolyData(lines)
+            display = node.GetDisplayNode()
+            wasModifying = display.StartModify()
+            display.SetColor(*SSP_OUTLINE_COLOR)
+            display.SetLineWidth(SSP_OUTLINE_WIDTH)
+            display.SetScalarVisibility(False)
+            display.SetVisibility2D(False)
+            if hasattr(display, "SetLighting"):
+                display.SetLighting(False)
+            display.SetVisibility(True)
+            display.EndModify(wasModifying)
+            self._setViewNodeIds(display, shown)
+
+    def _sspOutlineLines(self, surface, vertexLabels, part, label):
+        """The outline of a region on one part of the surface: the 0.5 contour of its vertices (1 in, 0 out) on the
+        part's surface moved SSP_OUTLINE_LIFT_MM outward."""
+        from vtk.util import numpy_support
+        cache = getattr(self, "_sspOutlineSurfaces", None)
+        if cache is None:
+            cache = self._sspOutlineSurfaces = {}
+        found = cache.get(part)
+        if found is None or found[0] is not surface:
+            if part == ssp.PART_BRAIN and surface.get("parts") is None:
+                piece, index = surface, None
+            else:
+                piece, index = ssp.piece(surface, part)
+            normals = np.asarray(piece["normals"], dtype=np.float64)
+            lengths = np.linalg.norm(normals, axis=1)
+            lengths[lengths == 0] = 1.0
+            lifted = dict(piece, points=np.asarray(piece["points"], np.float64)
+                          + SSP_OUTLINE_LIFT_MM * normals / lengths[:, None])
+            poly = self.logic.surfacePolyData(lifted, np.zeros(len(lifted["points"]), np.float32), name="Region")
+            contour = vtk.vtkContourFilter()
+            contour.SetInputData(poly)
+            contour.SetValue(0, 0.5)
+            found = cache[part] = (surface, poly, index, contour)
+        _, poly, index, contour = found
+        inside = (np.asarray(vertexLabels if index is None else vertexLabels[index]) == label).astype(np.float32)
+        array = poly.GetPointData().GetArray("Region")
+        numpy_support.vtk_to_numpy(array)[:] = inside
+        array.Modified()
+        poly.Modified()
+        contour.Update()
+        out = vtk.vtkPolyData()
+        out.DeepCopy(contour.GetOutput())
+        return out
+
+    def _sspAllOutlines(self):
+        """The borders of all the regions on the 3D-SSP surface in every 3D-SSP view ("Show the region outlines" of
+        the 3D-SSP box): drawn as the outline of the region under the mouse, which stays apart from this setting."""
+        models = getattr(self, "_sspAllOutlineModels", None)
+        if models is None:
+            models = self._sspAllOutlineModels = {}
+        on = hasattr(self, "sspOutlineCheck") and bool(self.sspOutlineCheck.checked)
+        found = self._sspVertexLabels() if on else None
+        views = self._sspViewNodes() if found else {}
+        for part in (ssp.PART_BRAIN, ssp.PART_LEFT, ssp.PART_RIGHT):
+            node = models.get(part)
+            if node is not None and not slicer.mrmlScene.IsNodePresent(node):
+                node = models[part] = None
+            shown = [viewNode.GetID() for (_, key), (_, viewNode) in views.items() if ssp.viewPart(key) == part]
+            if not found or not shown or not ssp.hasPart(found[0], part):
+                if node is not None and node.GetDisplayNode() is not None:
+                    node.GetDisplayNode().SetVisibility(False)
+                continue
+            lines = self._sspBorderLines(found[0], found[2], part)
+            if node is None:
+                scene = slicer.mrmlScene
+                node = scene.AddNewNodeByClass("vtkMRMLModelNode", scene.GenerateUniqueName(SSP_OUTLINE_NAME + " all"))
+                node.SetAttribute(SSP_OUTLINE_ATTRIBUTE, "all")
+                node.SetHideFromEditors(True)
+                node.CreateDefaultDisplayNodes()
+                models[part] = node
+            if node.GetPolyData() is not lines:
+                node.SetAndObservePolyData(lines)
+            display = node.GetDisplayNode()
+            wasModifying = display.StartModify()
+            display.SetColor(*SSP_OUTLINE_COLOR)
+            display.SetLineWidth(SSP_OUTLINE_WIDTH)
+            display.SetScalarVisibility(False)
+            display.SetVisibility2D(False)
+            if hasattr(display, "SetLighting"):
+                display.SetLighting(False)
+            display.SetVisibility(True)
+            display.EndModify(wasModifying)
+            self._setViewNodeIds(display, shown)
+
+    def _sspBorderLines(self, surface, vertexLabels, part):
+        """The borders between all the regions on one part of the surface (ssp.labelBorders), SSP_OUTLINE_LIFT_MM
+        outside it; kept until the surface or the regions change."""
+        from vtk.util import numpy_support
+        cache = getattr(self, "_sspBorderPolys", None)
+        if cache is None:
+            cache = self._sspBorderPolys = {}
+        found = cache.get(part)
+        if found is not None and found[0] is surface and found[1] is vertexLabels:
+            return found[2]
+        if part == ssp.PART_BRAIN and surface.get("parts") is None:
+            piece, index = surface, None
+        else:
+            piece, index = ssp.piece(surface, part)
+        normals = np.asarray(piece["normals"], dtype=np.float64)
+        lengths = np.linalg.norm(normals, axis=1)
+        lengths[lengths == 0] = 1.0
+        lifted = np.asarray(piece["points"], np.float64) + SSP_OUTLINE_LIFT_MM * normals / lengths[:, None]
+        labels = np.asarray(vertexLabels if index is None else vertexLabels[index])
+        ends, segments = ssp.labelBorders(lifted, piece["triangles"], labels)
+        poly = vtk.vtkPolyData()
+        points = vtk.vtkPoints()
+        points.SetData(numpy_support.numpy_to_vtk(np.ascontiguousarray(ends, np.float32), deep=True))
+        poly.SetPoints(points)
+        cells = np.empty((len(segments), 3), np.int64)
+        cells[:, 0] = 2
+        cells[:, 1:] = segments
+        lines = vtk.vtkCellArray()
+        lines.SetCells(len(segments), numpy_support.numpy_to_vtkIdTypeArray(cells.ravel(), deep=True))
+        poly.SetLines(lines)
+        cache[part] = (surface, vertexLabels, poly)
+        return poly
+
+    def _dropSspOutlines(self):
+        """The outline models removed (also those left by a module reload)."""
+        for node in list(slicer.util.getNodesByClass("vtkMRMLModelNode")):
+            if node.GetAttribute(SSP_OUTLINE_ATTRIBUTE):
+                slicer.mrmlScene.RemoveNode(node)
+        self._sspOutlineModels = {}
+        self._sspAllOutlineModels = {}
+        self._sspOutlineLabel = None
 
     def _watchLayout(self, enable):
         """Observe the layout node: after a view is maximized (double click) and restored, Slicer builds the layout
@@ -4079,11 +4930,14 @@ class StaticNeuroPETWidget(DynamicNeuroPETWidget):
         try:
             self._assignReviewViews()
             self._showTable()
+            self._watchMouse(True)
         except Exception:
             logging.exception("Static Neuro: could not restore the review views")
 
     def _exitReviewViews(self):
         self._watchLayout(False)
+        self._watchMouse(False)
+        self._dropSspOutlines()
         self._hoverNames(False)
         self._endFlash()
         self._syncCameras(False)
@@ -4263,6 +5117,29 @@ class StaticNeuroPETWidget(DynamicNeuroPETWidget):
                 self.addLabel.text = ("No user defined database in the database folder (create one in the Neuro PET "
                                       "Database Manager).")
 
+    def _nativeImage(self, volume):
+        """(the image before its normalization, temporary): from the normalization's Harden (its undo record: the
+        voxels an Overwrite replaced, or the original of a Save separately); (None, False) when not known."""
+        record = getattr(self, "normUndo", None) or {}
+        undo = record.get("undo") or {}
+        if undo.get("action") == reg.OVERWRITE and undo.get("node") is volume and undo.get("image") is not None:
+            node = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLScalarVolumeNode", f"{volume.GetName()} native")
+            node.SetIJKToRASMatrix(_vtkMatrix(undo["matrix"]))
+            node.SetAndObserveImageData(undo["image"])
+            for key in volume.GetAttributeNames() or ():
+                node.SetAttribute(key, volume.GetAttribute(key))
+            for key, value in (undo.get("attributes") or {}).items():     # as before the Harden
+                if value is None:
+                    node.RemoveAttribute(key)
+                else:
+                    node.SetAttribute(key, value)
+            node.RemoveAttribute(NORMALIZATION_ATTRIBUTE)
+            return node, True
+        previous = record.get("previous")
+        if previous is not None and previous is not volume and slicer.mrmlScene.IsNodePresent(previous):
+            return previous, False
+        return None, False
+
     def onAddToDatabase(self):
         volume = self.volume()
         folder = self.addDbCombo.currentData or ""
@@ -4312,15 +5189,18 @@ class StaticNeuroPETWidget(DynamicNeuroPETWidget):
         if not slicer.util.confirmOkCancelDisplay(text, windowTitle="Add to database"):
             return
         qt.QApplication.setOverrideCursor(qt.Qt.WaitCursor)
+        native, temporary = self._nativeImage(volume)
         try:
             row = self.logic.addSubject(folder, header, volume, subjectId, gridPath, age, sex, used, replace,
-                                        segmentation, segmentId, referenceName)
+                                        segmentation, segmentId, referenceName, native=native)
         except Exception as error:
             logging.exception("Static Neuro: could not add the subject")
             slicer.util.errorDisplay(f"Could not add the patient to the database:\n{error}")
             return
         finally:
             qt.QApplication.restoreOverrideCursor()
+            if temporary and native is not None and slicer.mrmlScene.IsNodePresent(native):
+                slicer.mrmlScene.RemoveNode(native)
         self._fillDatabases(force=True)
         count = normaldb.subjectCount(folder, normaldb.readHeader(folder))
         self.addLabel.text = (f"'{subjectId}' added to '{header['name']}' (now {count} subjects; reference mean "
@@ -4335,6 +5215,11 @@ class StaticNeuroPETWidget(DynamicNeuroPETWidget):
             elif method == "enter" and self.regResult is not None:
                 self._openRegSession()
             return
+        if key == STEP_REGIONS:
+            if method == "exit":
+                self._exitRegionsViews()
+            elif method == "enter":
+                self._enterRegionsViews()
         if key == STEP_REVIEW:
             if method == "exit":
                 self._exitReviewViews()
@@ -4343,6 +5228,124 @@ class StaticNeuroPETWidget(DynamicNeuroPETWidget):
                 qt.QTimer.singleShot(200, self._autoCompare)
             return
         DynamicNeuroPETWidget._callStep(self, key, method)
+
+    # --- regions step views: the PET alone, the PET on the MNI T1, the PET on the normalization's template ------
+    def _regionsLayoutXml(self):
+        def view(column, orientation, label):
+            color = REGIONS_ORIENTATION_COLORS[orientation]
+            return (f'<item><view class="vtkMRMLSliceNode" singletontag="{column}{orientation}">'
+                    f'<property name="orientation" action="default">{orientation}</property>'
+                    f'<property name="viewlabel" action="default">{label}{orientation[0]}</property>'
+                    f'<property name="viewcolor" action="default">{color}</property>'
+                    f'<property name="viewgroup" action="default">{REGIONS_VIEW_GROUP}</property>'
+                    '</view></item>')
+        columns = "".join('<item><layout type="vertical" split="true">'
+                          + "".join(view(column, o, label) for o in REGIONS_ORIENTATIONS) + '</layout></item>'
+                          for column, label, _ in REGIONS_COLUMNS)
+        return f'<layout type="horizontal" split="true">{columns}</layout>'
+
+    def _usedTemplate(self, volume):
+        """The template the image was normalized to (by the name it keeps), loaded again when it left the scene;
+        None when it cannot be found."""
+        name = volume.GetAttribute(NEURO_PREFIX + "Template") or ""
+        if not name:
+            return None
+        picked = self.node("Template")
+        if picked is not None and picked.GetName() == name and slicer.mrmlScene.IsNodePresent(picked):
+            return picked
+        for node in slicer.util.getNodesByClass("vtkMRMLScalarVolumeNode"):
+            if node.GetName() == name and node is not volume and not node.IsA("vtkMRMLLabelMapVolumeNode"):
+                return node
+        try:
+            prefix = "MNI ICBM152 2009c "
+            if name.startswith(prefix) and name[len(prefix):] in (self.atlas or {}):
+                return self.logic.loadAtlasVolume(self.atlas[name[len(prefix):]], name=name)
+            folder = self._database()
+            header = self._header(folder)
+            if header is not None and name == f"{header['name']} template" and sn.petTemplatePath(folder, header):
+                return self.logic.loadAtlasVolume(sn.petTemplatePath(folder, header), name=name)
+        except Exception:
+            logging.debug("Static Neuro: could not load the normalization's template", exc_info=True)
+        return None
+
+    def _regionsLayers(self):
+        """{column: (background, foreground)} of the regions step views."""
+        volume = self.volume()
+        t1 = None
+        if "T1" in (self.atlas or {}):
+            try:
+                t1 = self.logic.loadAtlasVolume(self.atlas["T1"], name="MNI ICBM152 2009c T1")
+            except Exception:
+                logging.debug("Static Neuro: could not load the MNI T1", exc_info=True)
+        template = self._usedTemplate(volume)
+        layers = {}
+        for column, _, kind in REGIONS_COLUMNS:
+            under = None if kind == "pet" else t1 if kind == "t1" else template
+            layers[column] = (under, volume) if under is not None else (volume, None)
+        return layers
+
+    def _enterRegionsViews(self):
+        """The regions step layout: axial (top) and coronal (bottom) of the patient's PET alone (left), on the MNI
+        T1 MR template (middle) and on the template of the normalization (right), to check the normalization."""
+        volume = self.volume()
+        if volume is None or not volume.GetAttribute(NEURO_PREFIX + "Template"):
+            return
+        layoutManager = slicer.app.layoutManager()
+        if layoutManager is None:
+            return
+        try:
+            layoutNode = layoutManager.layoutLogic().GetLayoutNode()
+            description = self._regionsLayoutXml()
+            if not layoutNode.IsLayoutDescription(REGIONS_LAYOUT_ID):
+                layoutNode.AddLayoutDescription(REGIONS_LAYOUT_ID, description)
+            elif layoutNode.GetLayoutDescription(REGIONS_LAYOUT_ID) != description \
+                    and layoutManager.layout != REGIONS_LAYOUT_ID:
+                layoutNode.SetLayoutDescription(REGIONS_LAYOUT_ID, description)
+            if layoutManager.layout != REGIONS_LAYOUT_ID:
+                self._regionsPreviousLayout = layoutManager.layout
+                layoutManager.setLayout(REGIONS_LAYOUT_ID)
+                slicer.app.processEvents()
+            self._assignRegionsViews(fit=True)
+        except Exception:
+            logging.exception("Static Neuro: could not open the regions layout")
+
+    def _assignRegionsViews(self, fit=False):
+        layoutManager = slicer.app.layoutManager()
+        if layoutManager is None or layoutManager.layout != REGIONS_LAYOUT_ID:
+            return
+        layers = self._regionsLayers()
+        opacity = float(self.normOpacity.value) if hasattr(self, "normOpacity") else 0.5
+        widgets = []
+        for column, _, _ in REGIONS_COLUMNS:
+            background, foreground = layers[column]
+            for orientation in REGIONS_ORIENTATIONS:
+                widget = layoutManager.sliceWidget(column + orientation)
+                if widget is None:
+                    continue
+                composite = widget.mrmlSliceCompositeNode()
+                composite.SetLinkedControl(False)
+                composite.SetBackgroundVolumeID(background.GetID() if background is not None else None)
+                composite.SetForegroundVolumeID(foreground.GetID() if foreground is not None else None)
+                composite.SetForegroundOpacity(opacity if foreground is not None else 0.0)
+                composite.SetLabelVolumeID(None)
+                widgets.append(widget)
+        for widget in widgets:          # linked once the layers are set: the same slice and zoom in all the views
+            widget.mrmlSliceCompositeNode().SetLinkedControl(True)
+            if fit:
+                widget.sliceLogic().FitSliceToAll()
+
+    def _exitRegionsViews(self):
+        layoutManager = slicer.app.layoutManager()
+        previous = getattr(self, "_regionsPreviousLayout", None)
+        if layoutManager is not None and layoutManager.layout == REGIONS_LAYOUT_ID:
+            for column, _, _ in REGIONS_COLUMNS:
+                for orientation in REGIONS_ORIENTATIONS:
+                    widget = layoutManager.sliceWidget(column + orientation)
+                    if widget is not None:
+                        widget.mrmlSliceCompositeNode().SetLinkedControl(False)
+            layoutManager.setLayout(previous if previous is not None
+                                    else slicer.vtkMRMLLayoutNode.SlicerLayoutFourUpView)
+        self._regionsPreviousLayout = None
 
     def pendingHarden(self, key):
         if key == STEP_REG:
@@ -4378,6 +5381,8 @@ class StaticNeuroPETWidget(DynamicNeuroPETWidget):
 
     def cleanup(self):
         self._closeRegSession()
+        if getattr(self, "current", None) == STEP_REGIONS:
+            self._exitRegionsViews()
         if getattr(self, "current", None) == STEP_REVIEW:
             self._exitReviewViews()
         DynamicNeuroPETWidget.cleanup(self)
@@ -4385,6 +5390,7 @@ class StaticNeuroPETWidget(DynamicNeuroPETWidget):
     def onSceneClose(self, caller, event):
         DynamicNeuroPETWidget.onSceneClose(self, caller, event)
         self._closeRegSession()
+        self._regionsPreviousLayout = None
         self.regResult = None
         self.regUndo = None
         self._databaseKey = None
@@ -4393,6 +5399,14 @@ class StaticNeuroPETWidget(DynamicNeuroPETWidget):
         self.reviewResult = self.scoreNode = self.reviewTable = self.greyPetNode = None
         self.sspModels = {}
         self._sspPolys = {}
+        self._mouseObservers = {}
+        self._drag = None
+        self._sspLabels = None
+        self._sspOutlineModels = {}
+        self._sspOutlineSurfaces = {}
+        self._sspAllOutlineModels = {}
+        self._sspBorderPolys = {}
+        self._sspOutlineLabel = None
         self._sspColorsWritten = {}
         self._sspBounds = None
         self.scoreRgbNode = None
@@ -4557,6 +5571,25 @@ class StaticNeuroPETTest(ScriptedLoadableModuleTest):
         self.assertEqual(widget.current, STEP_NORM)
         widget.moveStep(-1)
         self.assertEqual(widget.current, STEP_DATA)
+        # not normalized: the regions and the review cannot be opened yet, the normalization can (no registration)
+        self.assertTrue(widget.stepAllowed(STEP_NORM))
+        self.assertFalse(widget.stepAllowed(STEP_REG))
+        self.assertFalse(widget.stepAllowed(STEP_REGIONS))
+        self.assertFalse(widget.stepAllowed(STEP_REVIEW))
+        widget.showStep(STEP_NORM)
+        widget.refresh()
+        self.assertFalse(widget.nextButton.enabled)
+        self.assertFalse(widget.stepButtons[STEP_REGIONS].enabled)
+        widget.showStep(STEP_DATA)
+        import xml.etree.ElementTree as ElementTree
+        views = ElementTree.fromstring(widget._regionsLayoutXml()).findall(".//view")
+        self.assertEqual(len(views), len(REGIONS_COLUMNS) * len(REGIONS_ORIENTATIONS))
+        # the region of a 3D-SSP vertex: the first label along its inward normal
+        labels = np.zeros((20, 20, 20), np.int32)
+        labels[5:15, 5:15, 5:10], labels[5:15, 5:15, 10:15] = 2, 3
+        found = ssp.vertexLabels(labels, np.eye(4), [[4, 10, 10], [15, 10, 10], [0, 0, 0]],
+                                 [[-1, 0, 0], [1, 0, 0], [1, 0, 0]])
+        self.assertEqual(list(found), [2, 3, 0])
         # the patient's name and ID: the BIDS subject, then the values typed on the Data page
         node.SetAttribute(sn.STATIC_PREFIX + "SubjectID", "7")
         self.assertEqual(StaticNeuroPETLogic.patientNameAndId(node), ("", "sub-7"))

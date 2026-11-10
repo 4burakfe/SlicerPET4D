@@ -119,7 +119,7 @@ class NeuroPETDatabaseManagerLogic(ScriptedLoadableModuleLogic):
         """Why the mask of a reference region cannot be made from the atlas folder, or None."""
         if regionKey == normaldb.REF_CUSTOM:
             return None
-        atlas = neuro.findAtlasFiles(atlasFolder)
+        atlas = neuro.atlasFiles(atlasFolder)
         if regionKey == normaldb.REF_GLOBAL:
             return None if neuro.BRAIN_MASK in atlas else "The atlas folder has no MNI brain mask " \
                 "(mni_icbm152_t1_tal_nlin_sym_09c_mask)"
@@ -148,7 +148,7 @@ class NeuroPETDatabaseManagerLogic(ScriptedLoadableModuleLogic):
         problem = self.maskSourceProblem(key, atlasFolder)
         if problem:
             raise ValueError(problem)
-        atlas = neuro.findAtlasFiles(atlasFolder)
+        atlas = neuro.atlasFiles(atlasFolder)
         if key == normaldb.REF_PONS:
             return self._writeSegmentationMask(folder, header, atlas)
         if key == normaldb.REF_GLOBAL:
@@ -327,6 +327,7 @@ class NeuroPETDatabaseManagerLogic(ScriptedLoadableModuleLogic):
         for index, subject in enumerate(subjects):
             if progress is not None and not progress(index, len(subjects), f"{subject['id']} ({index + 1} / "
                                                                            f"{len(subjects)})"):
+                self._dropPendingRegions(folder)
                 return None, ["Stopped: nothing written."]
             relative = subject.get(mapKey)
             path = os.path.join(folder, relative) if relative else ""
@@ -399,6 +400,20 @@ class NeuroPETDatabaseManagerLogic(ScriptedLoadableModuleLogic):
             header["statistics"]["regions"] = nr.REGIONS_FILE
         elif os.path.isfile(regionsFile):
             os.remove(regionsFile)
+        # the regions themselves (a segmentation), for the Regions step of everyone using the database
+        pending = os.path.join(folder, nr.REGIONS_SEGMENTATION_PENDING)
+        stored = os.path.join(folder, nr.REGIONS_SEGMENTATION_FILE)
+        if header["statistics"].get("regions") and os.path.isfile(pending):
+            os.replace(pending, stored)
+            header["statistics"]["regionsSegmentation"] = nr.REGIONS_SEGMENTATION_FILE
+            header["statistics"]["regionsReference"] = getattr(self, "_regionsReference", None) or ""
+        else:
+            self._dropPendingRegions(folder)
+            if os.path.isfile(stored):
+                os.remove(stored)
+            if masks:
+                notes.append("The regions were not stored with the statistics (the segmentation could not be saved): "
+                             "they are drawn from the atlas folder.")
         sspFile = os.path.join(folder, ssp.SSP_FILE)
         if sspAccumulators is not None:
             sspGroups = {k: {"mean": a.mean(), "sd": a.sd(), "n": a.n, "name": groups[k]["name"]}
@@ -415,12 +430,21 @@ class NeuroPETDatabaseManagerLogic(ScriptedLoadableModuleLogic):
         self.forgetLoaded(folder)
         return header, notes
 
+    @staticmethod
+    def _dropPendingRegions(folder):
+        pending = os.path.join(folder, nr.REGIONS_SEGMENTATION_PENDING)
+        if os.path.isfile(pending):
+            try:
+                os.remove(pending)
+            except OSError:
+                logging.warning(f"Neuro DB: could not remove {pending}", exc_info=True)
+
     def _regionMasks(self, folder, header):
         """(masks {region: boolean array} on the subjects' grid, 3D-SSP surface of their union, note) of the
         database's regions (its region settings, the CerebrA of the atlas folder) for the regional statistics and the
         normals' surface projections; (None, None, why) when they cannot be made."""
         from StaticNeuroPET import StaticNeuroPETLogic
-        atlas = neuro.findAtlasFiles(self.atlasFolder())
+        atlas = neuro.atlasFiles(self.atlasFolder())
         if neuro.CEREBRA_LABELS not in atlas or neuro.CEREBRA_CSV not in atlas:
             return None, None, ("No regional statistics: the CerebrA labels are not in the atlas folder (set it in the "
                                 "Static Neuro PET/SPECT module).")
@@ -431,7 +455,11 @@ class NeuroPETDatabaseManagerLogic(ScriptedLoadableModuleLogic):
         gridNode = slicer.util.loadLabelVolume(gridPath, {"show": False})
         try:
             try:
-                masks = logic.databaseRegionMasks(atlas, folder, header, gridNode)
+                self._regionsReference = None
+                self._dropPendingRegions(folder)
+                masks = logic.databaseRegionMasks(atlas, folder, header, gridNode, savePath=os.path.join(
+                    folder, nr.REGIONS_SEGMENTATION_PENDING))
+                self._regionsReference = logic.savedRegionsReference
             except Exception as error:
                 logging.exception("Neuro DB: could not make the regions")
                 return None, None, f"No regional statistics: the regions could not be made ({error})."
@@ -464,7 +492,7 @@ class NeuroPETDatabaseManagerLogic(ScriptedLoadableModuleLogic):
         """Predefined database from mean / SD maps; the reference mask is the file given, else made from the atlas
         folder when it can be (else none)."""
         folder = normaldb.createPredefined(root, header, maps, maskPath)
-        if not maskPath and atlasFolder and header.get("referenceRegion") != normaldb.REF_CUSTOM \
+        if not maskPath and header.get("referenceRegion") != normaldb.REF_CUSTOM \
                 and self.maskSourceProblem(header.get("referenceRegion"), atlasFolder) is None:
             saved = normaldb.readHeader(folder)
             try:
@@ -946,46 +974,58 @@ class NeuroPETDatabaseManagerWidget(ScriptedLoadableModuleWidget):
         self.exportButton.toolTip = "The selected user defined database as a .zip without its subject images."
         self.deleteButton = _button("Delete database", "revert")
         self.deleteButton.toolTip = "Remove the selected database folder from disk (asks first)."
-        self.batchButton = _button("Batch add subjects...")
-        self.batchButton.toolTip = ("Add many normal subjects (BIDS PET files) to the selected user defined database: "
-                                    "each normalized with the database's settings, with a QC picture.")
+        self.addSubjectsButton = _button("1. Add subjects...")
+        self.addSubjectsButton.toolTip = (
+            "Add normal subjects to the selected user defined database: a BIDS folder, or image files with a subject "
+            "table (CSV / TSV: id, age, sex). Each native image is stored in the database, normalized with the "
+            "database's settings and resampled to its grid, with a QC picture. Patients are added from the Neuro "
+            "workflow (Review: Add this patient to DB).")
+        self.normalizeAgainButton = _button("2. Normalize again...")
+        self.normalizeAgainButton.toolTip = ("Normalize all subjects again from their stored native images with the "
+                                             "database's current settings (e.g. after a new template), replacing "
+                                             "their maps.")
+        self.buildTemplateButton = _button("3. Build template (iterative)...")
+        self.buildTemplateButton.toolTip = (
+            "A study specific template from the subjects' stored native images: pass 0 to the normalization target "
+            "(e.g. the synthetic PET), then passes to the group's own mean, each subject resampled once from its "
+            "native image, the group's drift taken out, until the subjects move less than the stop value. The last "
+            "template becomes the database's normalization template (PET to PET) and the subjects' maps are "
+            "replaced.")
+        self.statsButton = _button("4. Compute mean / SD")
+        self.statsButton.toolTip = ("The mean / SD maps of the selected user defined database from its subjects' "
+                                    "maps, smoothed with its FWHM (master and age groups).")
+        self.removeSubjectsButton = qt.QPushButton("Remove subjects...")
+        self.removeSubjectsButton.toolTip = ("Remove subjects (e.g. badly normalized ones, after the QC pictures) "
+                                             "from the selected user defined database, with their files.")
+        self.editButton = qt.QPushButton("Edit settings...")
+        self.editButton.toolTip = ("Change the settings of the selected database (name, tracer, reference region, "
+                                   "region and normalization settings, age groups, notes).")
         self.openButton = qt.QPushButton("Open folder")
         self.refreshButton = qt.QPushButton("Refresh")
         grid.addWidget(self.createButton, 0, 0)
         grid.addWidget(self.predefinedButton, 0, 1)
-        self.removeSubjectsButton = qt.QPushButton("Remove subjects...")
-        self.statsButton = _button("Compute mean / SD")
-        self.statsButton.toolTip = ("The mean / SD maps of the selected user defined database from its subjects' "
-                                    "maps, smoothed with its FWHM (master and age groups).")
-        self.templateButton = qt.QPushButton("Use mean as template")
-        self.templateButton.toolTip = ("Freeze the master mean map as the database's normalization template and make "
-                                       "PET to PET its normalization: then run the batch again (Normalize again) "
-                                       "and compute the mean / SD - an iteration of a study specific template.")
-        self.editButton = qt.QPushButton("Edit settings...")
-        self.editButton.toolTip = ("Change the settings of the selected database (name, tracer, reference region, "
-                                   "region and normalization settings, age groups, notes).")
-        self.removeSubjectsButton.toolTip = ("Remove subjects (e.g. badly normalized ones, after the QC pictures) "
-                                             "from the selected user defined database, with their maps.")
-        grid.addWidget(self.batchButton, 1, 0)
-        grid.addWidget(self.removeSubjectsButton, 1, 1)
-        grid.addWidget(self.statsButton, 2, 0)
-        grid.addWidget(self.templateButton, 2, 1)
-        grid.addWidget(self.editButton, 3, 0)
-        grid.addWidget(self.exportButton, 3, 1)
-        grid.addWidget(self.deleteButton, 4, 0)
-        grid.addWidget(self.openButton, 4, 1)
-        grid.addWidget(self.refreshButton, 5, 0, 1, 2)
+        grid.addWidget(self.addSubjectsButton, 1, 0)
+        grid.addWidget(self.normalizeAgainButton, 1, 1)
+        grid.addWidget(self.buildTemplateButton, 2, 0)
+        grid.addWidget(self.statsButton, 2, 1)
+        grid.addWidget(self.removeSubjectsButton, 3, 0)
+        grid.addWidget(self.editButton, 3, 1)
+        grid.addWidget(self.exportButton, 4, 0)
+        grid.addWidget(self.deleteButton, 4, 1)
+        grid.addWidget(self.openButton, 5, 0)
+        grid.addWidget(self.refreshButton, 5, 1)
         layout.addLayout(grid)
 
         self.table.connect("itemSelectionChanged()", self._updateSelection)
         self.createButton.connect("clicked()", self.onCreate)
         self.predefinedButton.connect("clicked()", self.onAddPredefined)
         self.exportButton.connect("clicked()", self.onExport)
-        self.batchButton.connect("clicked()", self.onBatchAdd)
-        self.editButton.connect("clicked()", self.onEdit)
+        self.addSubjectsButton.connect("clicked()", self.onAddSubjects)
+        self.normalizeAgainButton.connect("clicked()", self.onNormalizeAgain)
+        self.buildTemplateButton.connect("clicked()", self.onBuildTemplate)
         self.statsButton.connect("clicked()", self.onComputeStatistics)
-        self.templateButton.connect("clicked()", self.onFreezeTemplate)
         self.removeSubjectsButton.connect("clicked()", self.onRemoveSubjects)
+        self.editButton.connect("clicked()", self.onEdit)
         self.deleteButton.connect("clicked()", self.onDelete)
         self.openButton.connect("clicked()", self.onOpenFolder)
         self.refreshButton.connect("clicked()", self.refresh)
@@ -1046,12 +1086,31 @@ class NeuroPETDatabaseManagerWidget(ScriptedLoadableModuleWidget):
         self.editButton.enabled = folder is not None
         self.openButton.enabled = rootOk
         self.exportButton.enabled = folder is not None and header.get("kind") == normaldb.USER_DEFINED
-        self.batchButton.enabled = self.exportButton.enabled
-        self.removeSubjectsButton.enabled = self.exportButton.enabled
-        self.statsButton.enabled = self.exportButton.enabled
-        master = (((header or {}).get("statistics") or {}).get("groups") or {}).get(normaldb.MASTER)
-        self.templateButton.enabled = folder is not None and bool(master and master.get("mean"))
+        userDefined = self.exportButton.enabled
+        if userDefined:
+            header = self._migrated(folder, header)
+        have, count = normaldb.nativeCount(folder) if userDefined else (0, 0)
+        self.addSubjectsButton.enabled = userDefined
+        self.removeSubjectsButton.enabled = userDefined and count > 0
+        self.statsButton.enabled = userDefined and count > 0
+        self.normalizeAgainButton.enabled = userDefined and have > 0
+        self.buildTemplateButton.enabled = userDefined and have > 1
         self.details.setHtml(self._detailsHtml(folder, header) if folder else "")
+
+    def _migrated(self, folder, header):
+        """A user defined database of the old layout (format 1) moved to the folder per subject, once."""
+        if int(header.get("formatVersion") or 1) >= normaldb.FORMAT_VERSION:
+            return header
+        try:
+            moved = normaldb.migrateLayout(folder)
+        except Exception as e:
+            logging.error(f"Could not move the database {folder} to the folder per subject layout: {e}")
+            return header
+        logging.info(f"Database {folder} moved to the folder per subject layout (format {normaldb.FORMAT_VERSION}): "
+                     f"{moved} file(s) moved.")
+        header = normaldb.readHeader(folder)
+        self.databases = [(f, header if f == folder else h) for f, h in self.databases]
+        return header
 
     @staticmethod
     def _detailsHtml(folder, header):
@@ -1086,12 +1145,9 @@ class NeuroPETDatabaseManagerWidget(ScriptedLoadableModuleWidget):
         ages = header.get("subjectAges")
         if ages and ages.get("n"):
             rows.append(("Ages", f"{ages.get('mean')} ± {ages.get('sd')} ({ages.get('min')}-{ages.get('max')})"))
-        frozen = header.get("normalizationTemplate") or {}
-        if frozen.get("file"):
-            rows.append(("Normalization template",
-                         f"{frozen['file']} (mean of n = {frozen.get('n')}, iteration {frozen.get('iteration', 1)}, "
-                         f"{str(frozen.get('made', ''))[:16]})"))
-        rows.append(("Version", f"{header.get('version', 1)}, modified {str(header.get('modified', ''))[:16]}"))
+        rows += normaldb.pipelineRows(folder, header)
+        rows.append(("Version", f"{header.get('version', 1)}, format {header.get('formatVersion') or 1}, modified "
+                                f"{str(header.get('modified', ''))[:16]}"))
         return "<table>" + "".join(f"<tr><td><b>{esc(k)}</b>&nbsp;</td><td>{esc(v)}</td></tr>" for k, v in rows
                                    if v not in (None, "")) + "</table>"
 
@@ -1209,6 +1265,15 @@ class NeuroPETDatabaseManagerWidget(ScriptedLoadableModuleWidget):
         folder, header = self.selected()
         if not folder:
             return
+        errors, warnings, contents = normaldb.exportCheck(folder, header)
+        if errors:
+            slicer.util.errorDisplay("The database cannot be exported yet:\n\n" + "\n\n".join(errors),
+                                     windowTitle="Export as predefined database")
+            return
+        if warnings and not slicer.util.confirmOkCancelDisplay(
+                "The package will lack:\n\n" + "\n\n".join(warnings) + "\n\nExport anyway?",
+                windowTitle="Export as predefined database"):
+            return
         path = qt.QFileDialog.getSaveFileName(slicer.util.mainWindow(), "Export as predefined database",
                                               os.path.join(os.path.expanduser("~"),
                                                            normaldb.safeName(header["name"]) + ".zip"),
@@ -1222,7 +1287,9 @@ class NeuroPETDatabaseManagerWidget(ScriptedLoadableModuleWidget):
                 normaldb.exportPredefined(folder, path)
         except Exception:
             return
-        slicer.util.infoDisplay(f"Saved {path}", windowTitle="Neuro PET Database Manager")
+        slicer.util.infoDisplay(f"Saved {path}\n\n" + "\n".join(contents)
+                                + ("\n\nNot in the package:\n" + "\n".join(warnings) if warnings else ""),
+                                windowTitle="Neuro PET Database Manager")
 
     def onComputeStatistics(self):
         folder, header = self.selected()
@@ -1264,32 +1331,6 @@ class NeuroPETDatabaseManagerWidget(ScriptedLoadableModuleWidget):
         if notes:
             text += "\n\n" + "\n".join(notes)
         slicer.util.infoDisplay(text, windowTitle="Compute mean / SD")
-
-    def onFreezeTemplate(self):
-        folder, header = self.selected()
-        if not folder:
-            return
-        stats = header.get("statistics") or {}
-        master = (stats.get("groups") or {}).get(normaldb.MASTER) or {}
-        previous = header.get("normalizationTemplate") or {}
-        text = (f"Use the master mean map of '{header.get('name')}' (n = {master.get('n')}) as its normalization "
-                "template?\n\nIt is copied as template.nii.gz and the database's normalization becomes PET to PET: "
-                "the batch (Normalize again) and the Neuro workflow then register to it. It stays fixed when the mean "
-                "/ SD maps are computed again; use it again for the next iteration (1-2 are usually enough).")
-        if previous:
-            text += f"\n\nIt replaces the current template (iteration {previous.get('iteration', 1)})."
-        if stats.get("stale"):
-            text += "\n\nThe mean / SD maps are out of date: compute them first?"
-        if not slicer.util.confirmOkCancelDisplay(text, windowTitle="Use mean as template"):
-            return
-        try:
-            with slicer.util.tryWithErrorDisplay("Could not make the template", waitCursor=True):
-                normaldb.freezeTemplate(folder)
-                self.logic.forgetLoaded(folder)
-        except Exception:
-            pass
-        finally:
-            self.refresh(select=folder)
 
     def onEdit(self):
         folder, old = self.selected()
@@ -1380,9 +1421,96 @@ class NeuroPETDatabaseManagerWidget(ScriptedLoadableModuleWidget):
                 progressDialog.close()
             self.refresh(select=folder)
 
-    def onBatchAdd(self):
-        from StaticNeuroPET import StaticNeuroPETLogic
+    # --- subjects: add, normalize again, template, natives ---------------------------------------------
+    def _bidsPicker(self, form, label="BIDS folder:"):
+        """(folder edit, session combo, state) rows of a form: the BIDS PET files of a folder and the session picked
+        (state["files"]); state["changed"] is called after each change."""
         from DICOMGatedDynamicPETLib import staticneuro as sn
+        folderEdit = _pathEdit(dirs=True)
+        folderEdit.currentPath = str(qt.QSettings().value(SETTINGS_BATCH_FOLDER) or "")
+        form.addRow(label, folderEdit)
+        sessionCombo = qt.QComboBox()
+        sessionCombo.toolTip = "Session of the images (BIDS ses-), e.g. SUV"
+        form.addRow("Session:", sessionCombo)
+        state = {"files": [], "all": [], "changed": lambda: None}
+
+        def scan(*args):
+            root = folderEdit.currentPath
+            state["all"] = sn.findPetFiles(root) if root and os.path.isdir(root) else []
+            current = sessionCombo.currentData
+            sessions = sorted({sn.bidsSession(f) for f in state["all"]})
+            sessionCombo.blockSignals(True)
+            sessionCombo.clear()
+            for session in sessions:
+                count = sum(1 for f in state["all"] if sn.bidsSession(f) == session)
+                sessionCombo.addItem(f"{session or '(none)'} ({count})", session)
+            index = sessionCombo.findData(current) if current is not None else -1
+            sessionCombo.setCurrentIndex(index if index >= 0 else max(0, sessionCombo.findData("SUV")))
+            sessionCombo.blockSignals(False)
+            pick()
+
+        def pick(*args):
+            session = sessionCombo.currentData
+            state["files"] = [f for f in state["all"] if sn.bidsSession(f) == session]
+            state["changed"]()
+
+        folderEdit.connect("currentPathChanged(QString)", scan)
+        sessionCombo.connect("currentIndexChanged(int)", pick)
+        state["scan"] = scan
+        state["folderEdit"] = folderEdit
+        return state
+
+    def _atlasOrAsk(self, parent=None):
+        """The Neuro atlas files of the atlas folder; {} (after an error) when it is not set."""
+        folder = self.logic.atlasFolder()
+        atlas = neuro.atlasFiles(folder)
+        if not atlas:
+            _error(parent or slicer.util.mainWindow(), "Pick the Neuro atlas folder (MNI 2009c templates) first: in "
+                                                        "Add subjects, or in the Neuro workflows.")
+        return atlas
+
+    def _progressDialog(self, title, maximum):
+        progressDialog = slicer.util.createProgressDialog(windowTitle=title, labelText="Starting...",
+                                                          maximum=max(1, maximum))
+
+        def progress(index, total, text):
+            progressDialog.maximum = max(1, total)
+            progressDialog.setValue(index)
+            progressDialog.setLabelText(text)
+            slicer.app.processEvents()
+            return not progressDialog.wasCanceled
+        return progressDialog, progress
+
+    def _runBatch(self, folder, items, atlas, qc, replace, title):
+        """Run StaticNeuroPETLogic.batchAdd on batch items and report it."""
+        from StaticNeuroPET import StaticNeuroPETLogic
+        progressDialog, progress = self._progressDialog(title, len(items))
+        try:
+            rows, logPath, stopped = StaticNeuroPETLogic().batchAdd(folder, items, atlas, qc, progress, replace)
+        except Exception as error:
+            logging.exception(f"{title} failed")
+            _error(slicer.util.mainWindow(), f"{title} could not start:\n{error}")
+            return
+        finally:
+            progressDialog.close()
+            self.logic.forgetLoaded(folder)
+            self.refresh(select=folder)
+        counts = {status: sum(1 for r in rows if r["status"] == status)
+                  for status in ("added", "skipped", "failed", "stopped")}
+        text = (f"Done {counts['added']}, skipped {counts['skipped']} (already in), failed {counts['failed']}"
+                + (" - stopped" if stopped else "") + f".\n\nLog: {logPath}"
+                + ("\nQC pictures: " + os.path.join(folder, "qc") if qc else "")
+                + "\n\nCheck the QC pictures, remove the badly normalized subjects, then build the template or "
+                  "compute the mean / SD maps.")
+        failed = [r for r in rows if r["status"] == "failed"]
+        if failed:
+            text += "\n\nFailed:\n" + "\n".join(f"{r['id']}: {r['message']}" for r in failed[:10])
+            if len(failed) > 10:
+                text += f"\n... ({len(failed) - 10} more in the log)"
+        slicer.util.infoDisplay(text, windowTitle=title)
+
+    def onAddSubjects(self):
+        from StaticNeuroPET import StaticNeuroPETLogic
         folder, header = self.selected()
         if not folder or header.get("kind") != normaldb.USER_DEFINED:
             return
@@ -1392,26 +1520,32 @@ class NeuroPETDatabaseManagerWidget(ScriptedLoadableModuleWidget):
         except ValueError as error:
             _error(slicer.util.mainWindow(), str(error))
             return
-        dialog, layout, buttons = _scrollDialog(f"Batch add subjects to '{header.get('name')}'",
-                                                slicer.util.mainWindow())
-        dialog.resize(720, 520)
+        dialog, layout, buttons = _scrollDialog(f"Add subjects to '{header.get('name')}'", slicer.util.mainWindow())
+        dialog.resize(720, 560)
         info = qt.QLabel(
-            "Adds normal subjects from a BIDS folder (sub-<id>[_ses-<session>]_pet.nii[.gz] with their .json and "
-            "the participants.tsv for age and sex). Each image is normalized to the MNI template with the "
-            "database's normalization settings (no manual check), resampled onto the template grid and saved with its "
-            "SUVR map (the database's reference mask). Subject IDs already in the database are skipped, so a stopped "
-            "batch can be run again; a subject that fails is logged and the batch goes on.")
+            "Adds normal subjects from a BIDS folder (sub-<id>[_ses-<session>]_pet.nii[.gz] with their .json and the "
+            "participants.tsv for age and sex) or from image files (a folder of .nii / .nii.gz / .nrrd; age and sex "
+            "from a CSV / TSV with the columns id, age, sex - the ID is matched to the file name). Each image is "
+            "stored as it is (native, in subjects/<id>/), normalized to the MNI space with the database's "
+            "normalization settings (no manual check), resampled onto the database grid (MNI 2009c 1 mm, linear) and "
+            "saved with its SUVR map (the database's reference mask). Subject IDs already in the database are "
+            "skipped unless 'replace' is ticked; a subject that fails is logged and the batch goes on.")
         info.wordWrap = True
         info.textFormat = qt.Qt.PlainText
         layout.addWidget(info)
         form = qt.QFormLayout()
         layout.addLayout(form)
-        folderEdit = _pathEdit(dirs=True)
-        folderEdit.currentPath = str(qt.QSettings().value(SETTINGS_BATCH_FOLDER) or "")
-        form.addRow("BIDS folder:", folderEdit)
-        sessionCombo = qt.QComboBox()
-        sessionCombo.toolTip = "Session of the images to add (BIDS ses-), e.g. SUV"
-        form.addRow("Session:", sessionCombo)
+        sourceCombo = qt.QComboBox()
+        sourceCombo.addItem("BIDS folder", "bids")
+        sourceCombo.addItem("Image files (a folder) + subject table", "files")
+        form.addRow("Source:", sourceCombo)
+        bids = self._bidsPicker(form)
+        filesEdit = _pathEdit(dirs=True)
+        filesEdit.toolTip = "A folder with one image per subject (not searched below)."
+        form.addRow("Image folder:", filesEdit)
+        tableEdit = _pathEdit(filters="Subject table (*.csv *.tsv *.txt)")
+        tableEdit.toolTip = "Optional: columns id (or subject / participant_id), age, sex."
+        form.addRow("Subject table:", tableEdit)
         atlasEdit = _pathEdit(dirs=True)
         atlasEdit.currentPath = self.logic.atlasFolder()
         atlasEdit.toolTip = "Neuro atlas folder (MNI 2009c templates, brain mask)"
@@ -1419,10 +1553,7 @@ class NeuroPETDatabaseManagerWidget(ScriptedLoadableModuleWidget):
         qcCheck = qt.QCheckBox("Save a QC picture of each subject (PET over the MNI T1, 3 slices) in qc/")
         qcCheck.checked = True
         form.addRow(qcCheck)
-        replaceCheck = qt.QCheckBox("Normalize again the subjects already in the database (replace them)")
-        replaceCheck.toolTip = ("For the next iteration of the template: every subject is normalized again (to the "
-                                "database's template) and replaced; subjects not in the folder stay as they are.")
-        replaceCheck.checked = bool(normaldb.templatePath(folder, header))
+        replaceCheck = qt.QCheckBox("Subjects already in the database: add them again (replace)")
         form.addRow(replaceCheck)
         found = qt.QLabel()
         found.wordWrap = True
@@ -1437,94 +1568,187 @@ class NeuroPETDatabaseManagerWidget(ScriptedLoadableModuleWidget):
         run = buttons.addButton("Run", qt.QDialogButtonBox.AcceptRole)
         buttons.addButton(qt.QDialogButtonBox.Cancel)
         buttons.connect("rejected()", dialog.reject)
-        state = {"files": []}
+        state = {"items": []}
 
-        def scan(*args):
-            root = folderEdit.currentPath
-            files = sn.findPetFiles(root) if root and os.path.isdir(root) else []
-            current = sessionCombo.currentData
-            sessions = sorted({sn.bidsSession(f) for f in files})
-            sessionCombo.blockSignals(True)
-            sessionCombo.clear()
-            if len(sessions) > 1:
-                sessionCombo.addItem(f"All sessions ({len(files)})", None)
-            for session in sessions:
-                count = sum(1 for f in files if sn.bidsSession(f) == session)
-                sessionCombo.addItem(f"{session or '(none)'} ({count})", session)
-            index = sessionCombo.findData(current) if current is not None else -1
-            if index < 0:
-                index = max(0, sessionCombo.findData("SUV"))
-            sessionCombo.setCurrentIndex(index)
-            sessionCombo.blockSignals(False)
-            state["all"] = files
-            pick()
+        def rowVisible(widget, visible):
+            form.labelForField(widget).visible = visible
+            widget.visible = visible
 
-        def pick(*args):
-            session = sessionCombo.currentData
-            files = [f for f in state.get("all", []) if session is None or sn.bidsSession(f) == session]
-            state["files"] = files
-            existing = sum(1 for f in files if normaldb.hasSubject(folder, sn.bidsSubjectId(f)))
-            ids = [sn.bidsSubjectId(f) for f in files]
-            duplicates = len(ids) - len(set(ids))
+        def update(*args):
+            isBids = sourceCombo.currentData == "bids"
+            for widget in (bids["folderEdit"],):
+                rowVisible(widget, isBids)
+            rowVisible(self._sessionComboOf(form, bids), isBids)
+            rowVisible(filesEdit, not isBids)
+            rowVisible(tableEdit, not isBids)
+            if isBids:
+                files, table = bids["files"], None
+            else:
+                root = filesEdit.currentPath
+                files = sorted(os.path.join(root, f) for f in (os.listdir(root) if root and os.path.isdir(root)
+                                                               else [])
+                               if normaldb.imageExtension(f) and os.path.isfile(os.path.join(root, f)))
+                try:
+                    table = normaldb.readSubjectTable(tableEdit.currentPath)
+                except (OSError, ValueError) as error:
+                    table = {}
+                    found.text = f"Could not read the subject table: {error}"
+            items = logic.batchItems(folder, files, table)
+            state["items"] = items
+            ids = [i[1] for i in items]
+            existing = sum(1 for i in ids if normaldb.hasSubject(folder, i))
+            duplicates = len(ids) - len(set(i.lower() for i in ids))
+            noTable = sum(1 for i in items if not isBids and table and i[2] is None)
             replace = bool(replaceCheck.checked)
-            found.text = (f"{len(files)} PET image(s)" + (f", {existing} already in the database ("
-                                                           + ("normalized again" if replace else "skipped") + ")"
-                                                           if existing else "")
-                          + (f"; {duplicates} subject(s) appear twice: pick one session" if duplicates else "") + ".")
-            run.enabled = len(files) > existing or (replace and len(files) > 0)
+            found.text = (f"{len(items)} image(s)" + (f", {existing} already in the database ("
+                                                      + ("added again" if replace else "skipped") + ")"
+                                                      if existing else "")
+                          + (f"; {duplicates} subject(s) appear twice: pick one session" if duplicates else "")
+                          + (f"; {noTable} not in the subject table (no age / sex)" if noTable else "") + ".")
+            run.enabled = duplicates == 0 and (len(items) > existing or (replace and len(items) > 0))
 
-        folderEdit.connect("currentPathChanged(QString)", scan)
-        sessionCombo.connect("currentIndexChanged(int)", pick)
-        replaceCheck.connect("toggled(bool)", pick)
-        scan()
+        bids["changed"] = update
+        sourceCombo.connect("currentIndexChanged(int)", update)
+        filesEdit.connect("currentPathChanged(QString)", update)
+        tableEdit.connect("currentPathChanged(QString)", update)
+        replaceCheck.connect("toggled(bool)", update)
+        bids["scan"]()
         result = {}
 
         def accept():
-            atlas = neuro.findAtlasFiles(atlasEdit.currentPath) if atlasEdit.currentPath else {}
+            atlas = neuro.atlasFiles(atlasEdit.currentPath)
             if not atlas:
                 _error(dialog, "Pick the Neuro atlas folder (MNI 2009c templates).")
                 return
-            result.update(files=list(state["files"]), atlas=atlas, qc=bool(qcCheck.checked),
+            result.update(items=list(state["items"]), atlas=atlas, qc=bool(qcCheck.checked),
                           replace=bool(replaceCheck.checked))
-            qt.QSettings().setValue(SETTINGS_BATCH_FOLDER, folderEdit.currentPath)
+            if sourceCombo.currentData == "bids":
+                qt.QSettings().setValue(SETTINGS_BATCH_FOLDER, bids["folderEdit"].currentPath)
             self.logic.setAtlasFolder(atlasEdit.currentPath)
             dialog.accept()
 
         run.connect("clicked()", accept)
-        if not dialog.exec_() or not result.get("files"):
+        if not dialog.exec_() or not result.get("items"):
             return
-        files = result["files"]
-        progressDialog = slicer.util.createProgressDialog(windowTitle="Batch add subjects",
-                                                          labelText="Starting...", maximum=len(files))
+        self._runBatch(folder, result["items"], result["atlas"], result["qc"], result["replace"], "Add subjects")
 
-        def progress(index, total, text):
-            progressDialog.setValue(index)
-            progressDialog.setLabelText(text)
-            slicer.app.processEvents()
-            return not progressDialog.wasCanceled
+    @staticmethod
+    def _sessionComboOf(form, bids):
+        """The session combo box the BIDS picker put under its folder row."""
+        row = form.getWidgetPosition(bids["folderEdit"])[0]
+        return form.itemAt(row + 1, qt.QFormLayout.FieldRole).widget()
 
+    def onNormalizeAgain(self):
+        from StaticNeuroPET import StaticNeuroPETLogic
+        folder, header = self.selected()
+        if not folder or header.get("kind") != normaldb.USER_DEFINED:
+            return
+        have, count = normaldb.nativeCount(folder)
+        if not have:
+            _error(slicer.util.mainWindow(), "No subject has its native image in the database.")
+            return
         try:
-            rows, logPath, stopped = logic.batchAdd(folder, files, result["atlas"], result["qc"], progress,
-                                                    result["replace"])
+            plan, _ = StaticNeuroPETLogic().batchPlan(header, folder)
+        except ValueError as error:
+            _error(slicer.util.mainWindow(), str(error))
+            return
+        text = (f"Normalize again the {have} subject(s) of '{header.get('name')}' from their stored native images, "
+                f"with the database's normalization:\n\n{normaldb.normalizationText(plan)}"
+                + (f" to its template ({(header.get('normalizationTemplate') or {}).get('file')})"
+                   if plan.get("method") == normaldb.NORM_PET_TEMPLATE else "")
+                + ".\n\nTheir maps are replaced (one resampling from the native image)."
+                + (f"\n\n{count - have} subject(s) have no native image and stay as they are." if have < count else ""))
+        if not slicer.util.confirmOkCancelDisplay(text, windowTitle="Normalize again"):
+            return
+        atlas = self._atlasOrAsk()
+        if not atlas:
+            return
+        self._runBatch(folder, StaticNeuroPETLogic.batchItems(folder), atlas, True, True, "Normalize again")
+
+    def onBuildTemplate(self):
+        from StaticNeuroPET import StaticNeuroPETLogic
+        from DICOMGatedDynamicPETLib import templatebuild as tb
+        folder, header = self.selected()
+        if not folder or header.get("kind") != normaldb.USER_DEFINED:
+            return
+        have, count = normaldb.nativeCount(folder)
+        if have < count:
+            _error(slicer.util.mainWindow(), f"{count - have} of the {count} subjects have no native image in the "
+                                             "database: add them again or remove them first.")
+            return
+        if count < 2:
+            _error(slicer.util.mainWindow(), "The template needs at least two subjects.")
+            return
+        dialog, layout, buttons = _scrollDialog(f"Build the template of '{header.get('name')}'",
+                                                slicer.util.mainWindow())
+        dialog.resize(680, 460)
+        target = normaldb.normalizationTarget(header)
+        info = qt.QLabel(
+            f"Builds a study specific template from the {count} subjects' native images. Pass 0 registers every "
+            f"subject to the MNI target ({neuro.templateTitle(target)}) with the database's engine, linear type and "
+            "brain mask, and averages their maps (smoothed with the database's FWHM). Each next pass registers every "
+            "subject to the previous mean, starting from its last matrix. After each pass the group's average drift "
+            "since pass 0 is taken out (the template cannot grow or move), the matrices are saved "
+            "(subjects/<id>/transform.json), every subject is resampled once from its native image and replaced, "
+            "and the template is saved (templates/pass_<k>.nii.gz). It stops when the subjects move less than the "
+            "stop value on average, or after the maximum passes; the last template becomes the database's "
+            "normalization template (PET to PET). Linear registration only. Log: qc/" + tb.ITERATIONS_LOG
+            + ". Then compute the mean / SD maps.")
+        info.wordWrap = True
+        info.textFormat = qt.Qt.PlainText
+        layout.addWidget(info)
+        form = qt.QFormLayout()
+        layout.addLayout(form)
+        passesSpin = qt.QSpinBox()
+        passesSpin.setRange(2, 10)
+        passesSpin.value = tb.MAX_PASSES
+        passesSpin.toolTip = "Pass 0 (to the MNI target) and the passes to the group's own mean, at most."
+        form.addRow("Maximum passes:", passesSpin)
+        stopSpin = qt.QDoubleSpinBox()
+        stopSpin.setRange(0.05, 5.0)
+        stopSpin.decimals = 2
+        stopSpin.singleStep = 0.1
+        stopSpin.suffix = " mm"
+        stopSpin.value = tb.STOP_MM
+        stopSpin.toolTip = ("Stop when the subjects' matrices move less than this on average between two passes (RMS "
+                            "over the corners of a brain-sized box).")
+        form.addRow("Stop below:", stopSpin)
+        qcCheck = qt.QCheckBox("QC picture of each subject (qc/, the last pass)")
+        qcCheck.checked = True
+        form.addRow(qcCheck)
+        layout.addStretch(1)
+        buttons.addButton("Build", qt.QDialogButtonBox.AcceptRole)
+        buttons.addButton(qt.QDialogButtonBox.Cancel)
+        buttons.connect("accepted()", dialog.accept)
+        buttons.connect("rejected()", dialog.reject)
+        if not dialog.exec_():
+            return
+        atlas = self._atlasOrAsk()
+        if not atlas:
+            return
+        progressDialog, progress = self._progressDialog("Build template", count)
+        try:
+            rows, logPath, stopped = StaticNeuroPETLogic().buildTemplate(
+                folder, atlas, int(passesSpin.value), float(stopSpin.value), bool(qcCheck.checked), progress)
         except Exception as error:
-            logging.exception("Batch add failed")
-            _error(slicer.util.mainWindow(), f"The batch could not start:\n{error}")
+            logging.exception("Build template failed")
+            _error(slicer.util.mainWindow(), f"The template could not be built:\n{error}")
             return
         finally:
             progressDialog.close()
+            self.logic.forgetLoaded(folder)
             self.refresh(select=folder)
-        counts = {status: sum(1 for r in rows if r["status"] == status)
-                  for status in ("added", "skipped", "failed", "stopped")}
-        text = (f"Added {counts['added']}, skipped {counts['skipped']} (already in), failed {counts['failed']}"
-                + (" - stopped" if stopped else "") + f".\n\nLog: {logPath}"
-                + ("\nQC pictures: " + os.path.join(folder, "qc") if result["qc"] else "")
-                + "\n\nCheck the QC pictures, remove the badly normalized subjects, then compute the mean / SD maps.")
-        failed = [r for r in rows if r["status"] == "failed"]
-        if failed:
-            text += "\n\nFailed:\n" + "\n".join(f"{r['id']}: {r['message']}" for r in failed[:10])
-            if len(failed) > 10:
-                text += f"\n... ({len(failed) - 10} more in the log)"
-        slicer.util.infoDisplay(text, windowTitle="Batch add subjects")
+        lines = [f"Pass {r['pass']}: {r['subjects']} subjects, moved {r['meanMoveMm'] or '-'} mm (max "
+                 f"{r['maxMoveMm'] or '-'}), drift scale {r['driftScale']}, "
+                 f"template r {r['templateCorrelation'] or '-'}"
+                 + (f", {r['failed']} failed" if r['failed'] else "") for r in rows]
+        used = normaldb.readHeader(folder).get("normalizationTemplate") or {}
+        text = ("\n".join(lines) + ("\n\nStopped." if stopped else "")
+                + (f"\n\nTemplate: pass {used.get('iteration')} ("
+                   + ("converged" if used.get("converged") else "not converged: the maximum passes") + ")."
+                   if used.get("built") == "iterative" and rows else "")
+                + f"\n\nLog: {logPath}\n\nCheck the QC pictures, then compute the mean / SD maps.")
+        slicer.util.infoDisplay(text, windowTitle="Build template")
 
     def onRemoveSubjects(self):
         folder, header = self.selected()
