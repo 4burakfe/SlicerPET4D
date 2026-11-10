@@ -22,12 +22,6 @@ set(MODULE_PYTHON_SCRIPTS
   ${MODULE_NAME}Lib/hardendialog.py
   ${MODULE_NAME}Lib/kinetics.py
   ${MODULE_NAME}Lib/tacplot.py
-  ${MODULE_NAME}Lib/neuro.py
-  ${MODULE_NAME}Lib/neuroreview.py
-  ${MODULE_NAME}Lib/normaldb.py
-  ${MODULE_NAME}Lib/ssp.py
-  ${MODULE_NAME}Lib/staticneuro.py
-  ${MODULE_NAME}Lib/templatebuild.py
   )
 
 set(MODULE_PYTHON_RESOURCES
@@ -125,62 +119,5 @@ if(BUILD_TESTING)
   slicer_add_python_unittest(SCRIPT ${KM_MODULE_NAME}.py)
 endif()
 
-#-----------------------------------------------------------------------------
-# Dynamic Neuro Receptor PET (visible, Nuclear Medicine): workflow app (data, motion correction, CT/MR registration,
-# normalization to MNI ICBM 152 2009c, CerebrA regions, modeling)
-set(NEURO_MODULE_NAME DynamicNeuroPET)
-
-slicerMacroBuildScriptedModule(
-  NAME ${NEURO_MODULE_NAME}
-  SCRIPTS ${NEURO_MODULE_NAME}.py
-  RESOURCES
-    Resources/Icons/${NEURO_MODULE_NAME}.png
-    Resources/Atlas/CerebrA_groups.csv
-    # the atlas files that come with the extension (their licenses: Resources/Atlas/LICENSE.txt)
-    Resources/Atlas/LICENSE.txt
-    Resources/Atlas/mni_icbm152_t1_tal_nlin_sym_09c.nii.gz
-    Resources/Atlas/mni_icbm152_t1_tal_nlin_sym_09c_mask.nii.gz
-    Resources/Atlas/mni_icbm152_gm_tal_nlin_sym_09c.nii.gz
-    Resources/Atlas/mni_icbm152_wm_tal_nlin_sym_09c.nii.gz
-    Resources/Atlas/mni_icbm152_CerebrA_tal_nlin_sym_09c.nii.gz
-    Resources/Atlas/CerebrA_LabelDetails.csv
-    Resources/Atlas/mni_icbm152_CerebrA_tal_nlin_sym_09c_wpons.seg.nrrd
-    Resources/Atlas/mni_icbm152_CerebrA_tal_nlin_sym_09c_wpons.csv
-  WITH_GENERIC_TESTS
-  )
-
-if(BUILD_TESTING)
-  slicer_add_python_unittest(SCRIPT ${NEURO_MODULE_NAME}.py)
-endif()
-
-#-----------------------------------------------------------------------------
-# Neuro PET Database Manager (visible, Nuclear Medicine): normal databases of brain PET (static first; predefined
-# from mean / SD maps or a package, user defined filled from the Neuro workflows)
-set(NDB_MODULE_NAME NeuroPETDatabaseManager)
-
-slicerMacroBuildScriptedModule(
-  NAME ${NDB_MODULE_NAME}
-  SCRIPTS ${NDB_MODULE_NAME}.py
-  RESOURCES Resources/Icons/${NDB_MODULE_NAME}.png
-  WITH_GENERIC_TESTS
-  )
-
-if(BUILD_TESTING)
-  slicer_add_python_unittest(SCRIPT ${NDB_MODULE_NAME}.py)
-endif()
-
-#-----------------------------------------------------------------------------
-# Static Neuro PET/SPECT (visible, Nuclear Medicine): workflow app for a static brain PET / SPECT (data, optional
-# CT/MR registration, normalization, regions with the normal database, review)
-set(STATIC_NEURO_MODULE_NAME StaticNeuroPET)
-
-slicerMacroBuildScriptedModule(
-  NAME ${STATIC_NEURO_MODULE_NAME}
-  SCRIPTS ${STATIC_NEURO_MODULE_NAME}.py
-  RESOURCES Resources/Icons/${STATIC_NEURO_MODULE_NAME}.png
-  WITH_GENERIC_TESTS
-  )
-
-if(BUILD_TESTING)
-  slicer_add_python_unittest(SCRIPT ${STATIC_NEURO_MODULE_NAME}.py)
-endif()
+# The Neuro modules (Dynamic Neuro Receptor PET, Static Neuro PET/SPECT, Neuro PET Database Manager) are in the
+# SlicerNeuroPET extension (Mergen), which depends on this one.
