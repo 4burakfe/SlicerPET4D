@@ -1,4 +1,4 @@
-# DICOM Gated / Dynamic PET (3D Slicer)
+# PET4D: DICOM Gated / Dynamic PET (3D Slicer)
 
 A DICOM plugin that loads **ECG gated** and **dynamic** PET series as sequences, in SUV (body weight, lean body mass or body surface area) or Bq/ml, and keeps
 the tracer, decay correction and frame timing with every volume. Plain static PET loads too.
@@ -520,12 +520,18 @@ added in Review/Edit: its tags are read from the DICOM database.
 
 ## Installation
 
-Install *DICOMGatedDynamicPET* from the Extensions Manager (Nuclear Medicine category) once it is published,
+Install *PET4D* from the Extensions Manager (Nuclear Medicine category) once it is published,
 or add the `DICOMGatedDynamicPET` folder of this repository to *Edit > Application Settings > Modules >
 Additional module paths* and restart Slicer. The plugin works inside the DICOM browser; its defaults are in
 the *Gated / Dynamic PET Settings* module.
 
 ## Developer notes
+
+The extension (repository [SlicerPET4D](https://github.com/4burakfe/SlicerPET4D), formerly
+SlicerDICOMGatedDynamicPET) is called **PET4D**; it was called DICOMGatedDynamicPET before. The module folder, the
+hidden DICOM plugin module `DICOMGatedDynamicPET`, the helper package `DICOMGatedDynamicPETLib` and the application
+settings keys (`DICOMGatedDynamicPET/...`) keep the old name on purpose, so saved settings, additional module paths
+and the extensions built on PET4D (SlicerNeuroPET) keep working.
 
 ```
 DICOMGatedDynamicPET/
