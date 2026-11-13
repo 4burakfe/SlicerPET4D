@@ -91,7 +91,7 @@ class DynamicPETModeling(ScriptedLoadableModule):
             "Fit all segments fills the results table; export the results and the curves as CSV, or make voxel-wise "
             "parametric maps. The functions can be called from Python through DynamicPETModelingLogic.")
         parent.acknowledgementText = (
-            "Part of the DICOM Gated / Dynamic PET extension. SRTM: Lammertsma AA, Hume SP, NeuroImage 1996; basis "
+            "Part of the PET4D extension. SRTM: Lammertsma AA, Hume SP, NeuroImage 1996; basis "
             "functions: Gunn RN et al., NeuroImage 1997; Patlak CS et al., J Cereb Blood Flow Metab 1983; Logan J et "
             "al., J Cereb Blood Flow Metab 1990 and 1996.")
 
@@ -1177,8 +1177,8 @@ class DynamicPETModelingWidget(ScriptedLoadableModuleWidget, VTKObservationMixin
         self.brainMaskCheck = qt.QCheckBox("Mask outside the brain")
         self.brainMaskCheck.checked = False     # follows the mask: on when one is picked, off without one
         self.brainMaskCheck.enabled = False
-        self.brainMaskCheck.toolTip = ("Leave the voxels outside the brain mask at 0 (on when a brain mask is picked; "
-                                       "the Neuro workflow picks the MNI template's brain mask)")
+        self.brainMaskCheck.toolTip = ("Leave the voxels outside the brain mask at 0 (on when a brain mask is picked, "
+                                       "e.g. the MNI template's)")
         self.brainMaskSelector = self._nodeSelector(["vtkMRMLScalarVolumeNode", "vtkMRMLLabelMapVolumeNode"],
                                                     "Volume that is non-zero in the brain (any grid in the same "
                                                     "space as the series, e.g. the MNI brain mask)")

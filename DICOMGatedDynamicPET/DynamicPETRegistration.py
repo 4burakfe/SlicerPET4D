@@ -73,7 +73,7 @@ class DynamicPETRegistration(ScriptedLoadableModule):
             "three steps (rigid, affine, B-spline by default) and the same transform moves every frame and the "
             "summed image. Check the result in the PET / fusion / CT-MR views and the checkerboard, correct it "
             "by hand if needed, then Harden (overwrite the series or save a new one).")
-        parent.acknowledgementText = ("Part of the DICOM Gated / Dynamic PET extension. Registration by BRAINSFit "
+        parent.acknowledgementText = ("Part of the PET4D extension. Registration by BRAINSFit "
                                       "(Johnson HJ et al., BRAINSFit: Mutual Information Rigid Registrations of "
                                       "Whole-Brain 3D Images, Using the Insight Toolkit, Insight Journal 2007).")
 

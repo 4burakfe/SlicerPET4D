@@ -67,7 +67,7 @@ class DynamicPETEditor(ScriptedLoadableModule):
                            "views of all frames at the same slice and a timeline from the study start. Pick the "
                            "dynamic sequence and press Open Review/Edit. Spherical ROIs placed in the large view "
                            "give time-activity curves on the timeline.")
-        parent.acknowledgementText = "Part of the DICOM Gated / Dynamic PET extension."
+        parent.acknowledgementText = "Part of the PET4D extension."
 
 
 # ---------------------------------------------------------------------------

@@ -76,7 +76,7 @@ class DynamicPETMotionCorrection(ScriptedLoadableModule):
             "optionally two passes). Pick the dynamic sequence and the reference frame (or a summed image): every "
             "frame is shown in color over the reference in inverted grey. Register, review the corrected frames "
             "and the detected shift / angles on the timeline (rigid), then save the corrected series.")
-        parent.acknowledgementText = ("Part of the DICOM Gated / Dynamic PET extension. Registration by BRAINSFit "
+        parent.acknowledgementText = ("Part of the PET4D extension. Registration by BRAINSFit "
                                       "(Johnson HJ et al., BRAINSFit: Mutual Information Rigid Registrations of "
                                       "Whole-Brain 3D Images, Using the Insight Toolkit, Insight Journal 2007).")
 

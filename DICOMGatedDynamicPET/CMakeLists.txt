@@ -119,5 +119,3 @@ if(BUILD_TESTING)
   slicer_add_python_unittest(SCRIPT ${KM_MODULE_NAME}.py)
 endif()
 
-# The Neuro modules (Dynamic Neuro Receptor PET, Static Neuro PET/SPECT, Neuro PET Database Manager) are in the
-# SlicerNeuroPET extension (Mergen), which depends on this one.

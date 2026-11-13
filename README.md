@@ -3,6 +3,8 @@
 A DICOM plugin that loads **ECG gated** and **dynamic** PET series as sequences, in SUV (body weight, lean body mass or body surface area) or Bq/ml, and keeps
 the tracer, decay correction and frame timing with every volume. Plain static PET loads too.
 
+![Dynamic PET Review/Edit: the frames of a dynamic brain PET fused on an MR, two spherical ROIs and their time-activity curves on the timeline](Screenhot.jpg)
+
 > **Intended use.** Research software. It is not a certified medical device and must not be used for
 > clinical diagnosis.
 
@@ -444,8 +446,7 @@ The **Dynamic PET Modeling** module (Nuclear Medicine > PET4D) fits kinetic mode
   (*Background threshold*, **0 % by default**: a percentage of the maximum drops a low-uptake cortex next to a hot
   striatum, e.g. with [18F]fallypride), voxels with no activity, or voxels outside the segments when asked, are 0.
   **Mask outside the brain** leaves the voxels outside a brain mask at 0; it is on whenever a mask is picked and off
-  without one. The Neuro workflow picks the MNI template's brain mask once the series is normalized, and none (mask
-  off) for a series that is not normalized.
+  without one.
   **Negative values are clipped to 0** by default (noise in voxels with
   little uptake; untick *Clip negative values to 0* to keep them; the region fits are not clipped). The graphical
   methods use the target's t\*. The BPnd map (else the first map) is shown in the large view at full opacity.
@@ -474,12 +475,13 @@ logic.exportCsv("/tmp/srtm.csv", analysis, results, "SRTM")
 maps = logic.parametricMaps(analysis, "SRTM", referenceId=cerebellumId)   # {"BPnd": volume node, ...}
 ```
 
-## Neuro PET/SPECT (Mergen)
+## Brain PET / SPECT: Mergen (SlicerNeuroPET)
 
-The brain PET / SPECT workflows (Dynamic Neuro Receptor PET, Static Neuro PET/SPECT and the Neuro PET Database
-Manager, with the MNI ICBM 152 2009c and CerebrA atlas files) are in their own extension, **Mergen: Neuro PET/SPECT
-Analysis** ([SlicerNeuroPET](https://github.com/4burakfe/SlicerNeuroPET)). Mergen depends on this extension (it uses
-its DICOM plugin and the Motion Correction, Registration and Modeling modules); this extension works without it.
+The Neuro PET modules that were in this extension (Dynamic Neuro Receptor PET, Static Neuro PET/SPECT and the
+Neuro PET Database Manager, with the MNI ICBM 152 2009c and CerebrA atlas files) moved to their own extension,
+**Mergen: Neuro PET/SPECT Analysis** ([SlicerNeuroPET](https://github.com/4burakfe/SlicerNeuroPET)). Mergen depends
+on this extension (it uses its DICOM plugin and the Motion Correction, Registration and Modeling modules); this
+extension works without it. Install Mergen from the Extensions Manager for the brain workflows.
 
 ## What is stored on the volumes
 
@@ -531,7 +533,7 @@ The extension (repository [SlicerPET4D](https://github.com/4burakfe/SlicerPET4D)
 SlicerDICOMGatedDynamicPET) is called **PET4D**; it was called DICOMGatedDynamicPET before. The module folder, the
 hidden DICOM plugin module `DICOMGatedDynamicPET`, the helper package `DICOMGatedDynamicPETLib` and the application
 settings keys (`DICOMGatedDynamicPET/...`) keep the old name on purpose, so saved settings, additional module paths
-and the extensions built on PET4D (SlicerNeuroPET) keep working.
+and the extensions built on PET4D keep working.
 
 ```
 DICOMGatedDynamicPET/
