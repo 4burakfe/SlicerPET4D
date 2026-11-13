@@ -1,5 +1,7 @@
 # PET4D: DICOM Gated / Dynamic PET (3D Slicer)
 
+(/DICOMGatedDynamicPET/Resources/Icons/DICOMGatedDynamicPET.png)
+
 A DICOM plugin that loads **ECG gated** and **dynamic** PET series as sequences, in SUV (body weight, lean body mass or body surface area) or Bq/ml, and keeps
 the tracer, decay correction and frame timing with every volume. Plain static PET loads too.
 
