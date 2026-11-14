@@ -154,21 +154,33 @@ def _isHidden(node):
     return bool(node.GetHideFromEditors()) or node.GetAttribute(EDITOR_ATTRIBUTE) == "1"
 
 
+_FOREIGN_STATIC_PET = {}       # first instance UID -> _isForeignStaticPet answer (the database has the instance)
+
+
 def _isForeignStaticPet(node):
     """A volume loaded from DICOM by another plugin that is static PET: modality PT, Series Type not GATED or
-    DYNAMIC, no gates or time slices (from the DICOM database)."""
+    DYNAMIC, no gates or time slices (from the DICOM database). The answer is kept per instance UID, so the
+    candidate list (made again on every scene change) asks the database once per series."""
     uids = (node.GetAttribute("DICOM.instanceUIDs") or "").split()
     if not uids or not getattr(slicer, "dicomDatabase", None):
         return False
+    if uids[0] in _FOREIGN_STATIC_PET:
+        return _FOREIGN_STATIC_PET[uids[0]]
     try:
         db = slicer.dicomDatabase
-        if (db.instanceValue(uids[0], "0008,0060") or "").strip() != "PT":
-            return False
-        seriesType = (db.instanceValue(uids[0], "0054,1000") or "").upper()
-        counts = [fe.number(db.instanceValue(uids[0], tag)) for tag in ("0054,0071", "0054,0101")]
-        return "GATED" not in seriesType and "DYNAMIC" not in seriesType and all(not c or c <= 1 for c in counts)
+        modality = (db.instanceValue(uids[0], "0008,0060") or "").strip()
+        if modality != "PT":
+            answer = False
+        else:
+            seriesType = (db.instanceValue(uids[0], "0054,1000") or "").upper()
+            counts = [fe.number(db.instanceValue(uids[0], tag)) for tag in ("0054,0071", "0054,0101")]
+            answer = "GATED" not in seriesType and "DYNAMIC" not in seriesType and \
+                all(not c or c <= 1 for c in counts)
     except Exception:
         return False
+    if modality:            # not in the database (yet, or another database is open): ask again next time
+        _FOREIGN_STATIC_PET[uids[0]] = answer
+    return answer
 
 
 def petCandidates(exclude=None):
@@ -900,6 +912,13 @@ class DynamicPETEditorSession:
         finally:
             self.setLinked(linked)
 
+    def _frameLayers(self, petVolume):
+        """(background, foreground, label) node IDs of a small view showing petVolume (see setFusion)."""
+        fusion = self.fusionVolume
+        if fusion is not None and slicer.mrmlScene.IsNodePresent(fusion):
+            return fusion.GetID(), petVolume.GetID(), None
+        return petVolume.GetID(), None, None
+
     def setFusionOpacity(self, opacity):
         self.fusionOpacity = opacity
         if self.fusionVolume is None:
@@ -1007,6 +1026,9 @@ class DynamicPETEditorSession:
             composite.SetLabelVolumeID(None)
             widget.sliceLogic().FitSliceToAll()
             self._addOverlay(name, widget, 10)
+            # a volume loaded while the session is open would replace the frame (Slicer shows it in every view);
+            # these views have no controller to pick volumes, so they always show their frame (on the fusion)
+            self.viewObservers.append(guardViewVolumes(widget, lambda volume=volume: self._frameLayers(volume)))
         for e in range(dynamicviews.emptyViewCount(len(self.frameVolumes))):
             widget = self._sliceWidget(dynamicviews.emptyViewName(e))
             if widget is None:
@@ -1767,7 +1789,9 @@ def addFrameDialog(session, prepared):
     buttons.connect("accepted()", dialog.accept)
     buttons.connect("rejected()", dialog.reject)
     layout.addWidget(buttons)
-    return bool(dialog.exec_()) and not comparison["errors"]
+    accepted = bool(dialog.exec_())
+    dialog.deleteLater()
+    return accepted and not comparison["errors"]
 
 
 def staticAsSequence(volume):
@@ -1778,6 +1802,23 @@ def staticAsSequence(volume):
         raise ValueError(f"The acquisition time or duration of '{volume.GetName()}' is unknown.")
     scene = slicer.mrmlScene
     sequence = scene.AddNewNodeByClass("vtkMRMLSequenceNode", scene.GenerateUniqueName(f"{volume.GetName()} dynamic"))
+    try:
+        return _fillStaticSequence(sequence, volume, tags)
+    except Exception:
+        browsers = vtk.vtkCollection()
+        slicer.modules.sequences.logic().GetBrowserNodesForSequenceNode(sequence, browsers)
+        for b in range(browsers.GetNumberOfItems()):
+            browser = browsers.GetItemAsObject(b)
+            proxy = browser.GetProxyNode(sequence)
+            for node in (proxy, browser):
+                if node is not None and scene.IsNodePresent(node):
+                    scene.RemoveNode(node)
+        scene.RemoveNode(sequence)
+        raise
+
+
+def _fillStaticSequence(sequence, volume, tags):
+    """staticAsSequence: the frame, attributes and browser of the new one-frame sequence."""
     sequence.SetHideFromEditors(True)
     sequence.SetSaveWithScene(False)
     sequence.SetIndexName("Time")
@@ -1835,7 +1876,8 @@ def _indexValues(rows):
 
 
 def editedFrameNodes(session, baseName):
-    """The frames of the edited series as volume nodes (not in the scene) with their tags, and the timing rows."""
+    """The frames of the edited series as volume nodes (not in the scene) with their tags, and the timing rows.
+    The nodes share the voxels of the shown frames: copy them (SetDataNodeAtValue does) before changing them."""
     from DICOMGatedDynamicPETLib import petseries
     edit = session.edit
     template = session.sequenceNode.GetNthDataNode(0)
@@ -1871,9 +1913,9 @@ def editedFrameNodes(session, baseName):
             node.SetAttribute(PREFIX + "DecayReference", "Review/Edit: frames decay corrected to "
                               + edit.reference.isoformat())
         image, matrix = session._frameData(i)
-        copy = vtk.vtkImageData()
-        copy.DeepCopy(image)
-        node.SetAndObserveImageData(copy)
+        # no copy here: SetDataNodeAtValue copies the node's voxels into the sequence (a copy here as well held
+        # every frame twice while saving)
+        node.SetAndObserveImageData(image)
         node.SetIJKToRASMatrix(matrix)
         try:
             node.SetVoxelValueUnits(template.GetVoxelValueUnits())
@@ -1906,8 +1948,12 @@ def saveEditedSeries(session, name=None, overwrite=False):
     weighting = original.GetAttribute(PREFIX + "SumWeighting") or petseries.SUM_DURATION
     oldSummed = scene.GetNodeByID(original.GetAttribute(PREFIX + "SummedVolumeID") or "")
     oldTable = scene.GetNodeByID(original.GetAttribute(PREFIX + "FrameTimingTableID") or "")
+    previousFrames = []
     if overwrite:
         sequence = original
+        # the original frames are kept (most share their voxels with the edited frames) until the new ones are in
+        previousFrames = [(sequence.GetNthIndexValue(i), sequence.GetNthDataNode(i))
+                          for i in range(sequence.GetNumberOfDataNodes())]
         sequence.RemoveAllDataNodes()
     else:
         sequence = scene.AddNewNodeByClass("vtkMRMLSequenceNode", baseName)
@@ -1918,8 +1964,18 @@ def saveEditedSeries(session, name=None, overwrite=False):
             if key not in (PREFIX + k for k in SUMMED_PREFIX_KEYS) and key != PREFIX + "OpenedFromStatic":
                 sequence.SetAttribute(key, original.GetAttribute(key))
         sequence.SetAttribute(PREFIX + "EditedFrom", original.GetName())
-    for node, value in zip(nodes, _indexValues(rows)):
-        sequence.SetDataNodeAtValue(node, value)
+    try:
+        for node, value in zip(nodes, _indexValues(rows)):
+            sequence.SetDataNodeAtValue(node, value)
+    except Exception:
+        if overwrite:        # put the original frames back
+            sequence.RemoveAllDataNodes()
+            for value, node in previousFrames:
+                sequence.SetDataNodeAtValue(node, value)
+        else:
+            scene.RemoveNode(sequence)
+        raise
+    previousFrames = None
     for key, value in petseries.timingLists(rows).items():
         sequence.SetAttribute(PREFIX + key, value)
     sequence.SetAttribute(PREFIX + "Frames", str(len(rows)))
@@ -2079,11 +2135,15 @@ def exportSequenceToDicom(sequence, description, progress=None):
         derivation += f", edited in Review/Edit from {sequence.GetAttribute(PREFIX + 'EditedFrom')}"
     if sequence.GetAttribute(PREFIX + "MotionCorrection.Method"):
         derivation += f", motion corrected ({sequence.GetAttribute(PREFIX + 'MotionCorrection.Method')})"
-    datasets = dicomexport.buildDatasets(
+    from pydicom.uid import generate_uid
+    seriesUID = str(generate_uid())
+    # built one image at a time while writing (the inputs are checked here, before anything is written)
+    datasets = dicomexport.iterDatasets(
         frames, matrix, rows, template, tags.get("Units"), description,
         _nextSeriesNumber(str(template.StudyInstanceUID)), correction,
         reference if correction == "START" else None, fe.number(tags.get("RadionuclideHalfLifeS")),
-        derivation=derivation, frameNotes=[f"{derivation}: {n}" if n else None for n in notes])
+        seriesInstanceUID=seriesUID, derivation=derivation,
+        frameNotes=[f"{derivation}: {n}" if n else None for n in notes])
     folder = tempfile.mkdtemp(prefix="PET4Dexport", dir=slicer.app.temporaryPath)
     try:
         if progress:
@@ -2095,7 +2155,6 @@ def exportSequenceToDicom(sequence, description, progress=None):
         DICOMUtils.importDicom(folder, db, copyFiles=True)
     finally:
         shutil.rmtree(folder, ignore_errors=True)
-    seriesUID = str(datasets[0].SeriesInstanceUID)
     sequence.SetAttribute(PREFIX + "ExportedSeriesInstanceUID", seriesUID)
     logging.info(f"Dynamic PET: '{sequence.GetName()}' exported to DICOM as '{description}' ({len(paths)} images, "
                  f"series {seriesUID}, study {template.StudyInstanceUID})")
@@ -2119,14 +2178,17 @@ def exportSequenceDialog(sequence):
         seriesUID, count = exportSequenceToDicom(sequence, str(description).strip()[:64], progress)
     except dicomexport.ExportError as error:
         dialog.close()
+        dialog.deleteLater()
         slicer.util.warningDisplay(str(error), windowTitle="Export to DICOM")
         return None
     except Exception as error:
         dialog.close()
+        dialog.deleteLater()
         logging.exception("DICOM export failed")
         slicer.util.errorDisplay(f"DICOM export failed:\n{error}", windowTitle="Export to DICOM")
         return None
     dialog.close()
+    dialog.deleteLater()
     exportDoneDialog(sequence, str(description).strip()[:64], seriesUID, count)
     return seriesUID
 
@@ -2193,7 +2255,7 @@ def exportDoneDialog(sequence, description, seriesUID, count):
     if copyButton is not None:
         copyButton.connect("clicked()", lambda: qt.QApplication.clipboard().setText(folder))
     box.exec_()
-    return box
+    box.deleteLater()
 
 
 def _placeNextTo(sourceNode, nodes):
@@ -2618,11 +2680,15 @@ class DynamicPETEditorWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             self.sequenceSelector.setCurrentNode(sequence)
             self.onOpen()
 
-    def onClose(self, confirm=False):
-        """Close the session; confirm: ask first when there are unsaved edits. False when the user keeps it open."""
+    def onClose(self, confirm=False, opening=None):
+        """Close the session; confirm: ask first when there are unsaved edits. False when the user keeps it open.
+        opening: the name of the PET4D module that takes the layout (it closes Review/Edit), for the question."""
+        question = "The edits of the frames are not saved. Close and discard them?" if not opening else \
+            (f"Review/Edit closes when {opening} opens its layout, and the edits of the frames are not saved.\n\n"
+             "Close Review/Edit and discard them?")
         if self.session is not None and confirm and self.session.isEditing() and \
                 not slicer.app.testingEnabled() and not slicer.util.confirmYesNoDisplay(
-                    "The edits of the frames are not saved. Close and discard them?", windowTitle="Review/Edit"):
+                    question, windowTitle="Review/Edit"):
             return False
         if self.session is not None:
             self.session.close()
@@ -2655,6 +2721,16 @@ class DynamicPETEditorWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             qt.QTimer.singleShot(0, self.onClose)
 
 
+def _testFolder(prefix="tmp"):
+    """A temporary folder of a test, removed when Python (Slicer) exits."""
+    import atexit
+    import shutil
+    import tempfile
+    folder = tempfile.mkdtemp(prefix=prefix)
+    atexit.register(shutil.rmtree, folder, True)
+    return folder
+
+
 # ---------------------------------------------------------------------------
 # Test: a synthetic dynamic series loaded through the plugin, then opened in the editor
 # ---------------------------------------------------------------------------
@@ -2673,11 +2749,10 @@ class DynamicPETEditorTest(ScriptedLoadableModuleTest):
         self.test_ExportDicom()
 
     def test_OpenEditor(self):
-        import tempfile
         from DICOMGatedDynamicPETLib import petseries
         from DICOMGatedDynamicPET import DICOMGatedDynamicPETPluginClass
         durations = [10.0, 10.0, 30.0, 60.0, 120.0]
-        files, _ = petseries.writeSyntheticSeries(tempfile.mkdtemp(prefix="petseries"), kind=petseries.DYNAMIC,
+        files, _ = petseries.writeSyntheticSeries(_testFolder(prefix="petseries"), kind=petseries.DYNAMIC,
                                                   frames=5, frameDurationsS=durations)
         DICOMGatedDynamicPETPluginClass().loadSeries(files, "Synthetic dynamic Bq/ml", petseries.UNITS_ACTIVITY,
                                                      summed=False)
@@ -2746,16 +2821,15 @@ class DynamicPETEditorTest(ScriptedLoadableModuleTest):
 
     def _loadEditSeries(self):
         """A dynamic series (4 frames from 10:00, injection 10:00) and a static one at 11:00 (same injection)."""
-        import tempfile
         from DICOMGatedDynamicPETLib import petseries
         from DICOMGatedDynamicPET import DICOMGatedDynamicPETPluginClass
         plugin = DICOMGatedDynamicPETPluginClass()
         start = datetime.datetime(2026, 1, 1, 10, 0, 0)
-        files, _ = petseries.writeSyntheticSeries(tempfile.mkdtemp(prefix="petseries"), kind=petseries.DYNAMIC,
+        files, _ = petseries.writeSyntheticSeries(_testFolder(prefix="petseries"), kind=petseries.DYNAMIC,
                                                   frames=4, frameDurationsS=[10.0, 30.0, 60.0, 120.0])
         summed = plugin.loadSeries(files, "Edit dynamic Bq/ml", petseries.UNITS_ACTIVITY, summed=True)
         sequence = slicer.mrmlScene.GetNodeByID(summed.GetAttribute(PREFIX + "DynamicSequence"))
-        files, _ = petseries.writeSyntheticSeries(tempfile.mkdtemp(prefix="petseries"), kind=petseries.STATIC,
+        files, _ = petseries.writeSyntheticSeries(_testFolder(prefix="petseries"), kind=petseries.STATIC,
                                                   seriesStart=start + datetime.timedelta(hours=1), injection=start)
         static = plugin.loadSeries(files, "Late static Bq/ml", petseries.UNITS_ACTIVITY)
         return sequence, summed, static
@@ -2853,13 +2927,12 @@ class DynamicPETEditorTest(ScriptedLoadableModuleTest):
         self.assertFalse(slicer.mrmlScene.IsNodePresent(temporary))
 
     def test_ExportDicom(self):
-        import tempfile
         from DICOMLib import DICOMUtils
         from DICOMGatedDynamicPETLib import petseries
         from DICOMGatedDynamicPET import DICOMGatedDynamicPETPluginClass
         plugin = DICOMGatedDynamicPETPluginClass()
         with DICOMUtils.TemporaryDICOMDatabase() as db:
-            folder = tempfile.mkdtemp(prefix="petseries")
+            folder = _testFolder(prefix="petseries")
             files, _ = petseries.writeSyntheticSeries(folder, kind=petseries.DYNAMIC, frames=3,
                                                       frameDurationsS=[10.0, 30.0, 60.0])
             DICOMUtils.importDicom(folder, db)

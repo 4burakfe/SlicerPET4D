@@ -12,6 +12,7 @@ DICOM Gated / Dynamic PET loader reads it back with the same values and timing:
 """
 
 import datetime
+import logging
 import math
 import os
 
@@ -81,16 +82,25 @@ def decayFactor(startS, durationS, halfLifeS):
 
 
 def scaledPixels(image):
-    """(int16 pixels, rescale slope) of a float slice: the slope spreads the largest absolute value over 32767."""
+    """(int16 pixels, rescale slope) of a float slice: the slope spreads the largest absolute value over 32767.
+    Voxels without a value (NaN, infinite) are written as 0: they have no place in an int16 image and would spoil
+    the slope of the others."""
     image = np.asarray(image, dtype=np.float64)
+    finite = np.isfinite(image)
+    if not finite.all():
+        logging.warning(f"DICOM export: {int(image.size - finite.sum())} voxel(s) without a value (NaN or "
+                        "infinite) in a slice written as 0")
+        image = np.where(finite, image, 0.0)
     largest = float(np.max(np.abs(image))) if image.size else 0.0
     slope = largest / 32767.0 if largest > 0 else 1.0
     return np.round(image / slope).astype(np.int16), slope
 
 
-def buildDatasets(frames, ijkToRas, rows, template, units, description, seriesNumber, decayCorrection="START",
-                  decayReference=None, halfLifeS=None, seriesInstanceUID=None, derivation=None, frameNotes=None):
-    """pydicom datasets of the series. frames: arrays kji (one geometry), rows: per frame {"StartDateTime" (ISO or
+def iterDatasets(frames, ijkToRas, rows, template, units, description, seriesNumber, decayCorrection="START",
+                 decayReference=None, halfLifeS=None, seriesInstanceUID=None, derivation=None, frameNotes=None):
+    """pydicom datasets of the series, one at a time (a generator: an image's dataset is built when it is asked
+    for, so writing them does not hold the whole series in memory). The inputs are checked at the call, before
+    anything is built (ExportError). frames: arrays kji (one geometry), rows: per frame {"StartDateTime" (ISO or
     datetime), "DurationS"}; template: a pydicom dataset of the original series; units "Bq/ml" or "SUVbw";
     decayCorrection "START" (to decayReference), "ADMIN" or "NONE"."""
     from pydicom.dataset import Dataset, FileMetaDataset
@@ -115,65 +125,73 @@ def buildDatasets(frames, ijkToRas, rows, template, units, description, seriesNu
     slices = next(iter(shapes))[0]
     seriesUID = seriesInstanceUID or generate_uid()
     now = datetime.datetime.now()
-    datasets = []
-    for f, (array, start, duration) in enumerate(zip(frames, starts, durations)):
-        sinceReference = (start - seriesTime).total_seconds()
-        factor = decayFactor(sinceReference, duration, halfLifeS) if decayCorrection == "START" else None
-        for k in range(slices):
-            meta = FileMetaDataset()
-            meta.MediaStorageSOPClassUID = PET_IMAGE_STORAGE
-            meta.MediaStorageSOPInstanceUID = generate_uid()
-            meta.TransferSyntaxUID = ExplicitVRLittleEndian
-            ds = Dataset()
-            ds.file_meta = meta
-            for keyword in COPIED_KEYWORDS:
-                if keyword in template:
-                    setattr(ds, keyword, template.data_element(keyword).value)
-            ds.SOPClassUID, ds.SOPInstanceUID = PET_IMAGE_STORAGE, meta.MediaStorageSOPInstanceUID
-            ds.Modality = "PT"
-            ds.SeriesInstanceUID = seriesUID
-            ds.SeriesDescription = description
-            ds.SeriesNumber = int(seriesNumber)
-            ds.SeriesDate, ds.SeriesTime = _date(seriesTime), _time(seriesTime)
-            ds.AcquisitionDate, ds.AcquisitionTime = _date(start), _time(start)
-            ds.ContentDate, ds.ContentTime = _date(now), _time(now)
-            ds.InstanceCreationDate, ds.InstanceCreationTime = _date(now), _time(now)
-            ds.ImageType = ["DERIVED", "PRIMARY"]
-            ds.DerivationDescription = ((frameNotes[f] if frameNotes and frameNotes[f] else derivation) or
-                                        "Dynamic PET (PET4D)")[:1024]
-            ds.SeriesType = ["DYNAMIC", "IMAGE"]
-            ds.Units = UNITS_DICOM[units]
-            ds.CountsSource = "EMISSION"
-            ds.DecayCorrection = decayCorrection
-            if decayCorrection == "START":
-                ds.DecayCorrectionDateTime = seriesTime.strftime("%Y%m%d%H%M%S.%f")
-            if factor is not None:
-                ds.DecayFactor = f"{factor:.10g}"[:16]
-            ds.NumberOfSlices = slices
-            ds.NumberOfTimeSlices = len(frames)
-            ds.ImageIndex = f * slices + k + 1
-            ds.InstanceNumber = f * slices + k + 1
-            ds.ActualFrameDuration = int(round(duration * 1000.0))
-            ds.FrameReferenceTime = f"{(sinceReference + duration / 2.0) * 1000.0:.6g}"
-            position = origin + k * sliceStep
-            ds.ImagePositionPatient = [f"{v:.6g}" for v in position]
-            ds.ImageOrientationPatient = [f"{v:.8g}" for v in (*rowDir, *colDir)]
-            ds.PixelSpacing = [f"{v:.8g}" for v in pixelSpacing]
-            ds.SliceThickness = f"{float(np.linalg.norm(sliceStep)):.8g}"
-            normal = np.cross(rowDir, colDir)
-            ds.SliceLocation = f"{float(np.dot(position, normal)):.6g}"
-            pixels, slope = scaledPixels(array[k])
-            ds.Rows, ds.Columns = pixels.shape
-            ds.SamplesPerPixel, ds.PhotometricInterpretation = 1, "MONOCHROME2"
-            ds.BitsAllocated, ds.BitsStored, ds.HighBit, ds.PixelRepresentation = 16, 16, 15, 1
-            ds.RescaleSlope, ds.RescaleIntercept = f"{slope:.10g}"[:16], "0"
-            ds.PixelData = pixels.astype("<i2").tobytes()
-            datasets.append(ds)
-    return datasets
+
+    def generate():
+        for f, (array, start, duration) in enumerate(zip(frames, starts, durations)):
+            sinceReference = (start - seriesTime).total_seconds()
+            factor = decayFactor(sinceReference, duration, halfLifeS) if decayCorrection == "START" else None
+            for k in range(slices):
+                meta = FileMetaDataset()
+                meta.MediaStorageSOPClassUID = PET_IMAGE_STORAGE
+                meta.MediaStorageSOPInstanceUID = generate_uid()
+                meta.TransferSyntaxUID = ExplicitVRLittleEndian
+                ds = Dataset()
+                ds.file_meta = meta
+                for keyword in COPIED_KEYWORDS:
+                    if keyword in template:
+                        setattr(ds, keyword, template.data_element(keyword).value)
+                ds.SOPClassUID, ds.SOPInstanceUID = PET_IMAGE_STORAGE, meta.MediaStorageSOPInstanceUID
+                ds.Modality = "PT"
+                ds.SeriesInstanceUID = seriesUID
+                ds.SeriesDescription = description
+                ds.SeriesNumber = int(seriesNumber)
+                ds.SeriesDate, ds.SeriesTime = _date(seriesTime), _time(seriesTime)
+                ds.AcquisitionDate, ds.AcquisitionTime = _date(start), _time(start)
+                ds.ContentDate, ds.ContentTime = _date(now), _time(now)
+                ds.InstanceCreationDate, ds.InstanceCreationTime = _date(now), _time(now)
+                ds.ImageType = ["DERIVED", "PRIMARY"]
+                ds.DerivationDescription = ((frameNotes[f] if frameNotes and frameNotes[f] else derivation) or
+                                            "Dynamic PET (PET4D)")[:1024]
+                ds.SeriesType = ["DYNAMIC", "IMAGE"]
+                ds.Units = UNITS_DICOM[units]
+                ds.CountsSource = "EMISSION"
+                ds.DecayCorrection = decayCorrection
+                if decayCorrection == "START":
+                    ds.DecayCorrectionDateTime = seriesTime.strftime("%Y%m%d%H%M%S.%f")
+                if factor is not None:
+                    ds.DecayFactor = f"{factor:.10g}"[:16]
+                ds.NumberOfSlices = slices
+                ds.NumberOfTimeSlices = len(frames)
+                ds.ImageIndex = f * slices + k + 1
+                ds.InstanceNumber = f * slices + k + 1
+                ds.ActualFrameDuration = int(round(duration * 1000.0))
+                ds.FrameReferenceTime = f"{(sinceReference + duration / 2.0) * 1000.0:.6g}"
+                position = origin + k * sliceStep
+                ds.ImagePositionPatient = [f"{v:.6g}" for v in position]
+                ds.ImageOrientationPatient = [f"{v:.8g}" for v in (*rowDir, *colDir)]
+                ds.PixelSpacing = [f"{v:.8g}" for v in pixelSpacing]
+                ds.SliceThickness = f"{float(np.linalg.norm(sliceStep)):.8g}"
+                normal = np.cross(rowDir, colDir)
+                ds.SliceLocation = f"{float(np.dot(position, normal)):.6g}"
+                pixels, slope = scaledPixels(array[k])
+                ds.Rows, ds.Columns = pixels.shape
+                ds.SamplesPerPixel, ds.PhotometricInterpretation = 1, "MONOCHROME2"
+                ds.BitsAllocated, ds.BitsStored, ds.HighBit, ds.PixelRepresentation = 16, 16, 15, 1
+                ds.RescaleSlope, ds.RescaleIntercept = f"{slope:.10g}"[:16], "0"
+                ds.PixelData = pixels.astype("<i2").tobytes()
+                yield ds
+
+    return generate()
+
+def buildDatasets(frames, ijkToRas, rows, template, units, description, seriesNumber, decayCorrection="START",
+                  decayReference=None, halfLifeS=None, seriesInstanceUID=None, derivation=None, frameNotes=None):
+    """The datasets of iterDatasets as a list."""
+    return list(iterDatasets(frames, ijkToRas, rows, template, units, description, seriesNumber, decayCorrection,
+                             decayReference, halfLifeS, seriesInstanceUID, derivation, frameNotes))
 
 
 def writeDatasets(folder, datasets):
-    """Write the datasets as files in folder; returns the paths."""
+    """Write the datasets (any iterable, e.g. iterDatasets) as files in folder; returns the paths."""
     os.makedirs(folder, exist_ok=True)
     paths = []
     for n, ds in enumerate(datasets):

@@ -2,7 +2,6 @@
 import datetime
 import os
 import sys
-import tempfile
 
 import numpy as np
 import pydicom
@@ -12,6 +11,16 @@ from DICOMGatedDynamicPETLib import dicomexport as de  # noqa: E402
 from DICOMGatedDynamicPETLib import petseries as ps  # noqa: E402
 
 F18 = 6586.2
+
+
+def _testFolder(prefix="tmp"):
+    """A temporary folder of a test, removed when Python (Slicer) exits."""
+    import atexit
+    import shutil
+    import tempfile
+    folder = tempfile.mkdtemp(prefix=prefix)
+    atexit.register(shutil.rmtree, folder, True)
+    return folder
 
 
 def load(files):
@@ -26,7 +35,7 @@ def load(files):
 
 
 def test_export_reads_back_the_same():
-    files, _ = ps.writeSyntheticSeries(tempfile.mkdtemp(), kind=ps.DYNAMIC, frames=3, frameDurationsS=[10, 30, 60])
+    files, _ = ps.writeSyntheticSeries(_testFolder(), kind=ps.DYNAMIC, frames=3, frameDurationsS=[10, 30, 60])
     frames, ijkToRas, rows, datasets, _ = load(files)
     rng = np.random.default_rng(1)
     frames = [f * rng.uniform(0.5, 1.5, f.shape) for f in frames]
@@ -36,7 +45,7 @@ def test_export_reads_back_the_same():
                                               {"StartDateTime": starts[1], "DurationS": 90}],
                            datasets[0], "Bq/ml", "Edited", 901, "START",
                            datetime.datetime(2026, 1, 1, 10, 0, 0), F18, frameNotes=[None, "F2 + F3 (merged)"])
-    folder = tempfile.mkdtemp()
+    folder = _testFolder()
     paths = de.writeDatasets(folder, out)
     assert len(paths) == 2 * 6
     back, backMatrix, backRows, backDatasets, layout = load(paths)
@@ -58,7 +67,7 @@ def test_export_reads_back_the_same():
 
 
 def test_refusals():
-    files, _ = ps.writeSyntheticSeries(tempfile.mkdtemp(), kind=ps.DYNAMIC, frames=2)
+    files, _ = ps.writeSyntheticSeries(_testFolder(), kind=ps.DYNAMIC, frames=2)
     frames, ijkToRas, rows, datasets, _ = load(files)
     for kwargs in ({"units": "SUVlbm"}, {"frames": [frames[0], frames[1][:2]]},
                    {"rows": [{"StartDateTime": None, "DurationS": 30}] * 2},
@@ -84,3 +93,36 @@ def test_decay_factor_and_pixels():
 def pytest_approx(value):
     import pytest
     return pytest.approx(value, rel=1e-6)
+
+
+def test_streamed_datasets_check_inputs_at_once_and_match_the_list():
+    files, _ = ps.writeSyntheticSeries(_testFolder(), kind=ps.DYNAMIC, frames=2)
+    frames, ijkToRas, rows, datasets, _ = load(files)
+    args = dict(frames=frames, ijkToRas=ijkToRas, rows=rows, template=datasets[0], units="Bq/ml",
+                description="x", seriesNumber=1, decayCorrection="START",
+                decayReference=datetime.datetime(2026, 1, 1, 10), seriesInstanceUID="1.2.3.4")
+    try:
+        de.iterDatasets(**dict(args, units="SUVlbm"))     # refused at the call, before any image is built
+    except de.ExportError:
+        pass
+    else:
+        raise AssertionError("not refused at the call")
+    streamed = de.iterDatasets(**args)
+    assert not isinstance(streamed, list)
+    paths = de.writeDatasets(_testFolder(), streamed)
+    listed = de.buildDatasets(**args)
+    assert len(paths) == len(listed) == 2 * 6
+    for path, ds in zip(paths, listed):
+        written = pydicom.dcmread(path)
+        assert written.SeriesInstanceUID == "1.2.3.4" == ds.SeriesInstanceUID
+        assert (written.ImageIndex, written.PixelData) == (ds.ImageIndex, ds.PixelData)
+        assert written.ImagePositionPatient == ds.ImagePositionPatient
+
+
+def test_scaled_pixels_without_values():
+    image = np.array([[np.nan, -5.0], [10.0, np.inf], [-np.inf, 2.5]])
+    pixels, slope = de.scaledPixels(image)
+    np.testing.assert_allclose(slope, 10.0 / 32767.0)
+    np.testing.assert_allclose(pixels * slope, [[0.0, -5.0], [10.0, 0.0], [0.0, 2.5]], atol=slope)
+    pixels, slope = de.scaledPixels(np.full((2, 2), np.nan))
+    assert slope == 1.0 and not pixels.any()

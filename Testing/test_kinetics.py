@@ -306,3 +306,16 @@ def test_mask_on_grid():
     shifted = np.eye(4)
     shifted[:3, 3] = 100.0                               # entirely outside the mask's grid
     assert not kin.maskOnGrid(mask, np.eye(4), (4, 4, 4), shifted).any()
+
+
+def test_read_curve_csv_with_decimal_commas():
+    # Excel with a decimal comma (e.g. Turkish) writes ; between the columns
+    times, values = kin.readCurveCsv("Zaman (min);Plazma\n0;0\n0,5;100,5\n1;80,25\n")
+    np.testing.assert_allclose(times, [0.0, 0.5, 1.0])
+    np.testing.assert_allclose(values, [0.0, 100.5, 80.25])
+    times, values = kin.readCurveCsv("0\t0\n30\t1,5\n60\t2\n", timeUnit="s")
+    np.testing.assert_allclose(values, [0.0, 1.5, 2.0])
+    times, values = kin.readCurveCsv("0 0\n30 100\n60 80\n", timeUnit="s")       # space separated
+    np.testing.assert_allclose(times, [0.0, 0.5, 1.0])
+    with pytest.raises(ValueError):
+        kin.readCurveCsv("just one line")

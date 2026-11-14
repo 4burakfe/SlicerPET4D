@@ -67,9 +67,12 @@ def hardenDialog(title, text, gridOptions, petSpacing, actions, parent=None):
     buttons.connect("rejected()", dialog.reject)
     layout.addWidget(buttons)
 
-    if not dialog.exec_() or chosen["action"] is None:
-        return None
-    grid = next(key for radio, key in radios if radio.checked)
-    return {"action": chosen["action"], "grid": grid,
-            "spacing": tuple(float(s.value) for s in spins) if grid == reg.OUTPUT_CUSTOM else None,
-            "interpolation": interpolationCombo.currentText}
+    try:
+        if not dialog.exec_() or chosen["action"] is None:
+            return None
+        grid = next(key for radio, key in radios if radio.checked)
+        return {"action": chosen["action"], "grid": grid,
+                "spacing": tuple(float(s.value) for s in spins) if grid == reg.OUTPUT_CUSTOM else None,
+                "interpolation": interpolationCombo.currentText}
+    finally:
+        dialog.deleteLater()

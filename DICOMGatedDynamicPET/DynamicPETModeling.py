@@ -99,6 +99,10 @@ class DynamicPETModeling(ScriptedLoadableModule):
 # ---------------------------------------------------------------------------
 # Logic (no widgets: usable from other modules and scripts)
 # ---------------------------------------------------------------------------
+class CurvesStopped(Exception):
+    """The time-activity curves were stopped before the last frame (nothing is kept)."""
+
+
 class Analysis:
     """A dynamic series, its frame timing relative to time zero and the TACs of the segments of a segmentation:
         sequence, segmentation       the nodes
@@ -230,7 +234,8 @@ class DynamicPETModelingLogic(ScriptedLoadableModuleLogic):
 
     def segmentCurves(self, sequence, segmentation, segmentIds=None, progress=None):
         """{segment ID: frame means} (NaN where a segment has no voxel) and {segment ID: voxel count}. Frames with
-        another grid get the segments again on their own grid."""
+        another grid get the segments again on their own grid. progress(frames done, frames) returning False stops
+        it: CurvesStopped (curves missing their last frames are not returned)."""
         count = sequence.GetNumberOfDataNodes()
         segmentIds = list(segmentIds or self.segmentIds(segmentation))
         curves = {s: np.full(count, np.nan) for s in segmentIds}
@@ -250,8 +255,8 @@ class DynamicPETModelingLogic(ScriptedLoadableModuleLogic):
                 if indexes.size:
                     curves[segmentId][f] = float(np.mean(flat[indexes]))
                     voxels[segmentId] = max(voxels[segmentId], int(indexes.size))
-            if progress is not None and progress(f + 1, count) is False:
-                break
+            if progress is not None and progress(f + 1, count) is False and f + 1 < count:
+                raise CurvesStopped(f"Stopped after {f + 1} of {count} frames")
         return curves, voxels
 
     def prepare(self, sequence, segmentation, timeZero=TIME_FIRST_FRAME, injectionOffsetS=0.0, segmentIds=None,
@@ -1644,6 +1649,9 @@ class DynamicPETModelingWidget(ScriptedLoadableModuleWidget, VTKObservationMixin
             try:
                 self.analysis = self.logic.prepare(sequence, segmentation, self.timeZeroCombo.currentData,
                                                    self.injectionSpin.value, progress=progress)
+            except CurvesStopped:
+                self.infoLabel.text = "Stopped: the time-activity curves were not read."
+                self.analysis = None
             except Exception as error:
                 logging.exception("Dynamic PET Modeling: time-activity curves")
                 self.infoLabel.text = f"Could not read the curves: {error}"
@@ -1653,6 +1661,7 @@ class DynamicPETModelingWidget(ScriptedLoadableModuleWidget, VTKObservationMixin
                 qt.QApplication.restoreOverrideCursor()
                 if dialog is not None:
                     dialog.close()
+                    dialog.deleteLater()
         return self.analysis
 
     def _update(self):
@@ -1858,6 +1867,7 @@ class DynamicPETModelingWidget(ScriptedLoadableModuleWidget, VTKObservationMixin
             finally:
                 qt.QApplication.restoreOverrideCursor()
                 dialog.close()
+                dialog.deleteLater()
 
         results = self._guard(run, "Could not fit the segments")
         if results is None:
@@ -1926,6 +1936,7 @@ class DynamicPETModelingWidget(ScriptedLoadableModuleWidget, VTKObservationMixin
             finally:
                 qt.QApplication.restoreOverrideCursor()
                 dialog.close()
+                dialog.deleteLater()
 
         maps = self._guard(run, "Could not compute the parametric maps")
         if not maps:
@@ -1942,7 +1953,12 @@ class DynamicPETModelingWidget(ScriptedLoadableModuleWidget, VTKObservationMixin
         sequence = self.sequenceSelector.currentNode()
         if sequence is None or not self.logic.isDynamicSequence(sequence):
             return
-        self._closeOtherModules()
+        if getattr(self, "_reviewEditKept", None):
+            return              # entering the module: already asked, Review/Edit stays open
+        if not self._closeOtherModules():
+            if getattr(self, "_reviewEditKept", None) is not None:
+                self._reviewEditKept = True
+            return              # Review/Edit stays open with its unsaved edits
         self._closeSession()
         try:
             self.session = ModelingSession(sequence, self.maxViewsSpin.value, self.orientationCombo.currentText,
@@ -1974,14 +1990,19 @@ class DynamicPETModelingWidget(ScriptedLoadableModuleWidget, VTKObservationMixin
 
     @staticmethod
     def _closeOtherModules():
-        """The other PET4D modules take the main layout too: close them first."""
+        """The other PET4D modules take the main layout too: close them first. Review/Edit asks before unsaved
+        edits of the frames are dropped; False when the user keeps it open (nothing is closed then)."""
         for name in ("DynamicPETEditorWidget", "DynamicPETMotionCorrectionWidget", "DynamicPETRegistrationWidget"):
             try:
                 widget = getattr(slicer.modules, name, None)
                 if widget is not None and getattr(widget, "session", None) is not None:
-                    widget.onClose()
+                    if name != "DynamicPETEditorWidget":
+                        widget.onClose()
+                    elif widget.onClose(confirm=True, opening="Modeling") is False:
+                        return False
             except Exception:
                 logging.warning(f"Could not close {name}", exc_info=True)
+        return True
 
     def onOrientationChanged(self, *args):
         if self.session is not None:
@@ -1997,9 +2018,14 @@ class DynamicPETModelingWidget(ScriptedLoadableModuleWidget, VTKObservationMixin
 
     # --- scene ---------------------------------------------------------------------------------
     def enter(self):
-        self.selectInputs()
-        if self.session is None and self.sequenceSelector.currentNode() is not None:
-            self.onOpen()
+        # entering the module can ask to open the layout more than once: Review/Edit kept open is asked about once
+        self._reviewEditKept = False
+        try:
+            self.selectInputs()
+            if self.session is None and self.sequenceSelector.currentNode() is not None:
+                self.onOpen()
+        finally:
+            self._reviewEditKept = None
 
     def exit(self):
         if self.session is not None:
@@ -2019,6 +2045,16 @@ class DynamicPETModelingWidget(ScriptedLoadableModuleWidget, VTKObservationMixin
     def onNodeRemoved(self, caller, event, node):
         if self.session is not None and node in (self.session.sequence, self.segmentationSelector.currentNode()):
             qt.QTimer.singleShot(0, self.onClose)
+
+
+def _testFolder(prefix="tmp"):
+    """A temporary folder of a test, removed when Python (Slicer) exits."""
+    import atexit
+    import shutil
+    import tempfile
+    folder = tempfile.mkdtemp(prefix=prefix)
+    atexit.register(shutil.rmtree, folder, True)
+    return folder
 
 
 # ---------------------------------------------------------------------------
@@ -2083,7 +2119,6 @@ class DynamicPETModelingTest(ScriptedLoadableModuleTest):
         return sequence, segmentation, dict(zip(names, ids)), curves
 
     def test_Modeling(self):
-        import tempfile
         sequence, segmentation, ids, curves = self.makeSeries()
         logic = DynamicPETModelingLogic()
         analysis = logic.prepare(sequence, segmentation)
@@ -2098,7 +2133,7 @@ class DynamicPETModelingTest(ScriptedLoadableModuleTest):
         self.assertAlmostEqual(injected.timeZeroS, -30.0)
         table = logic.resultsTable(analysis, results, "SRTM")
         self.assertEqual(table.GetNumberOfRows(), 1)
-        folder = tempfile.mkdtemp()
+        folder = _testFolder()
         written = logic.exportCsv(os.path.join(folder, "srtm.csv"), analysis, results, "SRTM")
         self.assertTrue(all(os.path.exists(p) for p in written))
         maps = logic.parametricMaps(analysis, "SRTM", ids["Cerebellum"], thresholdPercent=1.0)

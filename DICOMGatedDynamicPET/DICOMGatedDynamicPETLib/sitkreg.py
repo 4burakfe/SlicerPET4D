@@ -540,6 +540,10 @@ def runStage(fixedImage, movingImage, matrix, kind, centreLps, spacingMm, factor
         if state["cancelled"]:
             raise RegistrationCancelled()
         raise
+    finally:
+        # onIteration holds the method and the method holds onIteration through a C++ command, a cycle the
+        # garbage collector cannot see: without this every run leaks the method (and its images and masks)
+        method.RemoveAllCommands()
     if state["cancelled"]:
         raise RegistrationCancelled()
     return matrixFromSitk(transform), method.GetOptimizerStopConditionDescription()
@@ -722,6 +726,10 @@ def runDeformablePass(fixedImage, movingImage, fixedWorking, initialTransform, g
         if state["cancelled"]:
             raise RegistrationCancelled()
         raise
+    finally:
+        # onIteration holds the method and the method holds onIteration through a C++ command, a cycle the
+        # garbage collector cannot see: without this every run leaks the method (and its images and masks)
+        method.RemoveAllCommands()
     if state["cancelled"]:
         raise RegistrationCancelled()
     return bspline, method.GetOptimizerStopConditionDescription()

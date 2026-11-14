@@ -1,7 +1,6 @@
 """Tests of DICOMGatedDynamicPETLib.petseries without Slicer: python -m pytest Testing (from the repository root)."""
 import os
 import sys
-import tempfile
 
 import numpy as np
 import pytest
@@ -9,6 +8,16 @@ import pydicom
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "DICOMGatedDynamicPET"))
 from DICOMGatedDynamicPETLib import petseries as ps  # noqa: E402
+
+
+def _testFolder(prefix="tmp"):
+    """A temporary folder of a test, removed when Python (Slicer) exits."""
+    import atexit
+    import shutil
+    import tempfile
+    folder = tempfile.mkdtemp(prefix=prefix)
+    atexit.register(shutil.rmtree, folder, True)
+    return folder
 
 
 def _read(files):
@@ -32,7 +41,7 @@ def test_kinds():
 
 
 def test_static():
-    files, expected = ps.writeSyntheticSeries(tempfile.mkdtemp(), kind=ps.STATIC)
+    files, expected = ps.writeSyntheticSeries(_testFolder(), kind=ps.STATIC)
     datasets = _read(files)
     assert ps.datasetKind(datasets[0]) == ps.STATIC
     frames, _ = ps.groupFrames(datasets)
@@ -55,7 +64,7 @@ def test_static():
 def test_synthetic_series_options():
     import datetime
     start = datetime.datetime(2026, 1, 2, 11, 30, 0)
-    files, _ = ps.writeSyntheticSeries(tempfile.mkdtemp(), kind=ps.STATIC, seriesStart=start,
+    files, _ = ps.writeSyntheticSeries(_testFolder(), kind=ps.STATIC, seriesStart=start,
                                        injection=start - datetime.timedelta(hours=2), patient=("Other^One", "42"),
                                        scanner=("Vendor", "Model X"))
     info = ps.acquisitionInfo(_read(files))
@@ -64,7 +73,7 @@ def test_synthetic_series_options():
 
 
 def test_gated():
-    files, expected = ps.writeSyntheticSeries(tempfile.mkdtemp(), kind=ps.GATED)
+    files, expected = ps.writeSyntheticSeries(_testFolder(), kind=ps.GATED)
     datasets = _read(files)
     gates, method = ps.groupGates(datasets)
     assert (len(gates), len(gates[0])) == (4, 6) and method.startswith("Image Index")
@@ -76,7 +85,7 @@ def test_gated():
 
 def test_dynamic_timing():
     durations = [10.0, 10.0, 30.0, 60.0, 120.0]
-    files, expected = ps.writeSyntheticSeries(tempfile.mkdtemp(), kind=ps.DYNAMIC, frames=5,
+    files, expected = ps.writeSyntheticSeries(_testFolder(), kind=ps.DYNAMIC, frames=5,
                                               frameDurationsS=durations)
     datasets = _read(files)
     assert ps.datasetKind(datasets[0]) == ps.DYNAMIC
@@ -100,7 +109,7 @@ def test_dynamic_timing():
 
 def test_dynamic_not_decay_corrected():
     durations = [600.0, 600.0, 600.0]
-    files, expected = ps.writeSyntheticSeries(tempfile.mkdtemp(), kind=ps.DYNAMIC, frames=3,
+    files, expected = ps.writeSyntheticSeries(_testFolder(), kind=ps.DYNAMIC, frames=3,
                                               frameDurationsS=durations, decayCorrection="NONE", shuffle=False)
     datasets = _read(files)
     frames, _ = ps.groupFrames(datasets)
@@ -122,7 +131,7 @@ def test_not_decay_corrected_frame_without_acquisition_time():
     """Decay Correction NONE: a frame without acquisition time gets the start of the timing table (end of the
     previous frame), not the first frame's time; SUV and timing agree."""
     durations = [600.0, 600.0, 600.0]
-    files, expected = ps.writeSyntheticSeries(tempfile.mkdtemp(), kind=ps.DYNAMIC, frames=3,
+    files, expected = ps.writeSyntheticSeries(_testFolder(), kind=ps.DYNAMIC, frames=3,
                                               frameDurationsS=durations, decayCorrection="NONE", shuffle=False)
     reference = ps.frameStartTimes(ps.groupFrames(_read(files))[0])
     datasets = _read(files)
@@ -143,7 +152,7 @@ def test_not_decay_corrected_frame_without_acquisition_time():
 def test_not_decay_corrected_frame_without_any_start():
     """Without a start for a frame (no acquisition time and no duration before it), SUV is not offered
     instead of borrowing the first frame's time."""
-    files, _ = ps.writeSyntheticSeries(tempfile.mkdtemp(), kind=ps.DYNAMIC, frames=3,
+    files, _ = ps.writeSyntheticSeries(_testFolder(), kind=ps.DYNAMIC, frames=3,
                                        frameDurationsS=[600.0] * 3, decayCorrection="NONE", shuffle=False)
     datasets = _read(files)
     frames = _noAcquisitionTime(datasets, 2)
@@ -157,7 +166,7 @@ def test_not_decay_corrected_frame_without_any_start():
 
 
 def test_overlapping_frames_are_reported():
-    files, _ = ps.writeSyntheticSeries(tempfile.mkdtemp(), kind=ps.DYNAMIC, frames=3, frameDurationsS=[600.0] * 3)
+    files, _ = ps.writeSyntheticSeries(_testFolder(), kind=ps.DYNAMIC, frames=3, frameDurationsS=[600.0] * 3)
     datasets = _read(files)
     frames, _ = ps.groupFrames(datasets)
     for ds in frames[0]:
@@ -171,7 +180,7 @@ def test_decay_correction_of_not_decay_corrected_frames():
     """NONE: frame f is corrected to the first frame start by 2^(dt/T) x lambda d / (1 - exp(-lambda d)); with
     the frames corrected, one SUV scale (the dose decayed to the first frame start) holds for all frames."""
     durations = [60.0, 600.0, 1200.0]
-    files, _ = ps.writeSyntheticSeries(tempfile.mkdtemp(), kind=ps.DYNAMIC, frames=3, frameDurationsS=durations,
+    files, _ = ps.writeSyntheticSeries(_testFolder(), kind=ps.DYNAMIC, frames=3, frameDurationsS=durations,
                                        decayCorrection="NONE", shuffle=False)
     datasets = _read(files)
     frames, _ = ps.groupFrames(datasets)
@@ -193,12 +202,12 @@ def test_decay_correction_of_not_decay_corrected_frames():
     del frames[1][0].ActualFrameDuration
     assert ps.decayCorrectionFactors(frames)[1] is None
     # START series are decay corrected already
-    started = _read(ps.writeSyntheticSeries(tempfile.mkdtemp(), kind=ps.DYNAMIC, frames=2)[0])
+    started = _read(ps.writeSyntheticSeries(_testFolder(), kind=ps.DYNAMIC, frames=2)[0])
     assert ps.isDecayCorrected(started[0])
 
 
 def test_dynamic_without_image_index():
-    files, _ = ps.writeSyntheticSeries(tempfile.mkdtemp(), kind=ps.DYNAMIC, frames=3)
+    files, _ = ps.writeSyntheticSeries(_testFolder(), kind=ps.DYNAMIC, frames=3)
     datasets = _read(files)
     for ds in datasets:
         del ds.ImageIndex
@@ -230,13 +239,13 @@ def _drop(datasets, frame=None, slices=()):
 
 
 def test_complete_series_has_no_warnings():
-    files, _ = ps.writeSyntheticSeries(tempfile.mkdtemp(), kind=ps.GATED)
+    files, _ = ps.writeSyntheticSeries(_testFolder(), kind=ps.GATED)
     layout = ps.arrangeFrames(_read(files))
     assert layout["warnings"] == [] and layout["numbers"] == [1, 2, 3, 4] and len(layout["grid"]) == 6
 
 
 def test_missing_gate():
-    files, expected = ps.writeSyntheticSeries(tempfile.mkdtemp(), kind=ps.GATED)
+    files, expected = ps.writeSyntheticSeries(_testFolder(), kind=ps.GATED)
     datasets = _drop(_read(files), frame=2)
     import pytest
     with pytest.raises(ValueError):
@@ -249,7 +258,7 @@ def test_missing_gate():
 
 
 def test_missing_slices_inside_and_at_end():
-    files, expected = ps.writeSyntheticSeries(tempfile.mkdtemp(), kind=ps.DYNAMIC, frames=3)
+    files, expected = ps.writeSyntheticSeries(_testFolder(), kind=ps.DYNAMIC, frames=3)
     datasets = _drop(_read(files), frame=1, slices=(2,))          # a hole in frame 2
     datasets = _drop(datasets, frame=0, slices=(5,))              # top slice of frame 1
     layout = ps.arrangeFrames(datasets)
@@ -271,7 +280,7 @@ def test_missing_slices_inside_and_at_end():
 
 
 def test_missing_slice_in_every_frame_keeps_spacing():
-    files, _ = ps.writeSyntheticSeries(tempfile.mkdtemp(), kind=ps.GATED, slices=8)
+    files, _ = ps.writeSyntheticSeries(_testFolder(), kind=ps.GATED, slices=8)
     datasets = _read(files)
     for f in range(4):
         datasets = _drop(datasets, frame=f, slices=(3,))
@@ -306,7 +315,7 @@ def test_slice_wise_mean_prefers_real_slices():
 
 
 def test_examine_warning():
-    files, _ = ps.writeSyntheticSeries(tempfile.mkdtemp(), kind=ps.GATED)
+    files, _ = ps.writeSyntheticSeries(_testFolder(), kind=ps.GATED)
     header = pydicom.dcmread(files[0], stop_before_pixels=True)
     assert ps.missingImagesWarning(header, ps.GATED, len(files)) is None
     assert "2 of 24 images missing" in ps.missingImagesWarning(header, ps.GATED, len(files) - 2)
@@ -321,7 +330,7 @@ def test_lean_body_mass_and_body_surface_area():
 
 
 def test_suv_methods():
-    files, expected = ps.writeSyntheticSeries(tempfile.mkdtemp(), kind=ps.STATIC)
+    files, expected = ps.writeSyntheticSeries(_testFolder(), kind=ps.STATIC)
     datasets = _read(files)
     suv = ps.suvInfo(datasets)
     bw, _, extra, problems = ps.suvScales(suv, "bw")
@@ -339,7 +348,7 @@ def test_suv_methods():
 
 
 def test_suv_methods_per_frame():
-    files, _ = ps.writeSyntheticSeries(tempfile.mkdtemp(), kind=ps.DYNAMIC, frames=3, frameDurationsS=[600.0] * 3,
+    files, _ = ps.writeSyntheticSeries(_testFolder(), kind=ps.DYNAMIC, frames=3, frameDurationsS=[600.0] * 3,
                                        decayCorrection="NONE", shuffle=False)
     datasets = _read(files)
     frames, _ = ps.groupFrames(datasets)
@@ -373,3 +382,63 @@ def test_summation_weights():
     assert ps.summationWeights(durations, starts, halfLife, ps.SUM_COUNTS, decayCorrected=False)[0] == durations
     weights, text = ps.summationWeights(durations, None, halfLife, ps.SUM_COUNTS)
     assert weights == durations and "needs" in text
+
+
+def test_arrange_frames_places_slices_on_nearest_grid_place():
+    files, _ = ps.writeSyntheticSeries(_testFolder(), kind=ps.DYNAMIC)
+    datasets = _read(files)
+    layout = ps.arrangeFrames(datasets)
+    normal = ps.sliceNormal(datasets[0])
+    for frame, row in zip(layout["frames"], layout["slots"]):
+        for ds in frame:
+            depth = ps._depth(ds, normal)
+            nearest = int(np.argmin([abs(depth - g) for g in layout["grid"]]))   # the plain per-slice search
+            assert row[nearest] is ds
+        assert [ps._depth(ds, normal) for ds in frame] == sorted(ps._depth(ds, normal) for ds in frame)
+
+
+def test_release_pixels_keeps_headers():
+    files, expected = ps.writeSyntheticSeries(_testFolder(), kind=ps.GATED)
+    datasets = _read(files)
+    layout = ps.arrangeFrames(datasets)
+    slots = layout["slots"][0]
+    before = ps.frameArray(slots)
+    ps.releasePixels(slots + [None])
+    for ds in slots:
+        assert "PixelData" not in ds and getattr(ds, "_pixel_array", None) is None
+        assert ds.SOPInstanceUID and ds.ImagePositionPatient
+    # the other gates still have their pixels, and the released gate was read before
+    assert before.shape[0] == len(slots)
+    assert ps.frameArray(layout["slots"][1]).shape == before.shape
+    with pytest.raises(Exception):
+        ps.frameArray(slots)
+
+
+def test_missing_units_still_gives_suv():
+    files, expected = ps.writeSyntheticSeries(_testFolder(), kind=ps.STATIC)
+    datasets = _read(files)
+    for ds in datasets:
+        del ds.Units
+    suv = ps.suvInfo(datasets)
+    assert suv["activityScale"] == 1.0 and suv["suvScale"] is not None and not suv["problems"]
+    assert any("Units" in n for n in suv["notes"])
+    assert "SUVNotes" in ps.suvAttributes(suv)
+    frames, _ = ps.groupFrames(datasets)
+    np.testing.assert_allclose(ps.frameArray(frames[0], suv["suvScale"]), expected[0], rtol=1e-4)
+
+
+def test_injection_time_alone_before_midnight():
+    import datetime
+    start = datetime.datetime(2026, 1, 2, 0, 30, 0)                    # scan after midnight
+    files, expected = ps.writeSyntheticSeries(_testFolder(), kind=ps.STATIC, seriesStart=start,
+                                              injection=datetime.datetime(2026, 1, 1, 23, 30, 0))
+    datasets = _read(files)
+    reference = ps.suvInfo(datasets)["suvScale"]
+    for ds in datasets:                                                # the injection time only, no date
+        radio = ds.RadiopharmaceuticalInformationSequence[0]
+        del radio.RadiopharmaceuticalStartDateTime
+        radio.RadiopharmaceuticalStartTime = "233000"
+    suv = ps.suvInfo(datasets)
+    assert not suv["problems"] and suv["InjectionTime"] == "2026-01-01T23:30:00"
+    assert abs(suv["suvScale"] - reference) < 1e-9 * reference
+    assert ps.acquisitionInfo(datasets)["InjectionToScanStartS"] == "3600"

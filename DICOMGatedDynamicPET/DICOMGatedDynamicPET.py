@@ -171,6 +171,7 @@ class DICOMGatedDynamicPETPluginClass(DICOMPlugin):
             missing = petseries.missingImagesWarning(header, kind, len(files))
             if missing:
                 warnings.append(missing)
+            warnings += suv.get("notes") or []
             if suvNote:
                 warnings.append(suvNote)
             if suvProblems and not available[suvUnits]:
@@ -190,13 +191,20 @@ class DICOMGatedDynamicPETPluginClass(DICOMPlugin):
         loadable.tooltip = tooltip
         loadable.selected = True
         loadable.confidence = confidence
-        _KIND_FOR_LOADABLE[name + "|" + files[0]] = (kind, units)
+        key = name + "|" + files[0]
+        _KIND_FOR_LOADABLE.pop(key, None)
+        _KIND_FOR_LOADABLE[key] = (kind, units)
+        while len(_KIND_FOR_LOADABLE) > _KIND_FOR_LOADABLE_SIZE:      # the oldest examined series go first
+            del _KIND_FOR_LOADABLE[next(iter(_KIND_FOR_LOADABLE))]
         return loadable
 
     def load(self, loadable):
         kind, units = _KIND_FOR_LOADABLE.get(loadable.name + "|" + loadable.files[0], (None, None))
         try:
             return self.loadSeries(list(loadable.files), loadable.name, units, kind, loadable)
+        except LoadCancelled:
+            logging.info(f"Loading of '{loadable.name}' cancelled")
+            return None
         except Exception as error:
             logging.error("PET loading failed:\n" + traceback.format_exc())
             slicer.util.errorDisplay(f"Could not load the PET series:\n{error}")
@@ -220,8 +228,11 @@ class DICOMGatedDynamicPETPluginClass(DICOMPlugin):
                 if i % 20 == 0:
                     progress.setValue(i)
                     slicer.app.processEvents()
+                    if progress.wasCanceled:
+                        raise LoadCancelled()
         finally:
             progress.close()
+            progress.deleteLater()
 
         kind = kind or petseries.datasetKind(datasets[0]) or petseries.STATIC
         if units is None:
@@ -316,21 +327,29 @@ class DICOMGatedDynamicPETPluginClass(DICOMPlugin):
             _setPetDisplay(node, 0.0, float(np.percentile(array, 99.9)) if array.size else 1.0)
         return node
 
-    def _sequence(self, name, nodes, indexValues, indexName, indexUnit, attributes, prefix, upper):
-        """Sequence of the frame nodes (removed from the scene) with a browser and a proxy; returns
-        (sequence, browser, proxy)."""
-        baseName = slicer.mrmlScene.GenerateUniqueName(name)
-        sequenceNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLSequenceNode", baseName)
+    def _sequence(self, name, indexName, indexUnit, attributes, prefix):
+        """Empty sequence node for the frames; fill it with _addToSequence, then make the browser and proxy
+        with _browse."""
+        sequenceNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLSequenceNode",
+                                                          slicer.mrmlScene.GenerateUniqueName(name))
         sequenceNode.SetIndexName(indexName)
         sequenceNode.SetIndexUnit(indexUnit)
         sequenceNode.SetIndexType(sequenceNode.NumericIndex)
         sequenceNode.SetAttribute("DICOM.Modality", "PT")
         for key, value in attributes.items():
             sequenceNode.SetAttribute(prefix + key, str(value))
-        for node, value in zip(nodes, indexValues):
-            sequenceNode.SetDataNodeAtValue(node, value)
-            slicer.mrmlScene.RemoveNode(node)
+        return sequenceNode
 
+    @staticmethod
+    def _addToSequence(sequenceNode, node, value):
+        """Copy a frame node into the sequence and remove it from the scene right away, so a long series holds
+        one frame node besides the sequence while it loads (not all of them)."""
+        sequenceNode.SetDataNodeAtValue(node, value)
+        slicer.mrmlScene.RemoveNode(node)
+
+    def _browse(self, sequenceNode, indexName, upper):
+        """Browser and proxy of a filled sequence: (browser, proxy)."""
+        baseName = sequenceNode.GetName()
         browserNode = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLSequenceBrowserNode", f"{baseName} browser")
         slicer.modules.sequences.logic().AddSynchronizedNode(sequenceNode, None, browserNode)
         if hasattr(browserNode, "SetAndObservePrimarySequenceNodeID"):
@@ -342,26 +361,32 @@ class DICOMGatedDynamicPETPluginClass(DICOMPlugin):
         proxyNode.SetName(f"{baseName} (current {indexName.lower() if indexName == 'Gate' else 'frame'})")
         proxyNode.CreateDefaultDisplayNodes()
         _setPetDisplay(proxyNode, 0.0, upper)   # one window for all frames, so the cine does not flicker
-        return sequenceNode, browserNode, proxyNode
+        return browserNode, proxyNode
 
     def _loadGated(self, name, layout, scales, ijkToRas, units, prefix, common, loadable, summed=True):
         gates, method, numbers = layout["frames"], layout["method"], layout["numbers"]
-        nodes, upper, summer = [], 0.0, petseries.SliceWiseMean()
+        upper, summer = 0.0, petseries.SliceWiseMean()
         gateName = name if " gated " in f" {name} " else f"{name} gated"
-        for i, (gate, slots, g) in enumerate(zip(gates, layout["slots"], numbers)):
-            array = petseries.frameArray(slots, scales[i])
-            upper = max(upper, float(np.percentile(array, 99.9)))
-            summer.add(array, slots)
-            node = self._volume(f"{gateName} G{g}", array, ijkToRas, units, prefix, common, gate, addToScene=False)
-            node.SetAttribute(prefix + "Gate", str(g))
-            trigger, duration = petseries.gateTiming(gate)
-            if trigger is not None:
-                node.SetAttribute(prefix + "TriggerTimeMs", str(trigger))
-            if duration is not None:
-                node.SetAttribute(prefix + "FrameDurationMs", str(duration))
-            nodes.append(node)
-        sequenceNode, browserNode, proxyNode = self._sequence(
-            gateName, nodes, [str(g) for g in numbers], "Gate", "", {}, prefix, upper)
+        sequenceNode = self._sequence(gateName, "Gate", "", {}, prefix)
+        try:
+            for i, (gate, slots, g) in enumerate(zip(gates, layout["slots"], numbers)):
+                array = petseries.frameArray(slots, scales[i])
+                petseries.releasePixels(slots)   # the images of this gate are not read again
+                upper = max(upper, float(np.percentile(array, 99.9)))
+                summer.add(array, slots)
+                node = self._volume(f"{gateName} G{g}", array, ijkToRas, units, prefix, common, gate,
+                                    addToScene=False)
+                node.SetAttribute(prefix + "Gate", str(g))
+                trigger, duration = petseries.gateTiming(gate)
+                if trigger is not None:
+                    node.SetAttribute(prefix + "TriggerTimeMs", str(trigger))
+                if duration is not None:
+                    node.SetAttribute(prefix + "FrameDurationMs", str(duration))
+                self._addToSequence(sequenceNode, node, str(g))
+        except Exception:
+            slicer.mrmlScene.RemoveNode(sequenceNode)
+            raise
+        browserNode, proxyNode = self._browse(sequenceNode, "Gate", upper)
         browserNode.SetPlaybackRateFps(len(gates))
 
         if not summed:
@@ -400,28 +425,33 @@ class DICOMGatedDynamicPETPluginClass(DICOMPlugin):
             halfLife = None
         weights, weightingText = petseries.summationWeights(
             durations, [row["StartFromStudyStartS"] for row in timing], halfLife, weighting, decayCorrected)
-        nodes, upper, summer = [], 0.0, petseries.SliceWiseMean()
-        for f, (slots, frame, row) in enumerate(zip(layout["slots"], frames, timing)):
-            array = petseries.frameArray(slots, scales[f])
-            upper = max(upper, float(np.percentile(array, 99.9)))
-            if summed:
-                # summed acquisition = weighted mean of the concentrations (by duration or by counts), slice by
-                # slice over the frames that have the slice
-                summer.add(array, slots, weights[f] if weights else 1.0)
-            node = self._volume(f"{name} F{row['Frame']}", array, ijkToRas, units, prefix, common, frame,
-                                addToScene=False)
-            node.SetAttribute(prefix + "Frame", str(row["Frame"]))
-            if common.get("Scale") == "per frame":
-                node.SetAttribute(prefix + "FrameScale", f"{scales[f]:.8g}")
-            if layout.get("decayFactors"):
-                node.SetAttribute(prefix + "LoaderDecayFactor", f"{layout['decayFactors'][f]:.8g}")
-            for key, value in row.items():
-                if key != "Frame" and value is not None:
-                    node.SetAttribute(prefix + key, str(value))
-            nodes.append(node)
+        upper, summer = 0.0, petseries.SliceWiseMean()
         indexValues = frameIndexValues(timing)
-        sequenceNode, browserNode, proxyNode = self._sequence(
-            name, nodes, indexValues, "Time", "s", petseries.timingLists(timing), prefix, upper)
+        sequenceNode = self._sequence(name, "Time", "s", petseries.timingLists(timing), prefix)
+        try:
+            for f, (slots, frame, row) in enumerate(zip(layout["slots"], frames, timing)):
+                array = petseries.frameArray(slots, scales[f])
+                petseries.releasePixels(slots)   # the images of this frame are not read again
+                upper = max(upper, float(np.percentile(array, 99.9)))
+                if summed:
+                    # summed acquisition = weighted mean of the concentrations (by duration or by counts), slice
+                    # by slice over the frames that have the slice
+                    summer.add(array, slots, weights[f] if weights else 1.0)
+                node = self._volume(f"{name} F{row['Frame']}", array, ijkToRas, units, prefix, common, frame,
+                                    addToScene=False)
+                node.SetAttribute(prefix + "Frame", str(row["Frame"]))
+                if common.get("Scale") == "per frame":
+                    node.SetAttribute(prefix + "FrameScale", f"{scales[f]:.8g}")
+                if layout.get("decayFactors"):
+                    node.SetAttribute(prefix + "LoaderDecayFactor", f"{layout['decayFactors'][f]:.8g}")
+                for key, value in row.items():
+                    if key != "Frame" and value is not None:
+                        node.SetAttribute(prefix + key, str(value))
+                self._addToSequence(sequenceNode, node, indexValues[f])
+        except Exception:
+            slicer.mrmlScene.RemoveNode(sequenceNode)
+            raise
+        browserNode, proxyNode = self._browse(sequenceNode, "Time", upper)
         sequenceNode.SetAttribute(prefix + "SumWeighting", weighting)   # followed when the frames are summed again
         sequenceNode.SetAttribute(prefix + "IndexMeaning", "seconds from the scan start to the frame middle"
                                   if timing[0]["MidFromScanStartS"] is not None else "frame number")
@@ -480,8 +510,14 @@ class DICOMGatedDynamicPETWidget(ScriptedLoadableModuleWidget):
     """No interface: the plugin works inside the DICOM browser."""
 
 
-# Loadable name + first file -> (kind, units) (Qt-wrapped loadables can lose Python attributes)
+# Loadable name + first file -> (kind, units) (Qt-wrapped loadables can lose Python attributes); the latest
+# examined series only
 _KIND_FOR_LOADABLE = {}
+_KIND_FOR_LOADABLE_SIZE = 2000
+
+
+class LoadCancelled(Exception):
+    """Cancel pressed while the PET images were read."""
 
 
 class DICOMGatedPET4DPluginClass(DICOMGatedDynamicPETPluginClass):
@@ -598,6 +634,16 @@ def _show(volumeNodeID):
         logging.warning("Could not show the PET volume:\n" + traceback.format_exc())
 
 
+def _testFolder(prefix="tmp"):
+    """A temporary folder of a test, removed when Python (Slicer) exits."""
+    import atexit
+    import shutil
+    import tempfile
+    folder = tempfile.mkdtemp(prefix=prefix)
+    atexit.register(shutil.rmtree, folder, True)
+    return folder
+
+
 # ---------------------------------------------------------------------------
 # Test: synthetic static, gated and dynamic PET written to a temporary folder and loaded through the plugin
 # ---------------------------------------------------------------------------
@@ -623,8 +669,7 @@ class DICOMGatedDynamicPETTest(ScriptedLoadableModuleTest):
 
     @staticmethod
     def _write(kind, **options):
-        import tempfile
-        return petseries.writeSyntheticSeries(tempfile.mkdtemp(prefix="petseries"), kind=kind, **options)
+        return petseries.writeSyntheticSeries(_testFolder(prefix="petseries"), kind=kind, **options)
 
     def test_LoadStatic(self):
         files, expected = self._write(petseries.STATIC)

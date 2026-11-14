@@ -411,28 +411,36 @@ class DynamicPETMotionCorrectionLogic(ScriptedLoadableModuleLogic):
             if not key.startswith(MC_PREFIX) and key != PREFIX + "SummedVolumeID":
                 corrected.SetAttribute(key, sequenceNode.GetAttribute(key))
         resamplers = {}
-        for i in range(sequenceNode.GetNumberOfDataNodes()):
-            source = sequenceNode.GetNthDataNode(i)
-            result = results[i] if i < len(results) else {"status": mc.NOT_RUN, "image": None, "shift": None}
-            frame = self._frameCopy(source, result["image"])
-            if grid is not None:
-                frame.SetAndObserveImageData(self._onGrid(source, frame.GetImageData(), grid, resamplers))
-                frame.SetIJKToRASMatrix(resampling.vtkMatrix(grid[1]))
-            frame.SetAttribute(MC_PREFIX + "Status", result["status"])
-            if result.get("shift") is not None:
-                frame.SetAttribute(MC_PREFIX + "ShiftRASMm", mc.vectorText(result["shift"]))
-                frame.SetAttribute(MC_PREFIX + "AnglesRASDeg", mc.vectorText(result["angles"]))
-            corrected.SetDataNodeAtValue(frame, sequenceNode.GetNthIndexValue(i))
-        corrected.SetAttribute(MC_PREFIX + "Method", method)
-        corrected.SetAttribute(MC_PREFIX + "Reference", referenceText)
-        corrected.SetAttribute(MC_PREFIX + "OriginalSequence", sequenceNode.GetName())
-        browser, proxy = self._browserOf(corrected, sequenceNode)
-        table = self.motionTable(f"{name} motion", results)
-        table.SetAttribute(MC_PREFIX + "SequenceNodeID", corrected.GetID())
-        corrected.SetAttribute(MC_PREFIX + "TableID", table.GetID())
+        browser = proxy = table = summedNode = None
+        try:
+            for i in range(sequenceNode.GetNumberOfDataNodes()):
+                source = sequenceNode.GetNthDataNode(i)
+                result = results[i] if i < len(results) else {"status": mc.NOT_RUN, "image": None, "shift": None}
+                frame = self._frameCopy(source, result["image"])
+                if grid is not None:
+                    frame.SetAndObserveImageData(self._onGrid(source, frame.GetImageData(), grid, resamplers))
+                    frame.SetIJKToRASMatrix(resampling.vtkMatrix(grid[1]))
+                frame.SetAttribute(MC_PREFIX + "Status", result["status"])
+                if result.get("shift") is not None:
+                    frame.SetAttribute(MC_PREFIX + "ShiftRASMm", mc.vectorText(result["shift"]))
+                    frame.SetAttribute(MC_PREFIX + "AnglesRASDeg", mc.vectorText(result["angles"]))
+                corrected.SetDataNodeAtValue(frame, sequenceNode.GetNthIndexValue(i))
+            corrected.SetAttribute(MC_PREFIX + "Method", method)
+            corrected.SetAttribute(MC_PREFIX + "Reference", referenceText)
+            corrected.SetAttribute(MC_PREFIX + "OriginalSequence", sequenceNode.GetName())
+            browser, proxy = self._browserOf(corrected, sequenceNode)
+            table = self.motionTable(f"{name} motion", results)
+            table.SetAttribute(MC_PREFIX + "SequenceNodeID", corrected.GetID())
+            corrected.SetAttribute(MC_PREFIX + "TableID", table.GetID())
 
-        source = summedSource or self.summedVolumeOf(sequenceNode)
-        summedNode = self.resum(corrected, source) if resum else None
+            source = summedSource or self.summedVolumeOf(sequenceNode)
+            summedNode = self.resum(corrected, source) if resum else None
+        except Exception:
+            # no half filled series is left in the scene
+            for node in (summedNode, table, proxy, browser, corrected):
+                if node is not None and slicer.mrmlScene.IsNodePresent(node):
+                    slicer.mrmlScene.RemoveNode(node)
+            raise
         if summedNode is not None:
             corrected.SetAttribute(PREFIX + "SummedVolumeID", summedNode.GetID())
         elif source is not None:
@@ -1386,6 +1394,7 @@ class DynamicPETMotionCorrectionWidget(ScriptedLoadableModuleWidget, VTKObservat
         self.results = None
         self.resultsSettings = None
         self.undo = None              # harden() record, for Revert
+        self._reviewEditKept = None   # while entering the module: the user kept Review/Edit (unsaved edits) open
         self.hardened = False         # the results are hardened into a motion corrected series
         self._updating = False
 
@@ -1665,7 +1674,7 @@ class DynamicPETMotionCorrectionWidget(ScriptedLoadableModuleWidget, VTKObservat
         self.hardenButton.connect("clicked()", self.onHarden)
         self.exportButton.connect("clicked()", self.onExport)
         self.addObserver(slicer.mrmlScene, slicer.mrmlScene.StartCloseEvent, self.onSceneClose)
-        self.addObserver(slicer.mrmlScene, slicer.mrmlScene.NodeRemovedEvent, self.onNodeRemoved)
+        self.addObserver(slicer.mrmlScene, slicer.mrmlScene.NodeAboutToBeRemovedEvent, self.onNodeRemoved)
         self.onMethodChanged()
         self.selectDynamicSequence()
         self.onSequenceChanged(self.sequenceSelector.currentNode(), openLayout=False)
@@ -1769,7 +1778,12 @@ class DynamicPETMotionCorrectionWidget(ScriptedLoadableModuleWidget, VTKObservat
         node = self.sequenceSelector.currentNode()
         if node is None:
             return
-        self._closeReviewEdit()
+        if self._reviewEditKept:
+            return              # entering the module: already asked, Review/Edit stays open
+        if not self._closeReviewEdit():
+            if self._reviewEditKept is not None:
+                self._reviewEditKept = True
+            return              # Review/Edit stays open with its unsaved edits
         results = self.results
         self._closeSession()
         try:
@@ -1812,13 +1826,16 @@ class DynamicPETMotionCorrectionWidget(ScriptedLoadableModuleWidget, VTKObservat
 
     @staticmethod
     def _closeReviewEdit():
-        """Review/Edit and this module both take the main layout and a timeline dock: close Review/Edit first."""
+        """Review/Edit and this module both take the main layout and a timeline dock: close Review/Edit first. It
+        asks before unsaved edits of the frames are dropped; False when the user keeps Review/Edit open."""
         try:
             widget = getattr(slicer.modules, "DynamicPETEditorWidget", None)
             if widget is not None and getattr(widget, "session", None) is not None:
-                widget.onClose()
+                if widget.onClose(confirm=True, opening="Motion Correction") is False:
+                    return False
         except Exception:
             logging.warning("Could not close Dynamic PET Review/Edit", exc_info=True)
+        return True
 
     def onOrientationChanged(self, index):
         if self.session is not None:
@@ -1951,6 +1968,7 @@ class DynamicPETMotionCorrectionWidget(ScriptedLoadableModuleWidget, VTKObservat
         finally:
             qt.QApplication.restoreOverrideCursor()
             dialog.close()
+            dialog.deleteLater()
         self.results, self.resultsSettings, self.undo, self.hardened = results, settings, None, False
         self.session.setResults(results, mc.showsMotionRows(settings["method"]))
         self._updateButtons()
@@ -2007,6 +2025,10 @@ class DynamicPETMotionCorrectionWidget(ScriptedLoadableModuleWidget, VTKObservat
             return
         finally:
             qt.QApplication.restoreOverrideCursor()
+        # the corrected frames are in the series now: the registration keeps its motion and statuses only, which
+        # frees the corrected copy of every registered frame (the views and windows use the hardened series)
+        for result in results:
+            result["image"] = None
         self.results, self.resultsSettings, self.undo, self.hardened = results, settings, undo, True
         if choice["action"] == registration.OVERWRITE:
             self.onOpen()             # the views show the overwritten frames
@@ -2066,10 +2088,15 @@ class DynamicPETMotionCorrectionWidget(ScriptedLoadableModuleWidget, VTKObservat
 
     # --- scene ---------------------------------------------------------------------------------
     def enter(self):
-        if self.sequenceSelector.currentNode() is None:
-            self.selectDynamicSequence()
-        if self.session is None and self.sequenceSelector.currentNode() is not None:
-            self.onOpen()
+        # entering the module can ask to open the layout more than once: Review/Edit kept open is asked about once
+        self._reviewEditKept = False
+        try:
+            if self.sequenceSelector.currentNode() is None:
+                self.selectDynamicSequence()
+            if self.session is None and self.sequenceSelector.currentNode() is not None:
+                self.onOpen()
+        finally:
+            self._reviewEditKept = None
 
     def exit(self):
         """Leaving the module: close the layout and its timeline and go back to the four-up layout. The

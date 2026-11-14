@@ -1044,6 +1044,8 @@ class DynamicPETRegistrationWidget(ScriptedLoadableModuleWidget, VTKObservationM
         self.result = None           # logic.register() result, pending until Harden
         self.undo = None             # harden() record, for Revert
         self.hardened = False
+        self.manualKept = None       # manual correction (4x4) of the closed layout, put back when it opens again
+        self._reviewEditKept = None  # while entering the module: the user kept Review/Edit (unsaved edits) open
         self._updating = False
 
         # --- dynamic series and reference
@@ -1304,7 +1306,8 @@ class DynamicPETRegistrationWidget(ScriptedLoadableModuleWidget, VTKObservationM
         self.openButton.connect("clicked()", self.onOpen)
         self.closeButton.connect("clicked()", self.onClose)
         self.addObserver(slicer.mrmlScene, slicer.mrmlScene.StartCloseEvent, self.onSceneClose)
-        self.addObserver(slicer.mrmlScene, slicer.mrmlScene.NodeRemovedEvent, self.onNodeRemoved)
+        # about to be removed: the selectors still show the node (after the removal they may have moved on)
+        self.addObserver(slicer.mrmlScene, slicer.mrmlScene.NodeAboutToBeRemovedEvent, self.onNodeRemoved)
         self.onEngineChanged()
         self.selectInputs()
         self.onSequenceChanged(self.sequenceSelector.currentNode(), openLayout=False)
@@ -1471,9 +1474,15 @@ class DynamicPETRegistrationWidget(ScriptedLoadableModuleWidget, VTKObservationM
             self.referenceSource()
         if sequence is None or fixed is None or source is None:
             return
-        self._closeOtherModules()
+        if self._reviewEditKept:
+            return              # entering the module: already asked, Review/Edit stays open
+        if not self._closeOtherModules("PET to CT/MR Registration"):
+            if self._reviewEditKept is not None:
+                self._reviewEditKept = True
+            return              # Review/Edit stays open with its unsaved edits
         result = self.result
         self._closeSession()
+        manual = self.manualKept
         try:
             self.session = RegistrationSession(fixed)
             self.session.petColor = self.petColorCombo.currentText
@@ -1487,11 +1496,14 @@ class DynamicPETRegistrationWidget(ScriptedLoadableModuleWidget, VTKObservationM
             self.session.open(source)
             if result is not None:
                 self.session.setRegistration(result["linear"], result["bspline"])
+            if manual is not None:      # the manual correction made before the layout was closed
+                self.session.manual.SetMatrixTransformToParent(_vtkMatrix(manual))
             self._applyFixedPreset()
         except Exception as error:
             logging.exception("Could not open Dynamic PET to CT/MR Registration")
             slicer.util.errorDisplay(f"Could not open the registration layout:\n{error}")
             self._closeSession()
+            self.manualKept = manual
         self.closeButton.enabled = self.session is not None
         self._syncWindowWidgets()
         self._updateButtons()
@@ -1502,6 +1514,9 @@ class DynamicPETRegistrationWidget(ScriptedLoadableModuleWidget, VTKObservationM
                 self.manualButton.blockSignals(True)
                 self.manualButton.checked = False
                 self.manualButton.blockSignals(False)
+            # the manual correction is pending like the registration: kept for the next time the layout opens
+            # (the session removes its transform); dropped with the registration (_clearResult, Harden)
+            self.manualKept = self.session.manualMatrix() if self._hasManual() else None
             self.session.close()
             self.session = None
 
@@ -1512,15 +1527,22 @@ class DynamicPETRegistrationWidget(ScriptedLoadableModuleWidget, VTKObservationM
             self._updateButtons()
 
     @staticmethod
-    def _closeOtherModules():
-        """Review/Edit and Motion Correction take the main layout with a timeline dock: close them first."""
+    def _closeOtherModules(opening="another module"):
+        """Review/Edit and Motion Correction take the main layout with a timeline dock: close them first (also
+        used by the Neuro modules, which open this module's layout). Review/Edit asks before unsaved edits of the
+        frames are dropped (opening: the module named in the question); False when the user keeps it open
+        (nothing is closed then)."""
         for name in ("DynamicPETEditorWidget", "DynamicPETMotionCorrectionWidget"):
             try:
                 widget = getattr(slicer.modules, name, None)
                 if widget is not None and getattr(widget, "session", None) is not None:
-                    widget.onClose()
+                    if name != "DynamicPETEditorWidget":
+                        widget.onClose()
+                    elif widget.onClose(confirm=True, opening=opening) is False:
+                        return False
             except Exception:
                 logging.warning(f"Could not close {name}", exc_info=True)
+        return True
 
     # --- windows -------------------------------------------------------------------------------
     def _fixedPresetWindow(self):
@@ -1581,6 +1603,7 @@ class DynamicPETRegistrationWidget(ScriptedLoadableModuleWidget, VTKObservationM
         self.result = None
         self.undo = None
         self.hardened = False
+        self.manualKept = None
         if getattr(self, "session", None) is not None:
             self.session.setRegistration(None, None)
             self.session.resetManual()
@@ -1650,7 +1673,7 @@ class DynamicPETRegistrationWidget(ScriptedLoadableModuleWidget, VTKObservationM
             slicer.app.processEvents()
             return not dialog.wasCanceled
 
-        self._clearResult()
+        # the previous result and manual correction stay until the new run gives a result
         qt.QApplication.setOverrideCursor(qt.Qt.WaitCursor)
         try:
             result = self.logic.register(fixed, source, settings, progress)
@@ -1661,9 +1684,14 @@ class DynamicPETRegistrationWidget(ScriptedLoadableModuleWidget, VTKObservationM
         finally:
             qt.QApplication.restoreOverrideCursor()
             dialog.close()
+            dialog.deleteLater()
         if not result["steps"]:
-            self.transformLabel.text = "Stopped before the first step."
+            kept = self.result is not None or self._hasManual()
+            self._updateTransformText()
+            self.transformLabel.text = ("Stopped before the first step: the previous result is kept.\n"
+                                        + self.transformLabel.text) if kept else "Stopped before the first step."
             return
+        self._clearResult()
         self.result = result
         self.session.setRegistration(result["linear"], result["bspline"])
         self.checkerCheck.checked = True          # 2 x 4 with the checkerboard column
@@ -1720,6 +1748,7 @@ class DynamicPETRegistrationWidget(ScriptedLoadableModuleWidget, VTKObservationM
         referenceIndex = self.referenceCombo.currentIndex
         bspline = self.result["bspline"] if self.result else None
         self.result = None
+        self.manualKept = None
         if self.session is not None:      # the series is in the CT/MR space now: the views show it as it is
             self.session.setRegistration(None, None)
             self.session.resetManual()
@@ -1763,12 +1792,18 @@ class DynamicPETRegistrationWidget(ScriptedLoadableModuleWidget, VTKObservationM
 
     # --- scene ---------------------------------------------------------------------------------
     def enter(self):
-        self.selectInputs()
-        if self.session is None and self._inputsReady():
-            self.onOpen()
+        # entering the module can ask to open the layout more than once: Review/Edit kept open is asked about once
+        self._reviewEditKept = False
+        try:
+            self.selectInputs()
+            if self.session is None and self._inputsReady():
+                self.onOpen()
+        finally:
+            self._reviewEditKept = None
 
     def exit(self):
-        """Leaving the module: close the layout (the pending registration is kept for when you come back)."""
+        """Leaving the module: close the layout (the pending registration and manual correction are kept for when
+        you come back)."""
         if self.session is not None:
             self.onClose()
             slicer.app.layoutManager().setLayout(slicer.vtkMRMLLayoutNode.SlicerLayoutFourUpView)
@@ -1783,10 +1818,12 @@ class DynamicPETRegistrationWidget(ScriptedLoadableModuleWidget, VTKObservationM
         self.result = None
         self.undo = None
         self.hardened = False
+        self.manualKept = None
 
     @vtk.calldata_type(vtk.VTK_OBJECT)
     def onNodeRemoved(self, caller, event, node):
-        if self.session is not None and node in (self.sequenceSelector.currentNode(), self.fixedSelector.currentNode()):
+        if self.session is not None and node in (self.sequenceSelector.currentNode(), self.fixedSelector.currentNode(),
+                                                 self.session.fixed):
             qt.QTimer.singleShot(0, self.onClose)
 
 

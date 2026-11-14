@@ -366,11 +366,18 @@ def arrangeFrames(datasets, kind=None):
     noun, word = ("gates", "gate") if kind == GATED else ("time frames", "frame")
     warnings = []
     expected = expectedFrames(datasets[0], kind)
+    depths = {}   # id(dataset) -> depth along the normal, read from the header once per image
+
+    def depthOf(ds):
+        key = id(ds)
+        if key not in depths:
+            depths[key] = _depth(ds, normal)
+        return depths[key]
 
     def withoutDuplicates(frame, label):
         seen, kept = set(), []
-        for ds in sorted(frame, key=lambda d: (_depth(d, normal), _float(_value(d, "InstanceNumber"), 0))):
-            depth = round(_depth(ds, normal), 2)
+        for ds in sorted(frame, key=lambda d: (depthOf(d), _float(_value(d, "InstanceNumber"), 0))):
+            depth = round(depthOf(ds), 2)
             if depth in seen:
                 continue
             seen.add(depth)
@@ -389,7 +396,7 @@ def arrangeFrames(datasets, kind=None):
             if result is None:
                 continue
             frames, method, numbers = result
-            duplicates = sum(len(f) - len({round(_depth(ds, normal), 2) for ds in f}) for f in frames)
+            duplicates = sum(len(f) - len({round(depthOf(ds), 2) for ds in f}) for f in frames)
             if duplicates == 0:
                 best = result
                 break
@@ -407,15 +414,16 @@ def arrangeFrames(datasets, kind=None):
             warnings.append(f"{len(frames)} {noun} found, the header says {expected}")
 
     nominal = _float(_value(datasets[0], "SpacingBetweenSlices"))
-    grid, problem = sliceGrid([_depth(ds, normal) for f in frames for ds in f], nominal)
+    grid, problem = sliceGrid([depthOf(ds) for f in frames for ds in f], nominal)
     if problem:
         warnings.append(problem.capitalize() + "; the volume is built with the median spacing, distances "
                         "along the slices may be off")
     slots, gaps = [], {}
+    gridArray = np.asarray(grid, dtype=float)
     for frame, number in zip(frames, numbers):
         row = [None] * len(grid)
         for ds in frame:
-            k = int(np.argmin([abs(_depth(ds, normal) - g) for g in grid]))
+            k = int(np.argmin(np.abs(depthOf(ds) - gridArray)))   # nearest grid place, first one on a tie
             row[k] = ds
         slots.append(row)
         empty = [k + 1 for k, ds in enumerate(row) if ds is None]
@@ -441,7 +449,7 @@ def arrangeFrames(datasets, kind=None):
     if announced > len(grid):
         warnings.append(f"{len(grid)} slice positions found, the header says {announced} (slices missing at "
                         "the ends of the stack cannot be placed)")
-    frames = [sorted(f, key=lambda ds: _depth(ds, normal)) for f in frames]
+    frames = [sorted(f, key=depthOf) for f in frames]
     return {"frames": frames, "slots": slots, "grid": grid, "numbers": numbers, "method": method,
             "warnings": warnings}
 
@@ -525,6 +533,19 @@ def frameArray(sortedSlices, scale=1.0, interpolate=True):
     if interpolate:
         array = fillSliceGaps(array, presentSlices(sortedSlices))
     return (array * scale).astype(np.float32)
+
+
+def releasePixels(datasets):
+    """Drop the pixel data of images already read into a frame array (and pydicom's decoded copy of it), so
+    loading a long series does not hold every image's pixels until the end. The headers stay; None entries
+    (missing slices) are skipped."""
+    for ds in datasets:
+        if ds is None:
+            continue
+        if "PixelData" in ds:
+            del ds.PixelData
+        if getattr(ds, "_pixel_array", None) is not None:
+            ds._pixel_array = None
 
 
 def presentSlices(slots):
@@ -718,7 +739,7 @@ def acquisitionInfo(datasets):
         info["RadionuclidePositronFraction"] = _numberText(_value(radio, "RadionuclidePositronFraction"))
         info["InjectedDoseMBq"] = _numberText(_float(_value(radio, "RadionuclideTotalDose")) / 1e6
                                               if _float(_value(radio, "RadionuclideTotalDose")) else None)
-        injection = _injectionTime(first, radio)
+        injection = _injectionTime(first, radio, start)
         info["InjectionTime"] = injection.isoformat() if injection else ""
         info["InjectionToScanStartS"] = _numberText(_seconds(start, injection))
     info.update(radiopharmaceuticalInfo(first))
@@ -737,13 +758,19 @@ def _numberText(value, digits=6):
     return f"{number:.{digits}g}"
 
 
-def _injectionTime(first, radio):
+def _injectionTime(first, radio, scanStart=None):
+    """Injection date and time: Radiopharmaceutical Start DateTime, else the series (study) date with the
+    Radiopharmaceutical Start Time. With a time alone that falls after scanStart, the injection was the day before
+    (a scan past midnight; the series date is the scan's day), as QIBA recommends."""
     if radio is None:
         return None
     injection = parseDateTime(_value(radio, "RadiopharmaceuticalStartDateTime"))
     if injection is None:
         injection = parseDateTime(_value(first, "SeriesDate") or _value(first, "StudyDate"),
                                   _value(radio, "RadiopharmaceuticalStartTime"))
+        if injection is not None and scanStart is not None and \
+                scanStart < injection <= scanStart + datetime.timedelta(days=1):
+            injection -= datetime.timedelta(days=1)
     return injection
 
 
@@ -780,10 +807,12 @@ def suvInfo(datasets, frameStarts=None, decayCorrectedTo=None):
         units           DICOM Units (0054,1001)
         and the inputs (WeightKg, InjectedDoseBq, DecayedDoseBq, InjectionTime, ScanStart, HalfLifeS,
         DecayCorrection, DecayReference, SUVSource) for the node attributes,
-        problems        why SUV is not available (list of text)."""
+        problems        why SUV is not available (list of text),
+        notes           assumptions made on the way that do not stop SUV (list of text)."""
     first = datasets[0]
     units = str(_value(first, "Units", "") or "").strip().upper()
-    info = {"units": units, "activityScale": None, "suvScale": None, "frameSuvScales": None, "problems": []}
+    info = {"units": units, "activityScale": None, "suvScale": None, "frameSuvScales": None, "problems": [],
+            "notes": []}
     height = _float(_value(first, "PatientSize"))
     info.update(PatientWeightKg=_float(_value(first, "PatientWeight")),
                 PatientHeightCm=height * 100.0 if height and height > 0 else None,
@@ -810,7 +839,7 @@ def suvInfo(datasets, frameStarts=None, decayCorrectedTo=None):
         return info
     info["activityScale"] = 1.0
     if not units:
-        info["problems"].append("Units (0054,1001) missing, assumed Bq/ml")
+        info["notes"].append("Units (0054,1001) missing, assumed Bq/ml")
 
     weight = _float(_value(first, "PatientWeight"))
     if not weight or weight <= 0:
@@ -818,7 +847,7 @@ def suvInfo(datasets, frameStarts=None, decayCorrectedTo=None):
     radio = _radiopharmaceutical(first)
     dose = _float(_value(radio, "RadionuclideTotalDose")) if radio is not None else None
     halfLife = _float(_value(radio, "RadionuclideHalfLife")) if radio is not None else None
-    injection = _injectionTime(first, radio)
+    injection = _injectionTime(first, radio)       # the scan start is known below (a time alone past midnight)
     source = "Radiopharmaceutical Information Sequence"
     if not dose:
         # GE's own record of the measured tracer activity, MBq, and when it was measured
@@ -849,6 +878,8 @@ def suvInfo(datasets, frameStarts=None, decayCorrectedTo=None):
                     reference = "start of each frame (images not decay corrected)"
             else:
                 start, reference = scanStart(datasets)
+            if source == "Radiopharmaceutical Information Sequence" and start is not None:
+                injection = _injectionTime(first, radio, start)
             if injection is None:
                 info["problems"].append("injection time missing")
             elif start is None:
@@ -942,6 +973,8 @@ def suvAttributes(suv):
             out[key] = value if isinstance(value, str) else f"{value:.6g}"
     if suv["problems"]:
         out["SUVProblems"] = "; ".join(suv["problems"])
+    if suv.get("notes"):
+        out["SUVNotes"] = "; ".join(suv["notes"])
     return out
 
 

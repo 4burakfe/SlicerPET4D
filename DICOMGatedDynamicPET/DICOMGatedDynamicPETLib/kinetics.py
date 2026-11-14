@@ -330,17 +330,39 @@ class SampledInput:
         return np.interp(self.frames.mid, self._grid, cumulative)
 
 
+def _curveDelimiter(text):
+    """Column separator of a curve file: ; (as Excel writes CSV where the decimal mark is a comma, e.g. Turkish),
+    tab, else comma or space as the csv sniffer finds it."""
+    sample = text[:4096]
+    for delimiter in (";", "\t"):
+        if delimiter in sample:
+            return delimiter
+    try:
+        return csv.Sniffer().sniff(sample, delimiters=", ").delimiter
+    except csv.Error:
+        return ","
+
+
 def readCurveCsv(text, timeUnit="s"):
     """(times in minutes, values) of a two-column CSV / TSV text (time, value); a header line and other columns are
-    skipped. timeUnit "s" or "min" (a header naming min / s wins)."""
+    skipped. timeUnit "s" or "min" (a header naming min / s wins). With ; or tab between the columns a decimal
+    comma (1,5) is read as a decimal point."""
     rows = []
-    dialect = csv.Sniffer().sniff(text[:2048], delimiters=",;\t ") if text.strip() else csv.excel
-    for row in csv.reader(io.StringIO(text), dialect):
+    delimiter = _curveDelimiter(text)
+
+    def number(cell):
+        return float(cell.replace(",", ".") if delimiter != "," else cell)
+
+    try:
+        lines = list(csv.reader(io.StringIO(text), delimiter=delimiter))
+    except csv.Error as error:
+        raise ValueError(f"The curve file cannot be read: {error}")
+    for row in lines:
         cells = [c.strip() for c in row if c.strip()]
         if len(cells) < 2:
             continue
         try:
-            rows.append((float(cells[0]), float(cells[1])))
+            rows.append((number(cells[0]), number(cells[1])))
         except ValueError:
             header = cells[0].lower()
             if not rows:

@@ -39,3 +39,25 @@ def test_rigid_then_deformable_chain():
         residual = reg.residualField(result["displacement"], result["fieldIjkToWorld"], m)
         assert residual.shape == result["displacement"].shape
         assert reg.fieldStats(residual)["max"] < 10.0
+
+
+def test_registration_methods_are_released():
+    """The iteration callback and the registration method hold each other through a C++ command; register() must
+    break that cycle, or every run leaks its methods with their images."""
+    import gc
+
+    def live():
+        gc.collect()
+        return sum(1 for o in gc.get_objects() if type(o).__name__ == "ImageRegistrationMethod")
+
+    spacing = 4.0
+    shape = (24, 28, 28)
+    matrix = np.diag([spacing, spacing, spacing, 1.0])
+    fixed = phantom(shape, spacing, (56, 56, 48))
+    moving = phantom(shape, spacing, (60, 54, 48))
+    before = live()
+    for _ in range(3):
+        SR.register(SR.ImageInput(fixed, matrix), SR.ImageInput(moving, matrix, SR.KIND_FUNCTIONAL), None,
+                    SR.RIGID, spacing, "Fast", None, "current", deformable=True, gridSpacingMm=50.0, passes=1,
+                    fieldGeometry=(shape, matrix))
+    assert live() == before
